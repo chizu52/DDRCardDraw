@@ -21,7 +21,12 @@ import { CardLabel, LabelType } from "./card-label";
 import { FillPlaceholderList, ActionMenu } from "./acton-menu";
 import styles from "./song-card.css";
 import { useAppDispatch } from "../state/store";
-import { createPickBanPocket, createRedrawChart } from "../state/thunks";
+import {
+  createPickBanPocket,
+  createRedrawChart,
+  createPackVeto,
+  createTiebreaker,
+} from "../state/thunks";
 import { getJacketUrl } from "../utils/jackets";
 import { drawingsSlice } from "../state/drawings.slice";
 import { copyTextToClipboard } from "../utils/share";
@@ -35,6 +40,8 @@ interface IconCallbacks {
   onVeto: (p: PlayerId) => void;
   onProtect: (p: PlayerId) => void;
   onReplace: (p: PlayerId, chart: EligibleChart) => void;
+  onPackVeto: (p: PlayerId) => void;
+  onTiebreaker: () => void;
   onRedraw: () => void;
   onReset: () => void;
   onSetWinner: (p: PlayerId | null) => void;
@@ -48,6 +55,7 @@ export interface SongCardProps {
   replacedBy?: PlayerId;
   winner?: PlayerId | null;
   replacedWith?: EligibleChart;
+  isTiebreaker?: boolean;
   actionsEnabled?: boolean;
 }
 
@@ -73,6 +81,12 @@ function useIconCallbacksForChart(chartId: string): IconCallbacks {
       onVeto: handleBanPickPocket.bind(undefined, "ban"),
       onProtect: handleBanPickPocket.bind(undefined, "protect"),
       onReplace: handleBanPickPocket.bind(undefined, "pocket"),
+      onTiebreaker: () => {
+        dispatch(createTiebreaker(drawingId, chartId));
+      },
+      onPackVeto: (player: string) => {
+        dispatch(createPackVeto(drawingId, chartId, player));
+      },
       onRedraw: () => {
         dispatch(createRedrawChart(drawingId, chartId));
       },
@@ -87,6 +101,26 @@ function useIconCallbacksForChart(chartId: string): IconCallbacks {
   );
 }
 
+function useRecentAction(timestamp: number | undefined, durationMs: number) {
+  const [justChanged, setJustChanged] = useState(false);
+  useEffect(() => {
+    if (!timestamp) {
+      setJustChanged(false);
+      return;
+    }
+    const elapsed = Date.now() - timestamp;
+    const remaining = durationMs - elapsed;
+    if (remaining <= 0) {
+      setJustChanged(false);
+      return;
+    }
+    setJustChanged(true);
+    const t = setTimeout(() => setJustChanged(false), remaining);
+    return () => clearTimeout(t);
+  }, [timestamp, durationMs]);
+  return justChanged;
+}
+
 export function SongCardBase(props: Props) {
   const {
     chart,
@@ -95,6 +129,7 @@ export function SongCardBase(props: Props) {
     replacedBy,
     replacedWith,
     winner,
+    isTiebreaker,
     actionsEnabled,
     CenterContent,
     FooterContent,
@@ -128,7 +163,8 @@ export function SongCardBase(props: Props) {
   const hasLabel = !!(
     vetoedBy !== undefined ||
     protectedBy !== undefined ||
-    replacedBy !== undefined
+    replacedBy !== undefined ||
+    isTiebreaker
   );
   const hasWinner = typeof winner === "number";
 
@@ -138,6 +174,10 @@ export function SongCardBase(props: Props) {
   }
 
   const iconCallbacks = useIconCallbacksForChart((chart as DrawnChart).id);
+  const actionTimestamp = useDrawing(
+    (d) => d.actionTimestamps?.[(chart as DrawnChart).id],
+  );
+  const justChanged = useRecentAction(actionTimestamp, 1200);
   const handleCopy = useCallback(async () => {
     if (!diffAbbr) {
       return;
@@ -163,6 +203,8 @@ export function SongCardBase(props: Props) {
           onProtect={iconCallbacks.onProtect}
           onStartPocketPick={setPocketPickPendingForPlayer}
           onVeto={iconCallbacks.onVeto}
+          onPackVeto={iconCallbacks.onPackVeto}
+          onTiebreaker={iconCallbacks.onTiebreaker}
           onRedraw={iconCallbacks.onRedraw}
           onSetWinner={iconCallbacks.onSetWinner}
           onCopy={handleCopy}
@@ -183,6 +225,12 @@ export function SongCardBase(props: Props) {
     [styles.protected]: protectedBy !== undefined,
     [styles.replaced]: replacedBy !== undefined && !baseChartIsPlaceholder,
     [styles.picked]: replacedBy !== undefined && baseChartIsPlaceholder,
+    [styles.tiebreaker]: !!isTiebreaker,
+    [styles.justProtected]: justChanged && protectedBy !== undefined,
+    [styles.justVetoed]: justChanged && vetoedBy !== undefined,
+    [styles.justReplaced]:
+      justChanged && replacedBy !== undefined && !baseChartIsPlaceholder,
+    [styles.justTiebreaker]: justChanged && !!isTiebreaker,
     [styles.clickable]: !!menuContent || !!props.onClick || canCopy,
     [styles.hideVeto]: hideVetos,
     [styles.randomSelected]: wasRandomlySelected,
@@ -210,6 +258,13 @@ export function SongCardBase(props: Props) {
         <CardLabel
           playerId={replacedBy}
           type={baseChartIsPlaceholder ? LabelType.FreePick : LabelType.Pocket}
+          onRemove={iconCallbacks?.onReset}
+        />
+      )}
+      {isTiebreaker && (
+        <CardLabel
+          label="Tiebreaker"
+          type={LabelType.Tiebreaker}
           onRemove={iconCallbacks?.onReset}
         />
       )}

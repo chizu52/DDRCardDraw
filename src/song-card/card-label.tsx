@@ -8,24 +8,24 @@ import {
   Lock,
   Crown,
   Draw,
+  Star,
   SVGIconProps,
 } from "@blueprintjs/icons";
 import { usePlayerLabelForId } from "./use-player-label";
-
 export enum LabelType {
   Protect = 1,
   Ban,
   Pocket,
   Winner,
   FreePick,
+  Tiebreaker,
 }
-
 interface Props {
-  playerId: string;
+  playerId?: string;
+  label?: string;
   type: LabelType;
   onRemove?: () => void;
 }
-
 function getIntent(type: LabelType) {
   switch (type) {
     case LabelType.Pocket:
@@ -38,9 +38,10 @@ function getIntent(type: LabelType) {
       return Intent.WARNING;
     case LabelType.FreePick:
       return Intent.NONE;
+    case LabelType.Tiebreaker:
+      return Intent.WARNING;
   }
 }
-
 function LabelIcon({ type, ...props }: SVGIconProps & { type: LabelType }) {
   switch (type) {
     case LabelType.Pocket:
@@ -53,16 +54,16 @@ function LabelIcon({ type, ...props }: SVGIconProps & { type: LabelType }) {
       return <Crown {...props} />;
     case LabelType.FreePick:
       return <Draw {...props} />;
+    case LabelType.Tiebreaker:
+      return <Star {...props} />;
   }
 }
-
-export function CardLabel({ playerId, type, onRemove }: Props) {
-  const label = usePlayerLabelForId(playerId);
-
+export function CardLabel({ playerId, label: labelOverride, type, onRemove }: Props) {
+  const resolvedPlayerLabel = usePlayerLabelForId(playerId || "");
+  const label = labelOverride ?? resolvedPlayerLabel;
   const rootClassname = classNames(styles.cardLabel, {
     [styles.winner]: type === LabelType.Winner,
   });
-
   return (
     <div className={rootClassname}>
       <Tag

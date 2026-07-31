@@ -154,6 +154,13 @@ const router = createBrowserRouter([
         },
       },
       {
+        path: "special-picks",
+        lazy: async () => {
+          const { CabSpecialPicks } = await import("./obs-sources/cards");
+          return { Component: CabSpecialPicks };
+        },
+      },
+      {
         path: "phase",
         lazy: async () => {
           const { PhaseName } = await import("./obs-sources/text");

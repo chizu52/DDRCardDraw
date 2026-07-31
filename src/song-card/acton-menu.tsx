@@ -8,32 +8,34 @@ import {
   Refresh,
   Clipboard,
   Draw,
+  Star,
+  ArrowsVertical,
 } from "@blueprintjs/icons";
 import { Menu, MenuItem, MenuDivider } from "@blueprintjs/core";
 import { useDrawing } from "../drawing-context";
 import { JSX } from "react";
-
 interface Props {
   onStartPocketPick?: (p: string) => void;
   onVeto?: (p: string) => void;
+  onPackVeto?: (p: string) => void;
   onProtect?: (p: string) => void;
+  onTiebreaker?: () => void;
   onRedraw?: () => void;
   onSetWinner?: (p: string | null) => void;
   onCopy?: () => void;
 }
-
 export function ActionMenu(props: Props) {
   const {
     onStartPocketPick,
     onVeto,
     onProtect,
+    onPackVeto,
+    onTiebreaker,
     onRedraw,
     onSetWinner,
     onCopy,
   } = props;
-
   const { t } = useIntl();
-
   return (
     <Menu>
       {onProtect && (
@@ -55,6 +57,20 @@ export function ActionMenu(props: Props) {
           icon={<BanCircle />}
           text={t("songAction.ban")}
           onClick={onVeto}
+        />
+      )}
+      {onPackVeto && (
+        <PlayerList
+          icon={<ArrowsVertical />}
+          text="Pack Veto"
+          onClick={onPackVeto}
+        />
+      )}
+      {onTiebreaker && (
+        <MenuItem
+          icon={<Star />}
+          text="Tiebreaker"
+          onClick={onTiebreaker}
         />
       )}
       {onSetWinner && (
@@ -84,7 +100,6 @@ export function ActionMenu(props: Props) {
     </Menu>
   );
 }
-
 export function FillPlaceholderList(props: {
   onFillPlaceholder(p: string): void;
 }) {
@@ -102,13 +117,11 @@ export function FillPlaceholderList(props: {
     </Menu>
   );
 }
-
 interface IconRowProps {
   icon: JSX.Element;
   text: string;
   onClick: (p: string) => void;
 }
-
 function PlayerList({ icon, text, onClick }: IconRowProps) {
   const players = useDrawing((d) => d.meta.players);
   return (

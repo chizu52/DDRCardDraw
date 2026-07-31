@@ -72,6 +72,9 @@ export function createDraw(
       bans: {},
       protects: {},
       pocketPicks: {},
+      tiebreakers: {},
+      pickOrder: [],
+      actionTimestamps: {},
       meta: drawMeta.meta,
       configId,
       subDrawings: { [setId]: mainDraw },
@@ -334,6 +337,51 @@ export function createPickBanPocket(
     if (action) {
       dispatch(action);
     }
+  };
+}
+export function createPackVeto(
+  drawingId: CompoundSetId,
+  chartId: string,
+  player: string,
+): AppThunk {
+  return (dispatch, getState) => {
+    const state = getState();
+    const [parent, target] = getDrawingFromCompoundId(state.drawings, drawingId);
+    if (!parent || !target) {
+      return;
+    }
+    const columnIndex = target.charts.findIndex((c) => c.id === chartId);
+    if (columnIndex === -1) {
+      return;
+    }
+    const reorder = !!configSlice.selectors.selectById(state, target.configId)
+      ?.orderByAction;
+
+    for (const subDraw of Object.values(parent.subDrawings)) {
+      const columnChart = subDraw.charts[columnIndex];
+      if (!columnChart || columnChart.type === CHART_PLACEHOLDER) {
+        continue;
+      }
+      dispatch(
+        drawingsSlice.actions.banProtectReplace({
+          drawingId: subDraw.compoundId,
+          chartId: columnChart.id,
+          type: "ban",
+          player,
+          reorder,
+        }),
+      );
+    }
+  };
+}
+export function createTiebreaker(
+  drawingId: CompoundSetId,
+  chartId: string,
+): AppThunk {
+  return (dispatch) => {
+    dispatch(
+      drawingsSlice.actions.setTiebreaker({ drawingId, chartId, value: true }),
+    );
   };
 }
 

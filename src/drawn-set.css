@@ -3,17 +3,30 @@
   padding: 10px;
   overflow: hidden;
   flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: center;
 }
-
+.chartList::before {
+  content: "";
+  order: 2;
+  flex-basis: 100%;
+  height: 0;
+}
 .drawing {
   position: relative;
 }
-
 .drawing[data-focused] {
   outline: 2px inset red;
   outline-offset: -2px;
 }
-
 body:global(.obs-layer) .drawing {
   background-image: none !important;
+}
+.specialPicksSource {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  flex-shrink: 0;
 }

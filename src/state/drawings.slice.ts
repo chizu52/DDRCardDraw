@@ -25,18 +25,9 @@ export const drawingsAdapter = createEntityAdapter<Drawing>({});
 /** payload is the drawing id */
 type ActionOnSingleDrawing = PayloadAction<string>;
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-type ActionOnSingleChart<extra extends object = {}> = PayloadAction<
-  { drawingId: CompoundSetId; chartId: string } & extra
->;
+type ActionOnSingleChart<extra extends object = {}> = PayloadAction<{ drawingId: CompoundSetId; chartId: string } & extra>;
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-type PlayerActionOnChartPayload<extra extends object = {}> = PayloadAction<
-  {
-    drawingId: CompoundSetId;
-    chartId: string;
-    player: string;
-    reorder: boolean;
-  } & extra
->;
+type PlayerActionOnChartPayload<extra extends object = {}> = PayloadAction<{ drawingId: CompoundSetId; chartId: string; player: string; reorder: boolean } & extra>;
 
 export const drawingsSlice = createSlice({
   name: "drawings",
@@ -58,16 +49,14 @@ export const drawingsSlice = createSlice({
           delete drawing.pocketPicks[chart.id];
           delete drawing.bans[chart.id];
           delete drawing.protects[chart.id];
+          delete drawing.tiebreakers[chart.id];
         }
       }
     },
     clearDrawings: drawingsAdapter.removeAll,
     addOneChart(
       state,
-      action: PayloadAction<{
-        drawingId: CompoundSetId;
-        chart: DrawnChart | PlayerPickPlaceholder;
-      }>,
+      action: PayloadAction<{ drawingId: CompoundSetId; chart: DrawnChart | PlayerPickPlaceholder }>,
     ) {
       const [, target] = getDrawingFromCompoundId(
         state,
@@ -77,11 +66,7 @@ export const drawingsSlice = createSlice({
     },
     updateOneChart(
       state,
-      action: PayloadAction<{
-        drawingId: CompoundSetId;
-        chartId: string;
-        changes: Partial<DrawnChart>;
-      }>,
+      action: PayloadAction<{ drawingId: CompoundSetId; chartId: string; changes: Partial<DrawnChart> }>,
     ) {
       const [, target] = getDrawingFromCompoundId(
         state,
@@ -93,20 +78,9 @@ export const drawingsSlice = createSlice({
       }
       Object.assign(chart, action.payload.changes);
     },
-    /**
-     * Persist edits from the "edit title & players" dialog (rename/reorder/
-     * add/remove). Because players carry stable ids, reordering and renaming
-     * need no fixup; removing a player just means dropping the card actions
-     * (winners, bans, protects, pocket picks) that still reference its
-     * now-absent id.
-     */
     updatePlayers(
       state,
-      action: PayloadAction<{
-        id: string;
-        title: string;
-        players: Player[];
-      }>,
+      action: PayloadAction<{ id: string; title: string; players: Player[] }>,
     ) {
       const { id, title, players } = action.payload;
       const drawing = state.entities[id];
@@ -134,7 +108,6 @@ export const drawingsSlice = createSlice({
         }
       }
 
-      // drop the priority player if they were removed from the roster
       if (drawing.priorityPlayer && !remainingIds.has(drawing.priorityPlayer)) {
         drawing.priorityPlayer = undefined;
       }
@@ -156,7 +129,6 @@ export const drawingsSlice = createSlice({
       if (!drawing) {
         return;
       }
-      // cycle: nobody -> first player -> ... -> last player -> nobody
       const players = drawing.meta.players;
       const currentIndex = drawing.priorityPlayer
         ? players.findIndex((p) => p.id === drawing.priorityPlayer)
@@ -167,22 +139,17 @@ export const drawingsSlice = createSlice({
     resetChart(state, action: ActionOnSingleChart) {
       const { chartId, drawingId } = action.payload;
       const [drawing] = getDrawingFromCompoundId(state, drawingId);
-      if (!drawing) {
-        return;
-      }
-      // Note: the winner is intentionally left untouched here. A chart can
-      // have both an action (protect/pocket/ban) and a marked winner at the
-      // same time, and removing the action should not clear the winner. The
-      // winner is removed via its own control (setWinner with player: null).
+      if (!drawing) return;
       delete drawing.bans[chartId];
       delete drawing.protects[chartId];
       delete drawing.pocketPicks[chartId];
+      delete drawing.tiebreakers[chartId];
+      delete drawing.actionTimestamps[chartId];
+      drawing.pickOrder = (drawing.pickOrder || []).filter((id) => id !== chartId);
     },
     banProtectReplace(
       state,
-      action: PlayerActionOnChartPayload<
-        { type: "ban" | "protect" } | { type: "pocket"; pick: EligibleChart }
-      >,
+      action: PlayerActionOnChartPayload<{ type: "ban" | "protect" } | { type: "pocket"; pick: EligibleChart }>,
     ) {
       const { chartId, drawingId, player, reorder } = action.payload;
       const [drawing, target] = getDrawingFromCompoundId(state, drawingId);
@@ -192,38 +159,45 @@ export const drawingsSlice = createSlice({
       const playerAction: PlayerActionOnChart = { chartId, player };
       if (action.payload.type === "ban") {
         if (reorder) {
-          target.charts = moveChartInArray(
-            drawing,
-            target.charts,
-            chartId,
-            "end",
-          );
+          target.charts = moveChartInArray(drawing, target.charts, chartId, "end");
         }
         drawing.bans[chartId] = playerAction;
+        if (!drawing.actionTimestamps) drawing.actionTimestamps = {};
+        drawing.actionTimestamps[chartId] = Date.now();
       } else if (action.payload.type === "protect") {
         if (reorder) {
-          target.charts = moveChartInArray(
-            drawing,
-            target.charts,
-            chartId,
-            "start",
-          );
+          target.charts = moveChartInArray(drawing, target.charts, chartId, "start");
         }
         drawing.protects[chartId] = playerAction;
+        if (!drawing.pickOrder) drawing.pickOrder = [];
+        if (!drawing.pickOrder.includes(chartId)) drawing.pickOrder.push(chartId);
+        if (!drawing.actionTimestamps) drawing.actionTimestamps = {};
+        drawing.actionTimestamps[chartId] = Date.now();
       } else if (action.payload.type === "pocket") {
         if (reorder) {
-          target.charts = moveChartInArray(
-            drawing,
-            target.charts,
-            chartId,
-            "start",
-          );
+          target.charts = moveChartInArray(drawing, target.charts, chartId, "start");
         }
-        drawing.pocketPicks[chartId] = {
-          chartId,
-          player,
-          pick: action.payload.pick,
-        };
+        drawing.pocketPicks[chartId] = { chartId, player, pick: action.payload.pick };
+        if (!drawing.pickOrder) drawing.pickOrder = [];
+        if (!drawing.pickOrder.includes(chartId)) drawing.pickOrder.push(chartId);
+        if (!drawing.actionTimestamps) drawing.actionTimestamps = {};
+        drawing.actionTimestamps[chartId] = Date.now();
+      }
+    },
+    setTiebreaker(state, action: ActionOnSingleChart<{ value: boolean }>) {
+      const { chartId, drawingId, value } = action.payload;
+      const [drawing] = getDrawingFromCompoundId(state, drawingId);
+      if (!drawing) return;
+      if (!drawing.tiebreakers) drawing.tiebreakers = {};
+      if (value) {
+        drawing.tiebreakers[chartId] = true;
+        if (!drawing.pickOrder) drawing.pickOrder = [];
+        if (!drawing.pickOrder.includes(chartId)) drawing.pickOrder.push(chartId);
+        if (!drawing.actionTimestamps) drawing.actionTimestamps = {};
+        drawing.actionTimestamps[chartId] = Date.now();
+      } else {
+        delete drawing.tiebreakers[chartId];
+        drawing.pickOrder = (drawing.pickOrder || []).filter((id) => id !== chartId);
       }
     },
     setWinner(state, action: ActionOnSingleChart<{ player: string | null }>) {
@@ -240,12 +214,7 @@ export const drawingsSlice = createSlice({
     },
     addPlayerScore(
       state,
-      action: PayloadAction<{
-        drawingId: CompoundSetId;
-        chartId: string;
-        playerId: string;
-        score: number;
-      }>,
+      action: PayloadAction<{ drawingId: CompoundSetId; chartId: string; playerId: string; score: number }>,
     ) {
       const { drawingId, playerId, chartId, score } = action.payload;
       const [mainId] = drawingId;
@@ -280,21 +249,18 @@ export const drawingsSlice = createSlice({
     },
     updateCharts(
       state,
-      action: PayloadAction<{
-        drawId: CompoundSetId;
-        newCharts: SubDrawing["charts"];
-      }>,
+      action: PayloadAction<{ drawId: CompoundSetId; newCharts: SubDrawing["charts"] }>,
     ) {
       const { newCharts, drawId } = action.payload;
       const [parent, target] = getDrawingFromCompoundId(state, drawId);
-      // cleanup charts being removed
       for (const chart of target.charts) {
         if (!newCharts.some((c) => c.id === chart.id)) {
-          // `chart` is not in the new set, so we should remove
           delete parent.winners[chart.id];
           delete parent.bans[chart.id];
           delete parent.pocketPicks[chart.id];
           delete parent.protects[chart.id];
+          delete parent.tiebreakers[chart.id];
+          delete parent.actionTimestamps[chart.id];
         }
       }
       target.charts = newCharts;
@@ -339,7 +305,6 @@ export const drawingSelectors = drawingsAdapter.getSelectors(
 
 type StateOfSlice<S> = S extends Slice<infer State> ? State : never;
 
-/** one-time migration for old data. mutates state */
 export function migrateToSubdraws(state: StateOfSlice<typeof drawingsSlice>) {
   for (const id of state.ids) {
     const parent = state.entities[id];
@@ -365,55 +330,28 @@ export function migrateToSubdraws(state: StateOfSlice<typeof drawingsSlice>) {
   }
 }
 
-/**
- * one-time migration from the old player model to the current one. The old
- * model gave players plain string names (simple) or a `meta.entrants` array
- * (startgg), kept display order in a separate `playerDisplayOrder` field, and
- * referenced players by numeric index in `playerDisplayOrder`/`winners`/action
- * `player`. The new model gives every player a stable id under `meta.players`,
- * stores that array directly in display order, and references players by id.
- *
- * The presence of a `playerDisplayOrder` field marks a drawing still in an old
- * shape, so this is idempotent (already-migrated drawings are skipped). mutates
- * state.
- */
 export function migratePlayersToIds(state: StateOfSlice<typeof drawingsSlice>) {
   for (const id of state.ids) {
     const drawing = state.entities[id];
     if (!drawing) {
       continue;
     }
-    // `playerDisplayOrder` no longer exists on the model; its presence means
-    // the drawing predates this migration.
-    const legacyDrawing = drawing as unknown as {
-      playerDisplayOrder?: Array<number | string>;
-      priorityPlayer?: number | string;
-    };
+    const legacyDrawing = drawing as unknown as { playerDisplayOrder?: Array<number | string>; priorityPlayer?: number | string };
     const legacyOrder = legacyDrawing.playerDisplayOrder;
     if (!legacyOrder) {
       continue;
     }
 
-    // startgg used to store players under `entrants`
-    const legacyMeta = drawing.meta as unknown as {
-      players?: Array<string | Player>;
-      entrants?: Player[];
-    };
+    const legacyMeta = drawing.meta as unknown as { players?: Array<string | Player>; entrants?: Player[] };
     const rawPlayers = legacyMeta.players ?? legacyMeta.entrants ?? [];
 
-    // ensure every player is an object carrying a stable id (simple drawings
-    // used to store plain name strings)
     const players: Player[] = rawPlayers.map((p) =>
       typeof p === "string" ? newPlayer(p) : p,
     );
 
-    // legacy references were numeric indices into this (original-order) players
-    // array; normalize both those and any already-id references to a player id.
-    // A dangling index yields undefined, so its reference is dropped.
     const idFor = (ref: number | string): string | undefined =>
       typeof ref === "number" ? players[ref]?.id : ref;
 
-    // fold the separate display order into the players array order
     const byId = new Map(players.map((p) => [p.id, p]));
     const ordered: Player[] = [];
     for (const ref of legacyOrder) {
@@ -423,17 +361,13 @@ export function migratePlayersToIds(state: StateOfSlice<typeof drawingsSlice>) {
         byId.delete(player.id);
       }
     }
-    // append any players not referenced by the display order (defensive)
     ordered.push(...byId.values());
 
     drawing.meta.players = ordered;
     delete legacyMeta.entrants;
     delete legacyDrawing.playerDisplayOrder;
 
-    const legacyWinners = drawing.winners as Record<
-      string,
-      number | string | null
-    >;
+    const legacyWinners = drawing.winners as Record<string, number | string | null>;
     for (const [chartId, val] of Object.entries(legacyWinners)) {
       if (val === null) {
         continue;
@@ -465,7 +399,6 @@ export function migratePlayersToIds(state: StateOfSlice<typeof drawingsSlice>) {
       }
     }
 
-    // priorityPlayer was a 1-based display position; resolve it to a player id
     const priority = legacyDrawing.priorityPlayer;
     if (typeof priority === "number") {
       drawing.priorityPlayer = ordered[priority - 1]?.id;

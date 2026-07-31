@@ -8,9 +8,7 @@ import { drawingsSlice } from "./state/drawings.slice";
 import { DelayedSpinner } from "./common-components/delayed-spinner";
 import { useIntl } from "./hooks/useIntl";
 import { FormattedMessage } from "react-intl";
-
 const DrawnSetGroup = lazy(() => import("./drawn-set-group"));
-
 const ScrollableDrawings = memo(() => {
   const drawingIds = useDeferredValue(useAppState((s) => s.drawings.ids));
   return (
@@ -23,7 +21,6 @@ const ScrollableDrawings = memo(() => {
     </div>
   );
 });
-
 export function DrawingList(props: { introString?: React.ReactNode }) {
   const { t } = useIntl();
   const hasDrawings = useDeferredValue(

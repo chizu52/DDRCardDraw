@@ -1,7 +1,54 @@
 .drawnSetGroup {
   position: relative;
+  margin-top: 20px;
+  padding-top: 20px;
 }
-
 .drawnSetGroup:not(:first-child) {
   border-top: 2px solid #777;
+}
+.specialRow {
+  display: flex;
+  flex-wrap: wrap;
+  overflow-x: auto;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px 30px;
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  min-height: 20px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 3px solid white;
+  border-radius: 8px;
+  margin-top: 35px;
+  margin-bottom: 15px;
+  position: relative;
+}
+.specialRow::after {
+  content: "Match Songlist";
+  order: -1;
+  flex-basis: 100%;
+  text-align: center;
+  color: white;
+  font-size: 2.1em;
+  font-weight: bold;
+  text-transform: capitalize;
+  letter-spacing: 0.05em;
+  margin-bottom: 30px;
+}
+.specialRow:not(:empty)::before {
+  content: "Special Picks";
+  position: absolute;
+  top: -12px;
+  left: 12px;
+  background: #222;
+  color: gold;
+  font-size: 0.75em;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 4px;
 }

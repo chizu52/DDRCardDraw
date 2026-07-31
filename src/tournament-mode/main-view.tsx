@@ -1,4 +1,4 @@
-import { Tabs, Tab } from "@blueprintjs/core";
+import { Section, SectionCard, Tabs, Tab } from "@blueprintjs/core";
 import { PlayerNamesControls } from "../controls/player-names";
 import { DrawingList } from "../drawing-list";
 import { atom, useAtom } from "jotai";
@@ -7,12 +7,10 @@ import { lazy, Suspense } from "react";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorFallback } from "../utils/error-fallback";
 import { DelayedSpinner } from "../common-components/delayed-spinner";
-
-export type MainTabId = "drawings" | "players" | "sets";
+import { SheetsCredsManager } from "../sheets/sheets-creds-manager";
+export type MainTabId = "drawings" | "players" | "sets" | "sheets";
 export const mainTabAtom = atom<MainTabId>("drawings");
-
 const EligibleChartsList = lazy(() => import("../eligible-charts"));
-
 export function MainView() {
   const [currentTab, setCurrentTab] = useAtom(mainTabAtom);
   return (
@@ -40,6 +38,23 @@ export function MainView() {
       </Tab>
       <Tab id="players" panel={<PlayerNamesControls />}>
         Start.gg Sync
+      </Tab>
+      <Tab
+        id="sheets"
+        panel={
+          <Section
+            title="Google Spreadsheet Credentials"
+            collapsible
+            collapseProps={{ defaultIsOpen: true }}
+            style={{ maxWidth: "50em" }}
+          >
+            <SectionCard>
+              <SheetsCredsManager />
+            </SectionCard>
+          </Section>
+        }
+      >
+        Google Spreadsheet Sync
       </Tab>
     </Tabs>
   );

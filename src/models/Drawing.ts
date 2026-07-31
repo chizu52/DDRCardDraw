@@ -119,14 +119,14 @@ export interface Drawing {
   id: string;
   configId: string;
   meta: SimpleMeta | StartggVersusMeta | StartggGauntletMeta;
-  /** map of song ID to the id of the winning player */
   winners: Record<string, string | null>;
-  /** @deprecated migrating to subDraws */
   charts?: Array<DrawnChart | PlayerPickPlaceholder>;
   bans: Record<string, PlayerActionOnChart | null>;
   protects: Record<string, PlayerActionOnChart | null>;
   pocketPicks: Record<string, PocketPick | null>;
-  /** id of the player who currently has priority, if any */
+  tiebreakers: Record<string, true>;
+  pickOrder: string[];
+  actionTimestamps: Record<string, number>;
   priorityPlayer?: string;
   subDrawings: Record<string, SubDrawing>;
 }

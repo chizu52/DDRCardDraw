@@ -8,6 +8,7 @@ import {
   Popover,
 } from "@blueprintjs/core";
 import {
+  Home,
   Trash,
   InfoSign,
   Menu as MenuIcon,
@@ -27,7 +28,6 @@ import { EventModeGated } from "./common-components/app-mode";
 import { useNavigate, useHref } from "react-router-dom";
 import { DiagnosticsDialog } from "./party/diagnostics-dialog";
 import { useRoomName } from "./hooks/useRoomName";
-
 export function Header({
   heading,
   controls,
@@ -36,9 +36,7 @@ export function Header({
   controls?: JSX.Element;
 }) {
   const inObs = useInObs();
-
   if (inObs) return null;
-
   return (
     <Navbar
       style={{
@@ -68,7 +66,6 @@ export function Header({
     </Navbar>
   );
 }
-
 export function HamburgerMenu() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -76,15 +73,24 @@ export function HamburgerMenu() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const dashHref = useHref("dash", { relative: "route" });
+  const mainHref = useHref("", { relative: "route" });
   const clearDrawings = useCallback(
     () => dispatch(drawingsSlice.actions.clearDrawings()),
     [dispatch],
   );
   const haveDrawings = useAppState(drawingsSlice.selectors.haveDrawings);
   const { t } = useIntl();
-
   const menu = (
     <Menu>
+      <MenuItem
+        icon={<Home />}
+        text="Home"
+        href={mainHref}
+        onClick={(e) => {
+          e.preventDefault();
+          navigate("");
+        }}
+      />
       <MenuItem
         icon={<Control />}
         text="Stream Dashboard"
