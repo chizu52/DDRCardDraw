@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "partykit-backend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["partykit", "dev", "--port", "1999"],
+      "port": 1999
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["start:frontend"],
+      "port": 8080
+    }
+  ]
+}

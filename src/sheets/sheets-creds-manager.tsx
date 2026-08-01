@@ -1,10 +1,11 @@
-import { Button, FormGroup, InputGroup } from "@blueprintjs/core";
+import { Button, ButtonGroup, FormGroup, InputGroup } from "@blueprintjs/core";
 import { useAtom, useAtomValue } from "jotai";
 import React, { ReactNode, useRef, useCallback } from "react";
 import {
   sheetsTokenAtom,
   spreadsheetIdAtom,
   googleClientIdAtom,
+  sheetsApiKeyAtom,
   requestSheetsToken,
 } from "./sheets-export";
 
@@ -22,8 +23,10 @@ export function SheetsCredsManager() {
   const [token, setToken] = useAtom(sheetsTokenAtom);
   const [spreadsheetId, setSpreadsheetId] = useAtom(spreadsheetIdAtom);
   const [clientId, setClientId] = useAtom(googleClientIdAtom);
+  const [apiKey, setApiKey] = useAtom(sheetsApiKeyAtom);
   const clientIdRef = useRef<HTMLInputElement>(null);
   const sheetIdRef = useRef<HTMLInputElement>(null);
+  const apiKeyRef = useRef<HTMLInputElement>(null);
 
   const saveClientId = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
@@ -43,6 +46,15 @@ export function SheetsCredsManager() {
     [setSpreadsheetId],
   );
 
+  const saveApiKey = useCallback(
+    (e: React.FormEvent<HTMLFormElement>) => {
+      e.preventDefault();
+      if (!apiKeyRef.current) return;
+      setApiKey(apiKeyRef.current.value);
+    },
+    [setApiKey],
+  );
+
   const connectGoogle = useCallback(() => {
     if (!clientId) return;
     requestSheetsToken(clientId, (newToken) => {
@@ -55,8 +67,8 @@ export function SheetsCredsManager() {
   return (
     <>
       <p>
-        Google Sheets access is saved locally on this device and never
-        synced with other devices
+        Google Sheets access is saved locally on this device and never synced
+        with other devices
       </p>
       <form onSubmit={saveClientId}>
         <FormGroup
@@ -73,19 +85,21 @@ export function SheetsCredsManager() {
           <InputGroup
             defaultValue={clientId || undefined}
             inputRef={clientIdRef}
-            rightElement={<Button type="submit">Save</Button>}
+            rightElement={
+              <ButtonGroup>
+                <Button type="submit">Save</Button>
+                <Button
+                  disabled={!clientId}
+                  onClick={connectGoogle}
+                  intent={token ? "success" : "primary"}
+                >
+                  {token ? "Connected — reconnect" : "Connect Google Sheets"}
+                </Button>
+              </ButtonGroup>
+            }
           />
         </FormGroup>
       </form>
-      <FormGroup label="Google account access">
-        <Button
-          disabled={!clientId}
-          onClick={connectGoogle}
-          intent={token ? "success" : "primary"}
-        >
-          {token ? "Connected — reconnect" : "Connect Google Sheets"}
-        </Button>
-      </FormGroup>
       <form onSubmit={saveSheetId}>
         <FormGroup
           label={
@@ -100,6 +114,31 @@ export function SheetsCredsManager() {
             disabled={!token}
             defaultValue={spreadsheetId || undefined}
             inputRef={sheetIdRef}
+            rightElement={<Button type="submit">Save</Button>}
+          />
+        </FormGroup>
+      </form>
+      <form onSubmit={saveApiKey}>
+        <FormGroup
+          label={
+            <>
+              {"Sheets read-only API key, optional ("}
+              <a href={consoleLink} target="_blank" rel="noreferrer">
+                create one here
+              </a>
+              {", restricted to just the Sheets API) -- only used by the "}
+              <strong>pool-results OBS overlay</strong>
+              {", so it can show live results without needing the "}
+              {"Google-account popup above (which can't run inside OBS). "}
+              {"Only works against a spreadsheet shared as "}
+              <em>Anyone with the link can view</em>
+              {"."}
+            </>
+          }
+        >
+          <InputGroup
+            defaultValue={apiKey || undefined}
+            inputRef={apiKeyRef}
             rightElement={<Button type="submit">Save</Button>}
           />
         </FormGroup>

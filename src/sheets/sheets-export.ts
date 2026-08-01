@@ -21,6 +21,21 @@ export const googleClientIdAtom = atomWithStorage<string | null>(
   { getOnInit: true },
 );
 
+// A separate, read-only API key -- not the OAuth client ID above. Used
+// only by the pool-results OBS overlay (see sheets-public-read.ts),
+// which can't do the interactive OAuth popup consent flow that the rest
+// of this app's Sheets access relies on (OBS browser sources run
+// headless). Restricted in Google Cloud Console to just the Sheets API,
+// and only ever works against a spreadsheet shared as "Anyone with the
+// link can view" -- it can't write, and can't read anything not already
+// public.
+export const sheetsApiKeyAtom = atomWithStorage<string | null>(
+  "ddrtools.event.sheetsapikey",
+  null,
+  undefined,
+  { getOnInit: true },
+);
+
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
 
 declare global {
@@ -93,6 +108,19 @@ export interface CellColor {
   b: number;
 }
 
+/** Shared by the Matches tab and the pool-results OBS overlay so a pool's
+ * header bar renders the same color in both places -- see readColumnBColors
+ * (OAuth) and sheets-public-read.ts's fetchPublicColumnBColors (API key)
+ * for where the color data itself comes from. */
+export function colorToCss(c: CellColor | null | undefined): string {
+  if (!c) return "#f5f5f5";
+  const darken = 0.8;
+  const r = Math.round(c.r * 255 * darken);
+  const g = Math.round(c.g * 255 * darken);
+  const b = Math.round(c.b * 255 * darken);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 export async function readColumnBColors(
   token: string,
   spreadsheetId: string,
@@ -107,7 +135,9 @@ export async function readColumnBColors(
     throw new SheetsAuthError("Token expired");
   }
   if (!res.ok) {
-    throw new Error(`Sheets color read failed: ${res.status} ${await res.text()}`);
+    throw new Error(
+      `Sheets color read failed: ${res.status} ${await res.text()}`,
+    );
   }
   const data = await res.json();
   const rowData = data.sheets?.[0]?.data?.[0]?.rowData || [];

@@ -243,6 +243,27 @@ const router = createBrowserRouter([
       },
     ],
   },
+  {
+    // Wrapped in <ObsSource> like the other OBS sources above, so this
+    // URL is stable -- which pool it shows (event.selectedPool) and the
+    // display settings (event.overlayAdvanceCount/overlayRowColors) are
+    // room-synced state set from the Matches tab, not baked into the URL.
+    // Only the Sheets credentials (apiKey/spreadsheetId) still come from
+    // the URL -- see pool-results.tsx and copy-obs-source.ts for why
+    // those specifically stay out of the synced state.
+    path: "e/:roomName/pool-results",
+    element: <ObsSource />,
+    children: [
+      {
+        index: true,
+        lazy: async () => {
+          const { PoolResultsOverlay } =
+            await import("./obs-sources/pool-results");
+          return { Component: PoolResultsOverlay };
+        },
+      },
+    ],
+  },
 ]);
 
 function ObsSource() {

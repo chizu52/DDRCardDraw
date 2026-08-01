@@ -13,13 +13,18 @@ import {
   H3,
   H4,
   InputGroup,
+  NumericInput,
   Tab,
   Tabs,
+  Tag,
 } from "@blueprintjs/core";
 import {
   Add,
+  ArrowRight,
   Duplicate,
   Edit,
+  EyeOff,
+  EyeOn,
   Export,
   FloppyDisk,
   Import,
@@ -32,10 +37,12 @@ import { nanoid } from "nanoid";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useHref } from "react-router-dom";
 import {
+  colorToCss,
   googleClientIdAtom,
   readColumnBColors,
   readSheetValues,
   requestSheetsToken,
+  sheetsApiKeyAtom,
   sheetsTokenAtom,
   spreadsheetIdAtom,
   SheetsAuthError,
@@ -49,14 +56,21 @@ import {
   ParsedPool,
   ParsedSheet,
   colIndexToLetter,
+  sumScores,
+  topScoreRanks,
 } from "../sheets/parse-pools";
+import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
 import { eventSlice } from "../state/event.slice";
 import { useAppDispatch, useAppState } from "../state/store";
 import { useTheme } from "../theme-toggle";
-import { copyObsSource, routableGlobalSourcePath } from "./copy-obs-source";
+import {
+  copyObsSource,
+  routableGlobalSourcePath,
+  routablePoolResultsPath,
+} from "./copy-obs-source";
 import styles from "./dashboard.css";
 
-// The Python CV score reader (nDDRCRcv/gui.py) runs a small local HTTP
+// Score Scope (the Python CV score reader) runs a small local HTTP
 // server so this button can trigger a fresh capture before importing,
 // instead of importing whatever Pending happened to already contain.
 // Only reachable if that app is running on the same machine as the
@@ -64,6 +78,18 @@ import styles from "./dashboard.css";
 // data as-is (see triggerCvCapture's null case).
 const CV_READER_TRIGGER_URL = "http://localhost:8765/capture";
 const CV_READER_TRIGGER_TIMEOUT_MS = 35000;
+
+// The "Pending" tab is a single fixed 4-row staging block, not a
+// per-pool reserved range -- confirmed directly against the live sheet:
+// header on row 1, then exactly 4 data rows (2-5), Seed/Pool always
+// blank, reused/overwritten by whatever was captured most recently.
+// start_row is where Score Scope should start writing captured songs --
+// see its src/read_scores.py: "column 0 writes to start_row, column 1
+// writes to start_row + 1", so this points at the Pending tab's first
+// data row, not anything pool-specific (there's no per-pool block to
+// point at -- pool.rows[*].rowIndex belongs to the *Pools* tab, a
+// completely different row numbering, and would be wrong here).
+const PENDING_START_ROW = 2;
 
 interface CvCaptureResult {
   ok: boolean;
@@ -77,7 +103,10 @@ interface CvCaptureResult {
  * error, just means we import whatever Pending already has. `pool` is
  * passed through so the CV reader can archive uncropped per-player source
  * screenshots under Matches/<pool>/ -- purely for building up reference
- * material, it has no effect on which sheet rows get written to. */
+ * material, it has no effect on which sheet rows get written to.
+ * start_row (PENDING_START_ROW) is what actually does: without it, Score
+ * Scope reads and logs scores but doesn't know where to write them, so
+ * it skips writing to the sheet entirely. */
 async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -88,7 +117,7 @@ async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
     const res = await fetch(CV_READER_TRIGGER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pool }),
+      body: JSON.stringify({ pool, start_row: PENDING_START_ROW }),
       signal: controller.signal,
     });
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
@@ -116,7 +145,7 @@ function describeCaptureResult(result: CvCaptureResult | null): string {
   return `CV reader captured fresh scores (${result.written ?? 0} cell(s) written) before importing.${archivedNote}`;
 }
 
-type DashboardTabId = "obs-text-sources" | "matches";
+type DashboardTabId = "obs-text-sources" | "matches" | "matches-settings";
 
 export function Dashboard() {
   const [currentTab, setCurrentTab] =
@@ -134,7 +163,10 @@ export function Dashboard() {
           OBS Text Sources
         </Tab>
         <Tab id="matches" panel={<MatchesImportPanel />}>
-          Matches
+          Pool Results
+        </Tab>
+        <Tab id="matches-settings" panel={<MatchesSettingsPanel />}>
+          Settings
         </Tab>
       </Tabs>
     </div>
@@ -150,6 +182,14 @@ function MatchesImportPanel() {
   const [token, setToken] = useAtom(sheetsTokenAtom);
   const spreadsheetId = useAtomValue(spreadsheetIdAtom);
   const clientId = useAtomValue(googleClientIdAtom);
+  const dispatch = useAppDispatch();
+  // Same room-synced settings the pool-results OBS overlay uses (see
+  // event.slice.ts) -- applied here too so this table and the overlay are
+  // a 1:1 match rather than two designs that can drift apart.
+  const advanceCount = useAppState((s) => s.event.overlayAdvanceCount);
+  const rowColors = useAppState((s) => s.event.overlayRowColors);
+  const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
+  const selectedPool = useAppState((s) => s.event.selectedPool);
   const [sheet, setSheet] = useState<ParsedSheet>({ pools: [] });
   const [colors, setColors] = useState<(CellColor | null)[]>([]);
   const [status, setStatus] = useState<ExportStatus | null>(null);
@@ -260,6 +300,11 @@ function MatchesImportPanel() {
       });
       await batchUpdateValues(token, spreadsheetId, data);
       setStatus({ type: "success", message: `${pool.title} exported.` });
+      // The overlay polls Sheets on a long fallback interval (see
+      // pool-results.tsx) -- this makes it refetch immediately instead of
+      // waiting on that timer, so an exported score shows on stream right
+      // away.
+      dispatch(eventSlice.actions.signalPoolsRefresh());
     } catch (err) {
       if (err instanceof SheetsAuthError) {
         setStatus({ type: "danger", message: "Session expired." });
@@ -306,7 +351,9 @@ function MatchesImportPanel() {
         setStatus({
           type: "danger",
           message:
-            err instanceof Error ? err.message : "Failed to update Finished status.",
+            err instanceof Error
+              ? err.message
+              : "Failed to update Finished status.",
         });
       }
     } finally {
@@ -316,16 +363,16 @@ function MatchesImportPanel() {
 
   return (
     <section style={{ maxWidth: "800px" }}>
-      <H3
+      <h1
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
         }}
       >
-        Matches
+        Pools
         <Button icon={<Refresh />} minimal onClick={loadPools} />
-      </H3>
+      </h1>
       {status && (
         <Callout intent={status.type} style={{ marginBottom: "1rem" }}>
           {status.message}
@@ -359,7 +406,9 @@ function MatchesImportPanel() {
                   alignItems: "center",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div
+                  style={{ display: "flex", alignItems: "center", gap: "10px" }}
+                >
                   {pool.title}
                   <Checkbox
                     className={styles.finishedCheckbox}
@@ -371,7 +420,12 @@ function MatchesImportPanel() {
                       finishedSaving === pool.title
                     }
                     onChange={() => toggleFinished(poolIdx, pool)}
-                    style={{ color: "black", margin: 0, fontWeight: 400, fontSize: "0.85em" }}
+                    style={{
+                      color: "black",
+                      margin: 0,
+                      fontWeight: 400,
+                      fontSize: "0.85em",
+                    }}
                   />
                 </div>
                 <ButtonGroup>
@@ -391,6 +445,27 @@ function MatchesImportPanel() {
                   >
                     Export
                   </Button>
+                  <Button
+                    small
+                    icon={selectedPool === pool.title ? <EyeOn /> : <EyeOff />}
+                    intent={selectedPool === pool.title ? "success" : undefined}
+                    title="Show this pool on the OBS overlay"
+                    onClick={() =>
+                      dispatch(eventSlice.actions.setSelectedPool(pool.title))
+                    }
+                  >
+                    {selectedPool === pool.title
+                      ? "Showing on Overlay"
+                      : "Show on Overlay"}
+                  </Button>
+                  <Button
+                    small
+                    icon={<Refresh />}
+                    title="Push this pool's current Sheets data to the overlay right now, without waiting for its poll interval"
+                    onClick={() =>
+                      dispatch(eventSlice.actions.signalPoolsRefresh())
+                    }
+                  />
                 </ButtonGroup>
               </div>
               <table
@@ -398,8 +473,25 @@ function MatchesImportPanel() {
                   width: "100%",
                   borderCollapse: "collapse",
                   fontSize: "0.9em",
+                  tableLayout: "fixed",
                 }}
               >
+                {/* Fixed, content-independent column widths -- without
+                    table-layout: fixed, a plain HTML table recomputes
+                    every column's width from its widest current content
+                    on every render. The Player column only grows an
+                    advance-arrow Tag once a pool goes from Live to
+                    Final, so that recompute alone was enough to visibly
+                    reflow every other column at that moment. Same
+                    percentages as the pool-results overlay's table, for
+                    a 1:1 match. */}
+                <colgroup>
+                  <col style={{ width: "26%" }} />
+                  {Array.from({ length: pool.songCount }).map((_, i) => (
+                    <col key={i} style={{ width: `${60 / pool.songCount}%` }} />
+                  ))}
+                  <col style={{ width: "14%" }} />
+                </colgroup>
                 <thead>
                   <tr>
                     <th style={thStyle}>Player</th>
@@ -415,42 +507,54 @@ function MatchesImportPanel() {
                   {(() => {
                     const topRanks = pool.finished
                       ? topScoreRanks(pool)
-                      : new Map<number, 1 | 2>();
+                      : new Map<number, number>();
                     return pool.rows.map((row, rowIdx) => {
                       const rank = topRanks.get(rowIdx);
+                      const tierColor = rowColors
+                        ? rowColorForRank(rank, rowColorTiers)
+                        : null;
                       const backgroundColor =
-                        rank === 1
-                          ? "rgba(255, 215, 0, 0.25)"
-                          : rank === 2
-                            ? "rgba(192, 192, 192, 0.25)"
-                            : rowIdx % 2 === 0
-                              ? "transparent"
-                              : "rgba(143,153,168,0.08)";
+                        tierColor ??
+                        (rowIdx % 2 === 0
+                          ? "transparent"
+                          : "rgba(143,153,168,0.08)");
+                      const advances =
+                        rank !== undefined && rank <= advanceCount;
                       return (
-                    <tr
-                      key={rowIdx}
-                      style={{ backgroundColor }}
-                    >
-                      <td style={{ ...tdStyle, fontWeight: 500 }}>
-                        {row.player}
-                      </td>
-                      {row.songs.map((s, j) => (
-                        <td key={j} style={tdStyle}>
-                          <input
-                            value={s}
-                            onChange={(e) =>
-                              updateCell(poolIdx, rowIdx, j, e.target.value)
-                            }
-                            style={inputStyle}
-                          />
-                        </td>
-                      ))}
-                      <td
-                        style={{ ...tdStyle, borderRight: "none", fontWeight: 700 }}
-                      >
-                        {sumScores(row.songs)}
-                      </td>
-                    </tr>
+                        <tr key={rowIdx} style={{ backgroundColor }}>
+                          <td style={{ ...tdStyle, fontWeight: 500 }}>
+                            <div style={playerCellStyle}>
+                              <span style={playerNameStyle}>{row.player}</span>
+                              {advances && (
+                                <Tag
+                                  minimal
+                                  intent="success"
+                                  icon={<ArrowRight size={12} />}
+                                />
+                              )}
+                            </div>
+                          </td>
+                          {row.songs.map((s, j) => (
+                            <td key={j} style={tdStyle}>
+                              <input
+                                value={s}
+                                onChange={(e) =>
+                                  updateCell(poolIdx, rowIdx, j, e.target.value)
+                                }
+                                style={inputStyle}
+                              />
+                            </td>
+                          ))}
+                          <td
+                            style={{
+                              ...tdStyle,
+                              borderRight: "none",
+                              fontWeight: 700,
+                            }}
+                          >
+                            {sumScores(row.songs)}
+                          </td>
+                        </tr>
                       );
                     });
                   })()}
@@ -465,37 +569,157 @@ function MatchesImportPanel() {
   );
 }
 
-/** Total column is derived, not entered -- sums whatever song scores (each
- * a "DDD.DDDD%" string) are currently filled in, skipping blanks. */
-function sumScores(songs: string[]): string {
-  const values = songs
-    .map((s) => parseFloat(s.replace("%", "")))
-    .filter((n) => !Number.isNaN(n));
-  if (!values.length) return "0.000%";
-  const sum = values.reduce((a, b) => a + b, 0);
-  return `${sum.toFixed(4)}%`;
+/** Controls how the pool-results OBS overlay (see obs-sources/
+ * pool-results.tsx) displays -- its own tab next to Matches since these
+ * are event-wide preferences, not tied to any one pool, connecting to
+ * Sheets, or the Matches tab's own table (which always shows every
+ * row/rank as-is regardless of these settings). Room-synced (event.
+ * overlayAdvanceCount/overlayRowColors, see event.slice.ts) rather than
+ * device-local, and rather than baked into a URL -- changing them here
+ * updates every connected overlay live, with nothing to re-copy. */
+function MatchesSettingsPanel() {
+  const advanceCount = useAppState((s) => s.event.overlayAdvanceCount);
+  const rowColors = useAppState((s) => s.event.overlayRowColors);
+  const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
+  const dispatch = useAppDispatch();
+
+  return (
+    <section style={{ maxWidth: "600px" }}>
+      <h3>Pool Results Overlay</h3>
+      <FormGroup label="Advancements" inline>
+        <NumericInput
+          value={advanceCount}
+          min={1}
+          max={4}
+          clampValueOnBlur
+          onValueChange={(n) => {
+            if (Number.isFinite(n)) {
+              dispatch(
+                eventSlice.actions.setOverlayAdvanceCount(Math.round(n)),
+              );
+            }
+          }}
+          style={{ width: "60px" }}
+        />
+      </FormGroup>
+      <Checkbox
+        checked={rowColors}
+        label="Colored Placements upon Finalization"
+        onChange={(e) =>
+          dispatch(
+            eventSlice.actions.setOverlayRowColors(e.currentTarget.checked),
+          )
+        }
+      />
+      <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
+        <RowColorTierCheckbox
+          tier="first"
+          label="1st place (gold)"
+          tiers={rowColorTiers}
+          disabled={!rowColors}
+        />
+        <RowColorTierCheckbox
+          tier="second"
+          label="2nd place (silver)"
+          tiers={rowColorTiers}
+          disabled={!rowColors}
+        />
+        <RowColorTierCheckbox
+          tier="third"
+          label="3rd place (bronze)"
+          tiers={rowColorTiers}
+          disabled={!rowColors}
+        />
+        <RowColorTierCheckbox
+          tier="fourthPlus"
+          label="4th place and below (gray)"
+          tiers={rowColorTiers}
+          disabled={!rowColors}
+        />
+      </div>
+      <CopyOverlayUrlButton />
+    </section>
+  );
 }
 
-/** Maps row index (into pool.rows) -> 1 for the highest total, 2 for the
- * 2nd highest, ties broken by row order. Rows with no real score yet
- * (total of 0) are never included. */
-function topScoreRanks(pool: ParsedPool): Map<number, 1 | 2> {
-  const ranked = pool.rows
-    .map((row, idx) => ({ idx, total: parseFloat(sumScores(row.songs)) }))
-    .filter((r) => r.total > 0)
-    .sort((a, b) => b.total - a.total)
-    .slice(0, 2);
-  return new Map(ranked.map((r, i) => [r.idx, (i + 1) as 1 | 2]));
+function RowColorTierCheckbox(props: {
+  tier: keyof RowColorTiers;
+  label: string;
+  tiers: RowColorTiers;
+  disabled: boolean;
+}) {
+  const dispatch = useAppDispatch();
+  return (
+    <Checkbox
+      checked={props.tiers[props.tier]}
+      disabled={props.disabled}
+      label={props.label}
+      onChange={(e) =>
+        dispatch(
+          eventSlice.actions.setOverlayRowColorTier({
+            tier: props.tier,
+            enabled: e.currentTarget.checked,
+          }),
+        )
+      }
+    />
+  );
 }
 
-function colorToCss(c: CellColor | null | undefined): string {
-  if (!c) return "var(--pt-app-background-color, #f5f5f5)";
-  const darken = 0.8;
-  const r = Math.round(c.r * 255 * darken);
-  const g = Math.round(c.g * 255 * darken);
-  const b = Math.round(c.b * 255 * darken);
-  return `rgb(${r}, ${g}, ${b})`;
+/** Copies the stable, room-wide URL for the pool-results broadcast overlay
+ * (see obs-sources/pool-results.tsx) -- read-only, reads the Sheets API
+ * key + spreadsheet ID from this device's saved settings and bakes them
+ * directly into the copied URL (no separate setup needed inside OBS's own
+ * browser profile), but NOT which pool to show or how -- that's
+ * room-synced state set from the Matches tab's "Show on Overlay" buttons
+ * and the settings above, so this URL only ever needs to be copied into
+ * OBS once, even as the event moves through different pools. Requires
+ * both a Sheets API key to be saved (see SheetsCredsManager) and the
+ * spreadsheet's sharing to be "Anyone with the link can view" -- the
+ * overlay page itself shows a clear error if either is missing. */
+function CopyOverlayUrlButton() {
+  const apiKey = useAtomValue(sheetsApiKeyAtom);
+  const spreadsheetId = useAtomValue(spreadsheetIdAtom);
+  const ready = !!apiKey && !!spreadsheetId;
+  const href = useHref(
+    routablePoolResultsPath(apiKey || "", spreadsheetId || ""),
+  );
+  return (
+    <Button
+      icon={<Duplicate />}
+      disabled={!ready}
+      title={
+        ready
+          ? undefined
+          : "Save a Sheets API key in Google Sheets settings first (see the Sheets connection panel)"
+      }
+      onClick={() => copyObsSource(new URL(href, document.location.href).href)}
+      style={{ marginTop: "0.75rem" }}
+    >
+      Overlay URL
+    </Button>
+  );
 }
+
+// Same as pool-results.tsx's playerCellStyle/playerNameStyle -- keeps the
+// player name and the advance-arrow Tag on the same line regardless of
+// column width (flex row, no wrap), truncating a long name with an
+// ellipsis instead of overflowing its now-fixed-width column. minWidth: 0
+// overrides a flex item's default min-width: auto, which otherwise stops
+// it shrinking below its own content size and silently defeats
+// text-overflow: ellipsis inside a flex container.
+const playerCellStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+};
+
+const playerNameStyle: React.CSSProperties = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  minWidth: 0,
+};
 
 const thStyle: React.CSSProperties = {
   textAlign: "left",
@@ -591,7 +815,7 @@ function EditDialog({
   close(this: void): void;
 }) {
   const label = useAppState((s) =>
-    sourceId ? s.event.obsLabels[sourceId] : null
+    sourceId ? s.event.obsLabels[sourceId] : null,
   ) || { label: "", value: "" };
   const dispatch = useAppDispatch();
   const nameInput = useRef<HTMLInputElement>(null);
@@ -605,12 +829,12 @@ function EditDialog({
         id: sourceId,
         label: nameInput.current?.value || "",
         value: valueInput.current?.value || "",
-      })
+      }),
     );
     close();
   };
   const handleInputKeydown: React.KeyboardEventHandler<HTMLInputElement> = (
-    e
+    e,
   ) => {
     if (
       e.key === "Enter" &&

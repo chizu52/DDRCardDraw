@@ -1,5 +1,5 @@
 import { migratePlayersToIds, migrateToSubdraws } from "./drawings.slice";
-import { addObsLabels } from "./event.slice";
+import { addObsLabels, addOverlaySettings } from "./event.slice";
 import type { AppState } from "./root-reducer";
 
 /** mutates `state` to apply any necessary migrations */
@@ -8,5 +8,8 @@ export function applyMigrations(state: AppState) {
     migrateToSubdraws(state.drawings);
     migratePlayersToIds(state.drawings);
   }
-  if (state.event) addObsLabels(state.event);
+  if (state.event) {
+    addObsLabels(state.event);
+    addOverlaySettings(state.event);
+  }
 }
