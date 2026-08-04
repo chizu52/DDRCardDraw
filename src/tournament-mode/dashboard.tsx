@@ -998,8 +998,18 @@ function ScheduleSettingsSection() {
       </div>
       <Divider style={{ margin: "1rem 0 0.75rem" }} />
       <div className={styles.scheduleEditorLabel}>Edit a schedule</div>
+      {/* animate={false} -- unlike the outer "dashboard" Tabs (which stays
+          mounted for the whole session, so its indicator only slides when
+          you actually switch tabs), this whole section unmounts every time
+          you leave the Settings tab and remounts fresh -- always back on
+          "fri" -- the next time you click into it. Left animated, the
+          indicator replayed its grow-in-from-nothing mount transition on
+          every single visit to Settings, not just real day-to-day
+          switches, which read as an unwanted flourish rather than a
+          deliberate move. */}
       <Tabs
         id="schedule-days"
+        animate={false}
         selectedTabId={currentDay}
         onChange={(newDay: ScheduleDay) => setCurrentDay(newDay)}
       >
