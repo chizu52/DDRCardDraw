@@ -9,16 +9,20 @@ import {
   Dialog,
   DialogBody,
   DialogFooter,
+  Divider,
   FormGroup,
   H3,
   H4,
   HTMLSelect,
   InputGroup,
   NumericInput,
+  Radio,
+  RadioGroup,
   Tab,
   Tabs,
   Tag,
 } from "@blueprintjs/core";
+import { TimePicker } from "@blueprintjs/datetime";
 import {
   Add,
   ArrowRight,
@@ -30,6 +34,7 @@ import {
   FloppyDisk,
   Import,
   Refresh,
+  Trash,
 } from "@blueprintjs/icons";
 import { css } from "@codemirror/lang-css";
 import ReactCodeMirror from "@uiw/react-codemirror";
@@ -62,7 +67,11 @@ import {
 } from "../sheets/parse-pools";
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
-import { eventSlice } from "../state/event.slice";
+import {
+  eventSlice,
+  type ScheduleDay,
+  type ScheduleItem,
+} from "../state/event.slice";
 import { useAppDispatch, useAppState } from "../state/store";
 import { useTheme } from "../theme-toggle";
 import {
@@ -70,8 +79,10 @@ import {
   routableBracketTreePath,
   routableGlobalSourcePath,
   routablePoolResultsPath,
+  routableSchedulePath,
 } from "./copy-obs-source";
 import styles from "./dashboard.css";
+import { iconLabel, localIcons } from "../obs-sources/local-icons";
 
 // Score Scope (the Python CV score reader) runs a small local HTTP
 // server so this button can trigger a fresh capture before importing,
@@ -651,6 +662,7 @@ function MatchesSettingsPanel() {
         <CopyOverlayUrlButton />
       </Card>
       <BracketSettingsSection />
+      <ScheduleSettingsSection />
     </div>
   );
 }
@@ -717,6 +729,519 @@ function BracketSettingsSection() {
         </Button>
       </ButtonGroup>
     </Card>
+  );
+}
+
+function emptyScheduleItem(): ScheduleItem {
+  return { time: "", event: "", description: "" };
+}
+
+// See ScheduleDayEditor's savedSchedule for why this needs to be a
+// stable module-level reference, not an inline `[]`.
+const EMPTY_SCHEDULE: ScheduleItem[] = [];
+
+// Schedule times are wall-clock, as typed by the user (e.g. "20:30" for
+// 8:30 PM) -- stored and rendered as-is, no timezone conversion (see
+// ScheduleItem's own doc in event.slice.ts).
+function parseScheduleTime(time: string | undefined): Date | null {
+  if (!time) return null;
+  const [hours, minutes] = time.split(":").map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  return date;
+}
+
+function formatScheduleTime(date: Date): string {
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+const SCHEDULE_DAYS: { id: ScheduleDay; label: string }[] = [
+  { id: "fri", label: "Friday" },
+  { id: "sat", label: "Saturday" },
+  { id: "sun", label: "Sunday" },
+];
+
+// The dropdown's last option -- distinct from every real icon's own URL
+// value, used both as that option's <option value> and as the signal
+// (in the select's onChange) to open the file picker instead of
+// dispatching directly.
+const SCHEDULE_ICON_CUSTOM_VALUE = "__custom__";
+const SCHEDULE_ICON_MAX_SIZE = 160;
+
+/** Reads a user-picked image file, downscaling it (never upscaling) to
+ * SCHEDULE_ICON_MAX_SIZE on its longer edge. This is going to be stored
+ * as a data URL directly in room-synced Redux state and re-sent over the
+ * party socket to every connected client on every change -- there's no
+ * server-side upload/asset host for this app to save an actual file to
+ * -- so an un-resized multi-MB phone photo would be a real, repeated
+ * cost rather than a one-time one. */
+function readScheduleIconFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Could not load image"));
+      img.onload = () => {
+        const scale = Math.min(
+          1,
+          SCHEDULE_ICON_MAX_SIZE / Math.max(img.width, img.height),
+        );
+        const width = Math.round(img.width * scale);
+        const height = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Canvas 2D context unavailable"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Controls for the schedule OBS overlay (see obs-sources/schedule.tsx)
+ * -- one stable overlay URL, which day it currently shows is room-synced
+ * state (event.selectedScheduleDay) picked here via radio buttons, same
+ * live-picker idea as BracketSettingsSection's phase dropdown above (just
+ * radios instead of a dropdown, since there are only ever three options).
+ * The day TABS below are a separate concern -- editing each day's own
+ * content, independent of which one is currently live on stream. */
+function ScheduleSettingsSection() {
+  const dispatch = useAppDispatch();
+  const selectedDay = useAppState((s) => s.event.selectedScheduleDay);
+  const href = useHref(routableSchedulePath());
+  const [currentDay, setCurrentDay] = useState<ScheduleDay>("fri");
+
+  // Picked from a dropdown of bundled files (see local-icons.ts) by
+  // default, with a last "Custom..." option that opens the file picker
+  // instead -- applies immediately either way, same "deliberate one-shot
+  // action" reasoning as the day radios above.
+  const scheduleIcon = useAppState((s) => s.event.scheduleIcon);
+  const iconFileInputRef = useRef<HTMLInputElement>(null);
+  // The select's own controlled value -- a bundled icon's URL if
+  // scheduleIcon matches one, "" for no icon, or else (a data URL from
+  // an earlier custom upload doesn't match any bundled icon's URL) the
+  // custom sentinel, so the dropdown correctly shows "Custom..." as
+  // selected rather than nothing matching.
+  const selectedIconValue = !scheduleIcon
+    ? ""
+    : (localIcons.find((icon) => icon.url === scheduleIcon)?.url ??
+      SCHEDULE_ICON_CUSTOM_VALUE);
+  async function handleIconFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset so choosing the SAME file again later still fires onChange
+    // -- the input's own value otherwise doesn't change, so no event
+    // would fire the second time.
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await readScheduleIconFile(file);
+      dispatch(eventSlice.actions.setScheduleIcon(dataUrl));
+    } catch {
+      // A corrupt/unreadable file just means no icon change goes out --
+      // nothing else on this form depends on the read succeeding.
+    }
+  }
+  function handleIconSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const value = e.target.value;
+    if (value === SCHEDULE_ICON_CUSTOM_VALUE) {
+      // Don't dispatch anything yet -- if the operator cancels the file
+      // dialog, scheduleIcon (and so this select's own controlled value)
+      // just stays whatever it already was, snapping the dropdown back
+      // to its real selection rather than getting stuck showing
+      // "Custom..." with nothing actually picked.
+      iconFileInputRef.current?.click();
+      return;
+    }
+    dispatch(eventSlice.actions.setScheduleIcon(value || null));
+  }
+
+  // Global to the whole overlay, not per-day (see event.slice.ts's own
+  // doc on scheduleSubtitle) -- one field here, not one per Tab below.
+  const savedSubtitle = useAppState((s) => s.event.scheduleSubtitle);
+  const [subtitle, setSubtitle] = useState(savedSubtitle);
+  // Explicit flag, not `subtitle !== savedSubtitle` -- see
+  // ScheduleDayEditor's own `dirty` state for why a derived comparison
+  // is the wrong check (confirmed as a real bug there: it can't tell
+  // "user is editing" apart from "this component hasn't caught up to a
+  // savedSubtitle it's never seen before," which look identical but
+  // need opposite handling).
+  const [subtitleDirty, setSubtitleDirty] = useState(false);
+  // Same resync-while-not-dirty pattern as ScheduleDayEditor's own
+  // savedSchedule effect below -- picks up an external change (another
+  // device, or this device's own save echoing back through the party
+  // socket) without clobbering an unsaved edit still in progress. Not
+  // the "derive state from props" antipattern set-state-in-effect
+  // normally warns about -- savedSubtitle is a genuinely external,
+  // independently-changing source (room-synced Redux state, not a
+  // prop/state this component owns), and the dirty guard is exactly the
+  // part a plain render-time derivation can't express.
+  useEffect(() => {
+    if (!subtitleDirty) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setSubtitle(savedSubtitle);
+    }
+  }, [savedSubtitle, subtitleDirty]);
+
+  return (
+    <Card elevation={1} className={styles.settingsSection}>
+      <h3>Schedule Overlay</h3>
+      {/* Grouped and tinted specifically because "Day to display" below
+          is a room-synced radio group that immediately changes what's
+          live on stream -- functionally unrelated to, but visually
+          almost identical to (same 3 day names, same order), the Tabs
+          strip further down that just picks which day's content THIS
+          editor is showing. Stacked directly on top of each other with
+          no distinction, those read as one confusing double day-picker;
+          the tint marks this whole group as the one that actually
+          broadcasts immediately, so the tabs below default to reading
+          as the (inert until Submit) editing surface. */}
+      <div className={styles.liveControls}>
+        <FormGroup label="Schedule title">
+          <InputGroup
+            value={subtitle}
+            onChange={(e) => {
+              setSubtitle(e.target.value);
+              setSubtitleDirty(true);
+            }}
+            placeholder="Schedule Title"
+            rightElement={
+              <Button
+                disabled={!subtitleDirty}
+                intent={subtitleDirty ? "primary" : undefined}
+                onClick={() => {
+                  dispatch(eventSlice.actions.setScheduleSubtitle(subtitle));
+                  setSubtitleDirty(false);
+                }}
+              >
+                Save
+              </Button>
+            }
+          />
+        </FormGroup>
+        <FormGroup label="Icon">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            {scheduleIcon && (
+              <img
+                src={scheduleIcon}
+                alt=""
+                style={{
+                  width: 32,
+                  height: 32,
+                  objectFit: "contain",
+                  borderRadius: 4,
+                  background: "rgba(255, 255, 255, 0.06)",
+                }}
+              />
+            )}
+            <HTMLSelect
+              value={selectedIconValue}
+              onChange={handleIconSelectChange}
+            >
+              <option value="">None</option>
+              {localIcons.map((icon) => (
+                <option key={icon.url} value={icon.url}>
+                  {iconLabel(icon)}
+                </option>
+              ))}
+              <option value={SCHEDULE_ICON_CUSTOM_VALUE}>Custom…</option>
+            </HTMLSelect>
+            {/* Hidden -- only ever opened programmatically, by picking
+                "Custom..." above (handleIconSelectChange). */}
+            <input
+              ref={iconFileInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                void handleIconFileChange(e);
+              }}
+            />
+          </div>
+        </FormGroup>
+        <RadioGroup
+          label="Day to display"
+          inline
+          selectedValue={selectedDay ?? ""}
+          onChange={(e) =>
+            dispatch(
+              eventSlice.actions.setSelectedScheduleDay(
+                (e.currentTarget.value || null) as ScheduleDay | null,
+              ),
+            )
+          }
+          options={[
+            { label: "None", value: "" },
+            ...SCHEDULE_DAYS.map(({ id, label }) => ({ label, value: id })),
+          ]}
+        />
+        <Button
+          icon={<Duplicate />}
+          onClick={() =>
+            copyObsSource(new URL(href, document.location.href).href)
+          }
+        >
+          Copy Overlay URL
+        </Button>
+      </div>
+      <Divider style={{ margin: "1rem 0 0.75rem" }} />
+      <div className={styles.scheduleEditorLabel}>Edit a schedule</div>
+      <Tabs
+        id="schedule-days"
+        selectedTabId={currentDay}
+        onChange={(newDay: ScheduleDay) => setCurrentDay(newDay)}
+      >
+        {SCHEDULE_DAYS.map(({ id, label }) => (
+          <Tab
+            key={id}
+            id={id}
+            title={label}
+            panel={<ScheduleDayEditor day={id} />}
+          />
+        ))}
+      </Tabs>
+    </Card>
+  );
+}
+
+function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
+  const dispatch = useAppDispatch();
+  // EMPTY_SCHEDULE, not an inline `?? []` -- a fresh array literal on
+  // every selector call is a NEW reference every time even when a day
+  // has no saved items (the common case for a new event), which
+  // react-redux's default reference-equality check reads as "changed"
+  // on every single dispatch. Combined with the resync effect below
+  // (which depends on this value), that was a real, confirmed infinite
+  // loop ("Maximum update depth exceeded") the moment this tab was
+  // opened on a day with nothing saved yet -- not a hypothetical
+  // concern, this actually happened. A stable reference for the empty
+  // case fixes it.
+  const savedSchedule = useAppState(
+    (s) => s.event.schedules[day] ?? EMPTY_SCHEDULE,
+  );
+  const [schedule, setSchedule] = useState<ScheduleItem[]>(savedSchedule);
+  // An explicit flag the user's own edits set, NOT a derived comparison
+  // of schedule vs savedSchedule -- comparing values conflates "the user
+  // is actively editing, don't clobber it" with "this component just
+  // hasn't caught up to a savedSchedule it's never seen before," which
+  // look identical (local != saved) but need opposite handling. That
+  // second case is real, not hypothetical: confirmed directly -- an
+  // external update (another operator's submit, arriving while this
+  // editor's local buffer was still sitting at its initial empty
+  // default) got permanently stuck showing 0 rows, because that empty
+  // default already "differed" from the incoming saved value the moment
+  // it arrived, so the old isDirty-by-comparison guard treated it as
+  // an in-progress edit worth protecting and never synced at all.
+  const [dirty, setDirty] = useState(false);
+
+  // Re-sync to the room-synced value whenever it changes from elsewhere
+  // (another operator's dashboard, or this device's own submit echoing
+  // back through the party socket) -- but only while nothing unsaved is
+  // in progress locally. Without the dirty guard, an incoming update
+  // mid-edit would silently overwrite whatever the user was still
+  // typing; without the effect at all (the bug this is fixing, confirmed
+  // against the original PR this was ported from), an external update
+  // never shows up here until the tab is reloaded. Not the "derive
+  // state from props" antipattern set-state-in-effect normally warns
+  // about -- same reasoning as ScheduleSettingsSection's own subtitle
+  // effect above.
+  useEffect(() => {
+    if (!dirty) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setSchedule(savedSchedule);
+    }
+  }, [savedSchedule, dirty]);
+
+  function updateRow(index: number, patch: Partial<ScheduleItem>) {
+    setSchedule((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
+    setDirty(true);
+  }
+
+  // Radio semantics -- clearing every OTHER row's own `current` flag is
+  // what actually enforces "at most one," not just this row's own
+  // checked state. A native radio input's built-in mutual exclusivity
+  // only affects which one LOOKS checked in the DOM; these are
+  // controlled by `schedule` state, so the state itself has to be the
+  // one source of truth or the previously-current row would silently
+  // stay `current: true` in the data even once visually unchecked.
+  // `index: null` clears every row's `current` flag -- passed when the
+  // ALREADY-current row's own radio is clicked again, since a native
+  // radio has no built-in way to deselect back to "nothing selected"
+  // (clicking the same option again is normally a no-op).
+  function setCurrentRow(index: number | null) {
+    setSchedule((prev) =>
+      prev.map((row, i) => ({ ...row, current: i === index })),
+    );
+    setDirty(true);
+  }
+
+  function addRow() {
+    setSchedule((prev) => [...prev, emptyScheduleItem()]);
+    setDirty(true);
+  }
+
+  function removeRow(index: number) {
+    setSchedule((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  }
+
+  function submit() {
+    dispatch(eventSlice.actions.setDaySchedule({ day, items: schedule }));
+    setDirty(false);
+  }
+
+  function sortByTime() {
+    setSchedule((prev) =>
+      [...prev].sort((a, b) => (a.time ?? "").localeCompare(b.time ?? "")),
+    );
+    setDirty(true);
+  }
+
+  return (
+    <>
+      <table className={styles.scheduleTable}>
+        <thead>
+          <tr>
+            <th>Color</th>
+            <th>Time</th>
+            <th>Event</th>
+            <th>Description</th>
+            <th>Current</th>
+            <th>Completed</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {schedule.map((row, i) => (
+            <tr key={i}>
+              <td>
+                {/* Native color input, not a Blueprint component --
+                    Blueprint doesn't ship one, and the browser's own
+                    picker already gives a proper hex swatch UI + value
+                    for free. Empty string (not a real color) shows as
+                    the browser's own default black/gray swatch, which
+                    reads fine as "unset" without needing a separate
+                    clear control -- the overlay only applies a border
+                    tint when row.color is actually set (see
+                    obs-sources/schedule.tsx). */}
+                <input
+                  type="color"
+                  value={row.color ?? "#000000"}
+                  onChange={(e) => updateRow(i, { color: e.target.value })}
+                  style={{
+                    width: 32,
+                    height: 32,
+                    padding: 0,
+                    border: "none",
+                    background: "none",
+                    cursor: "pointer",
+                  }}
+                />
+              </td>
+              <td>
+                <TimePicker
+                  precision="minute"
+                  showArrowButtons
+                  useAmPm
+                  value={parseScheduleTime(row.time)}
+                  onChange={(newTime) =>
+                    updateRow(i, { time: formatScheduleTime(newTime) })
+                  }
+                />
+              </td>
+              <td>
+                <InputGroup
+                  value={row.event ?? ""}
+                  onChange={(e) => updateRow(i, { event: e.target.value })}
+                />
+              </td>
+              <td>
+                <InputGroup
+                  value={row.description ?? ""}
+                  onChange={(e) =>
+                    updateRow(i, { description: e.target.value })
+                  }
+                />
+              </td>
+              <td>
+                {/* A completed row can't also be current -- the overlay
+                    itself already assumes this can't happen ("completed
+                    wins over current," schedule.tsx), but nothing here
+                    previously actually enforced it. Disabling instead of
+                    just hiding keeps the column's shape stable
+                    (no layout shift row-to-row) and makes it visibly
+                    clear why it can't be picked, rather than silently
+                    doing nothing on click. */}
+                <Radio
+                  name={`schedule-current-${day}`}
+                  checked={!!row.current}
+                  disabled={!!row.completed}
+                  // Both onClick AND onChange, calling the same logic --
+                  // confirmed directly that a native radio's `change`
+                  // event doesn't fire when clicking one that's already
+                  // checked (its own checked state isn't changing), so
+                  // onClick is what actually catches the deselect click.
+                  // onChange stays too, just to satisfy React's "checked
+                  // prop needs an onChange handler" warning on a
+                  // controlled input -- for a normal select-a-different-
+                  // row click, both fire and both compute the same
+                  // result, which is harmless.
+                  onClick={() => setCurrentRow(row.current ? null : i)}
+                  onChange={() => setCurrentRow(row.current ? null : i)}
+                />
+              </td>
+              <td>
+                <Checkbox
+                  checked={!!row.completed}
+                  onChange={(e) => {
+                    const completed = e.currentTarget.checked;
+                    // Closes the same gap from the other direction --
+                    // marking an already-current row completed has to
+                    // clear `current` too, or the disallowed combination
+                    // still happens via this path even with the radio
+                    // itself now disabled.
+                    updateRow(i, {
+                      completed,
+                      current: completed ? false : row.current,
+                    });
+                  }}
+                />
+              </td>
+              <td>
+                <Button icon={<Trash />} onClick={() => removeRow(i)} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <ButtonGroup className={styles.scheduleAddRow}>
+        <Button icon={<Add />} onClick={addRow}>
+          Add row
+        </Button>
+        <Button disabled={schedule.length < 2} onClick={sortByTime}>
+          Sort by time
+        </Button>
+        <Button
+          disabled={!dirty}
+          intent={dirty ? "primary" : undefined}
+          onClick={submit}
+        >
+          Submit
+        </Button>
+      </ButtonGroup>
+    </>
   );
 }
 

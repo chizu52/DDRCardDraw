@@ -11,6 +11,33 @@ export interface CabInfo {
   id: string;
 }
 
+export interface ScheduleItem {
+  /** Wall-clock, as typed by the user (e.g. "20:30") -- stored and
+   * rendered as-is, no timezone conversion. See obs-sources/schedule.tsx
+   * and dashboard.tsx's ScheduleDayEditor. */
+  time?: string;
+  event?: string;
+  description?: string;
+  /** "This is happening right now" -- at most one true per day's list.
+   * Mutual exclusivity is enforced by the editor's own radio-column UI
+   * (dashboard.tsx's ScheduleDayEditor), not by this type; nothing
+   * technically stops two items both saying true, the editor just never
+   * produces that. Renders as a soft green highlight on the overlay. */
+  current?: boolean;
+  /** "This already happened" -- independent per row, unlike `current`
+   * (any number of earlier items can be true at once as the event
+   * progresses). Renders as a soft gray-out on the overlay. */
+  completed?: boolean;
+  /** Hex color (e.g. "#7ed9b5"), picked per row in dashboard.tsx's
+   * ScheduleDayEditor -- tints that row's border and its time pill's
+   * border on the overlay. Absent renders both with their plain neutral
+   * default, same "no color means the default" idea as everything else
+   * optional on this type. */
+  color?: string;
+}
+
+export type ScheduleDay = "fri" | "sat" | "sun";
+
 interface EventState {
   eventName: string;
   cabs: Record<string, CabInfo>;
@@ -42,6 +69,41 @@ interface EventState {
   /** Same idea as poolsRefreshedAt -- bumped to force every connected
    * bracket-tree overlay to refetch from start.gg immediately. */
   bracketRefreshedAt: number;
+  /** Per-day event schedule shown by the schedule OBS overlay
+   * (obs-sources/schedule.tsx), room-synced like everything else here --
+   * edited from dashboard.tsx's Schedule tab. Absent days (or an absent
+   * key entirely) just render no rows, same as an empty array. */
+  schedules: Partial<Record<ScheduleDay, ScheduleItem[]>>;
+  /** Which day the schedule OBS overlay currently shows -- one stable
+   * overlay URL (routableSchedulePath), switched live from the dashboard
+   * the same room-synced "pick it here, not a new OBS URL" pattern as
+   * selectedPool/selectedBracketPhase, rather than one separate URL per
+   * day. */
+  selectedScheduleDay: ScheduleDay | null;
+  /** Bumped (to Date.now()) every time ANY day's schedule is submitted --
+   * see setDaySchedule's own prepare(). The overlay keys its entrance
+   * animation on this alongside selectedScheduleDay, so submitting an
+   * edit replays the animation the same way switching days already did,
+   * not just on the overlay's first page load. Global rather than
+   * per-day: if an edit lands for a day that isn't currently displayed,
+   * a harmless extra replay on the visible (unrelated) day is a fair
+   * trade for not needing a whole Record<ScheduleDay, number> just to
+   * avoid it. */
+  scheduleUpdatedAt: number;
+  /** A free-text caption shown on the schedule overlay under its
+   * "Schedule" title -- global to the whole overlay, not per-day (e.g.
+   * an event/venue name), unlike everything else in `schedules`. Empty
+   * string renders nothing, same "absent means don't show it" idea as
+   * an empty day's item list. */
+  scheduleSubtitle: string;
+  /** A small logo/icon shown to the left of the schedule overlay's
+   * title, picked from the operator's own computer (dashboard.tsx's
+   * ScheduleSettingsSection) -- stored as a data URL directly in
+   * room-synced state, same as scheduleSubtitle, rather than a file
+   * path, since there's no server-side upload/asset host for this app
+   * to save an actual file to. null renders nothing, same "absent means
+   * don't show it" idea as scheduleSubtitle's empty string. */
+  scheduleIcon: string | null;
 }
 
 const initialState: EventState = {
@@ -64,6 +126,11 @@ const initialState: EventState = {
   overlayRowColorTiers: DEFAULT_ROW_COLOR_TIERS,
   selectedBracketPhase: null,
   bracketRefreshedAt: 0,
+  schedules: {},
+  selectedScheduleDay: null,
+  scheduleUpdatedAt: 0,
+  scheduleSubtitle: "",
+  scheduleIcon: null,
 };
 
 export const eventSlice = createSlice({
@@ -163,6 +230,62 @@ export const eventSlice = createSlice({
         state.bracketRefreshedAt = action.payload;
       },
     },
+    // Replaces a whole day's item list -- the editor (dashboard.tsx's
+    // ScheduleDayEditor) buffers edits locally and only dispatches this
+    // on explicit "Submit," same deliberate-refresh pattern as
+    // signalPoolsRefresh/signalBracketRefresh above, so the live overlay
+    // doesn't flicker on every keystroke. Embeds its own updatedAt
+    // (rather than a separate signal action) so scheduleUpdatedAt bumps
+    // atomically with the content it's describing, in the same action.
+    setDaySchedule: {
+      prepare(payload: { day: ScheduleDay; items: ScheduleItem[] }) {
+        return { payload: { ...payload, updatedAt: Date.now() } };
+      },
+      reducer(
+        state,
+        action: PayloadAction<{
+          day: ScheduleDay;
+          items: ScheduleItem[];
+          updatedAt: number;
+        }>,
+      ) {
+        state.schedules[action.payload.day] = action.payload.items;
+        state.scheduleUpdatedAt = action.payload.updatedAt;
+      },
+    },
+    setSelectedScheduleDay(state, action: PayloadAction<ScheduleDay | null>) {
+      state.selectedScheduleDay = action.payload;
+    },
+    // Same buffer-locally-then-submit pattern as setDaySchedule, and
+    // also bumps scheduleUpdatedAt for the same reason -- a custom
+    // caption shown right on the overlay is still "the overlay's
+    // content changed," same as its schedule rows.
+    setScheduleSubtitle: {
+      prepare(subtitle: string) {
+        return { payload: { subtitle, updatedAt: Date.now() } };
+      },
+      reducer(
+        state,
+        action: PayloadAction<{ subtitle: string; updatedAt: number }>,
+      ) {
+        state.scheduleSubtitle = action.payload.subtitle;
+        state.scheduleUpdatedAt = action.payload.updatedAt;
+      },
+    },
+    // Same pattern as setScheduleSubtitle -- null (rather than an empty
+    // string, since there's no meaningful "empty" data URL) clears it.
+    setScheduleIcon: {
+      prepare(icon: string | null) {
+        return { payload: { icon, updatedAt: Date.now() } };
+      },
+      reducer(
+        state,
+        action: PayloadAction<{ icon: string | null; updatedAt: number }>,
+      ) {
+        state.scheduleIcon = action.payload.icon;
+        state.scheduleUpdatedAt = action.payload.updatedAt;
+      },
+    },
   },
   extraReducers(builder) {
     builder.addCase(mergeDraws, (state, { payload }) => {
@@ -215,5 +338,20 @@ export function addOverlaySettings(state: EventState) {
   }
   if (state.bracketRefreshedAt === undefined) {
     state.bracketRefreshedAt = 0;
+  }
+  if (!state.schedules) {
+    state.schedules = {};
+  }
+  if (state.selectedScheduleDay === undefined) {
+    state.selectedScheduleDay = null;
+  }
+  if (state.scheduleUpdatedAt === undefined) {
+    state.scheduleUpdatedAt = 0;
+  }
+  if (state.scheduleSubtitle === undefined) {
+    state.scheduleSubtitle = "";
+  }
+  if (state.scheduleIcon === undefined) {
+    state.scheduleIcon = null;
   }
 }

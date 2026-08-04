@@ -28,6 +28,12 @@ export const routablePoolResultsPath = (
 export const routableBracketTreePath = (apiKey: string) =>
   `../bracket-tree?${new URLSearchParams({ apiKey }).toString()}`;
 
+// Same stable-URL, room-synced-content pattern as routableBracketTreePath
+// above -- which day to show is event.selectedScheduleDay, switched live
+// from the Settings tab's radio buttons, not baked into the URL. One
+// overlay source total, not three. See schedule.tsx.
+export const routableSchedulePath = () => `../schedule`;
+
 export function copyObsSource(href: string) {
   void copyPlainTextToClipboard(href, "Copied OBS source URL to clipboard");
 }

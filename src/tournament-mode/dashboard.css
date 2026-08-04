@@ -35,6 +35,60 @@
   background-color: #238c2c !important;
 }
 
+.scheduleTable {
+  border-collapse: collapse;
+}
+
+.scheduleTable td,
+.scheduleTable th {
+  padding: 14px 10px;
+  text-align: left;
+}
+
+/* The Time column's TimePicker renders its own up/down arrow buttons
+   directly above and below the hour/minute fields, making each row much
+   taller than a plain single-line cell -- 6px of vertical padding left
+   basically no gap between one row's down-arrows and the next row's up-
+   arrows, reading as the rows running together/overlapping rather than
+   as separate rows. */
+.scheduleTable tbody tr {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Column separation -- a thin vertical rule between adjacent cells, not
+   just whitespace, so e.g. a long Description value doesn't visually
+   run into the Current column next to it. */
+.scheduleTable td + td,
+.scheduleTable th + th {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.scheduleTable thead th {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a919c;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.15);
+  padding-bottom: 8px;
+}
+
+/* Zebra striping + hover -- the table had no row separation at all
+   beyond cell padding, so a wide row (five inputs plus a delete button)
+   was hard to track by eye from the Time column all the way across to
+   Completed. */
+.scheduleTable tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.scheduleTable tbody tr:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.scheduleAddRow {
+  margin-top: 8px;
+}
+
 /* Shared by every card in the Settings tab (Pool Results / Bracket Tree /
    Schedule) so they read as one consistent set of boxes rather than each
    picking its own width -- see dashboard.tsx's MatchesSettingsPanel. */
@@ -44,4 +98,41 @@
 
 .settingsSection h3 {
   margin-top: 0;
+}
+
+/* Tints the "live now" controls (schedule title, which day is on the
+   overlay, copy URL) so they read as a distinct, immediately-live group
+   -- separate from the day-content Tabs/table below them, which look
+   confusingly similar (same day names/order) without this. See
+   dashboard.tsx's ScheduleSettingsSection. */
+.liveControls {
+  background: rgba(15, 153, 96, 0.08);
+  border: 1px solid rgba(15, 153, 96, 0.3);
+  border-radius: 6px;
+  padding: 0.75rem 1rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* Blueprint's FormGroup bakes in its own 16px margin-bottom, which
+   RadioGroup and a plain Button don't have -- left alone, that stacks
+   ON TOP of this container's own flex `gap` between FormGroup-wrapped
+   children (Schedule title, Icon) but not between the others (Day to
+   display, Copy Overlay URL), so the gap after the radios reads as
+   visibly tighter than every gap above it. Zeroing it out makes the
+   flex `gap` the single source of truth for spacing here, so every
+   child is evenly spaced regardless of which Blueprint component it
+   happens to be. */
+.liveControls :global(.bp6-form-group) {
+  margin-bottom: 0;
+}
+
+.scheduleEditorLabel {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a919c;
 }

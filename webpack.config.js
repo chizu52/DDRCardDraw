@@ -131,7 +131,7 @@ module.exports = function (env = {}, argv = {}) {
         },
         // other asset files
         {
-          test: /\.(woff2?|ttf|svg|eot|jpe?g|png|gif|mp4|mov|ogg|webm)(\?.*)?$/i,
+          test: /\.(woff2?|ttf|otf|svg|eot|jpe?g|png|webp|gif|mp4|mov|ogg|webm)(\?.*)?$/i,
           type: "asset/resource",
         },
         // process the html template too

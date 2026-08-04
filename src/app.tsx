@@ -286,6 +286,23 @@ const router = createBrowserRouter([
       },
     ],
   },
+  {
+    // Same room-synced-state pattern as bracket-tree above -- which day
+    // to show (event.selectedScheduleDay) and the content itself (event.
+    // schedules) are both room-synced, edited from the dashboard's
+    // Settings tab. One stable overlay URL, not one per day.
+    path: "e/:roomName/schedule",
+    element: <ObsSource />,
+    children: [
+      {
+        index: true,
+        lazy: async () => {
+          const { Schedule } = await import("./obs-sources/schedule");
+          return { Component: Schedule };
+        },
+      },
+    ],
+  },
 ]);
 
 function ObsSource() {
