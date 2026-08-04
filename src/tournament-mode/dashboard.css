@@ -100,6 +100,19 @@
   margin-top: 0;
 }
 
+/* Overrides settingsSection's shared 700px cap for this one card only
+   (Pool Results/Bracket Tree stay at 700px) -- the day-content table's
+   Color/Time/Event/Description/Current/Completed columns genuinely need
+   more room than that to all show at once without a horizontal
+   scrollbar, unlike the other two cards' simpler controls. No max-width
+   at all (rather than picking a specific wider number) so it keeps
+   growing to fit whatever the table actually needs as columns get wider
+   or content changes, instead of just moving the same problem to a
+   bigger fixed number. */
+.scheduleSettingsSection {
+  max-width: none;
+}
+
 /* Tints the "live now" controls (schedule title, which day is on the
    overlay, copy URL) so they read as a distinct, immediately-live group
    -- separate from the day-content Tabs/table below them, which look

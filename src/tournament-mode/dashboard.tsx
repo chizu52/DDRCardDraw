@@ -893,7 +893,10 @@ function ScheduleSettingsSection() {
   }, [savedSubtitle, subtitleDirty]);
 
   return (
-    <Card elevation={1} className={styles.settingsSection}>
+    <Card
+      elevation={1}
+      className={`${styles.settingsSection} ${styles.scheduleSettingsSection}`}
+    >
       <h3>Schedule Overlay</h3>
       {/* Grouped and tinted specifically because "Day to display" below
           is a room-synced radio group that immediately changes what's
@@ -1110,23 +1113,32 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
 
   return (
     <>
-      <table className={styles.scheduleTable}>
-        <thead>
-          <tr>
-            <th>Color</th>
-            <th>Time</th>
-            <th>Event</th>
-            <th>Description</th>
-            <th>Current</th>
-            <th>Completed</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {schedule.map((row, i) => (
-            <tr key={i}>
-              <td>
-                {/* Native color input, not a Blueprint component --
+      {/* Horizontally scrollable, not just "let it overflow" -- the
+          TimePicker's own up/down-arrow buttons give it a wide, rigid
+          intrinsic width that a plain browser table-layout treats as
+          fixed, then starves whatever's left (Event/Description, both
+          flexible text inputs) down to a sliver instead of ever growing
+          the table past its container. Explicit minWidths on those two
+          inputs below force the table to actually need the extra space
+          rather than silently accepting near-zero. */}
+      <div style={{ overflowX: "auto" }}>
+        <table className={styles.scheduleTable}>
+          <thead>
+            <tr>
+              <th>Color</th>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Description</th>
+              <th>Current</th>
+              <th>Completed</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedule.map((row, i) => (
+              <tr key={i}>
+                <td>
+                  {/* Native color input, not a Blueprint component --
                     Blueprint doesn't ship one, and the browser's own
                     picker already gives a proper hex swatch UI + value
                     for free. Empty string (not a real color) shows as
@@ -1135,47 +1147,49 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
                     clear control -- the overlay only applies a border
                     tint when row.color is actually set (see
                     obs-sources/schedule.tsx). */}
-                <input
-                  type="color"
-                  value={row.color ?? "#000000"}
-                  onChange={(e) => updateRow(i, { color: e.target.value })}
-                  style={{
-                    width: 32,
-                    height: 32,
-                    padding: 0,
-                    border: "none",
-                    background: "none",
-                    cursor: "pointer",
-                  }}
-                />
-              </td>
-              <td>
-                <TimePicker
-                  precision="minute"
-                  showArrowButtons
-                  useAmPm
-                  value={parseScheduleTime(row.time)}
-                  onChange={(newTime) =>
-                    updateRow(i, { time: formatScheduleTime(newTime) })
-                  }
-                />
-              </td>
-              <td>
-                <InputGroup
-                  value={row.event ?? ""}
-                  onChange={(e) => updateRow(i, { event: e.target.value })}
-                />
-              </td>
-              <td>
-                <InputGroup
-                  value={row.description ?? ""}
-                  onChange={(e) =>
-                    updateRow(i, { description: e.target.value })
-                  }
-                />
-              </td>
-              <td>
-                {/* A completed row can't also be current -- the overlay
+                  <input
+                    type="color"
+                    value={row.color ?? "#000000"}
+                    onChange={(e) => updateRow(i, { color: e.target.value })}
+                    style={{
+                      width: 32,
+                      height: 32,
+                      padding: 0,
+                      border: "none",
+                      background: "none",
+                      cursor: "pointer",
+                    }}
+                  />
+                </td>
+                <td style={{ minWidth: 160 }}>
+                  <TimePicker
+                    precision="minute"
+                    showArrowButtons
+                    useAmPm
+                    value={parseScheduleTime(row.time)}
+                    onChange={(newTime) =>
+                      updateRow(i, { time: formatScheduleTime(newTime) })
+                    }
+                  />
+                </td>
+                <td>
+                  <InputGroup
+                    style={{ minWidth: 220 }}
+                    value={row.event ?? ""}
+                    onChange={(e) => updateRow(i, { event: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <InputGroup
+                    style={{ minWidth: 320 }}
+                    value={row.description ?? ""}
+                    onChange={(e) =>
+                      updateRow(i, { description: e.target.value })
+                    }
+                  />
+                </td>
+                <td>
+                  {/* A completed row can't also be current -- the overlay
                     itself already assumes this can't happen ("completed
                     wins over current," schedule.tsx), but nothing here
                     previously actually enforced it. Disabling instead of
@@ -1183,48 +1197,49 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
                     (no layout shift row-to-row) and makes it visibly
                     clear why it can't be picked, rather than silently
                     doing nothing on click. */}
-                <Radio
-                  name={`schedule-current-${day}`}
-                  checked={!!row.current}
-                  disabled={!!row.completed}
-                  // Both onClick AND onChange, calling the same logic --
-                  // confirmed directly that a native radio's `change`
-                  // event doesn't fire when clicking one that's already
-                  // checked (its own checked state isn't changing), so
-                  // onClick is what actually catches the deselect click.
-                  // onChange stays too, just to satisfy React's "checked
-                  // prop needs an onChange handler" warning on a
-                  // controlled input -- for a normal select-a-different-
-                  // row click, both fire and both compute the same
-                  // result, which is harmless.
-                  onClick={() => setCurrentRow(row.current ? null : i)}
-                  onChange={() => setCurrentRow(row.current ? null : i)}
-                />
-              </td>
-              <td>
-                <Checkbox
-                  checked={!!row.completed}
-                  onChange={(e) => {
-                    const completed = e.currentTarget.checked;
-                    // Closes the same gap from the other direction --
-                    // marking an already-current row completed has to
-                    // clear `current` too, or the disallowed combination
-                    // still happens via this path even with the radio
-                    // itself now disabled.
-                    updateRow(i, {
-                      completed,
-                      current: completed ? false : row.current,
-                    });
-                  }}
-                />
-              </td>
-              <td>
-                <Button icon={<Trash />} onClick={() => removeRow(i)} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                  <Radio
+                    name={`schedule-current-${day}`}
+                    checked={!!row.current}
+                    disabled={!!row.completed}
+                    // Both onClick AND onChange, calling the same logic --
+                    // confirmed directly that a native radio's `change`
+                    // event doesn't fire when clicking one that's already
+                    // checked (its own checked state isn't changing), so
+                    // onClick is what actually catches the deselect click.
+                    // onChange stays too, just to satisfy React's "checked
+                    // prop needs an onChange handler" warning on a
+                    // controlled input -- for a normal select-a-different-
+                    // row click, both fire and both compute the same
+                    // result, which is harmless.
+                    onClick={() => setCurrentRow(row.current ? null : i)}
+                    onChange={() => setCurrentRow(row.current ? null : i)}
+                  />
+                </td>
+                <td>
+                  <Checkbox
+                    checked={!!row.completed}
+                    onChange={(e) => {
+                      const completed = e.currentTarget.checked;
+                      // Closes the same gap from the other direction --
+                      // marking an already-current row completed has to
+                      // clear `current` too, or the disallowed combination
+                      // still happens via this path even with the radio
+                      // itself now disabled.
+                      updateRow(i, {
+                        completed,
+                        current: completed ? false : row.current,
+                      });
+                    }}
+                  />
+                </td>
+                <td>
+                  <Button icon={<Trash />} onClick={() => removeRow(i)} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <ButtonGroup className={styles.scheduleAddRow}>
         <Button icon={<Add />} onClick={addRow}>
           Add row

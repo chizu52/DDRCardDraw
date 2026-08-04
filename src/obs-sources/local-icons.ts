@@ -1,16 +1,17 @@
 export interface LocalIcon {
-  /** Filename without extension, e.g. "ddr" -- used both as the dropdown
-   * option's value-matching key and (capitalized) its label. */
+  /** Filename without extension, e.g. "DDR" -- used both as the dropdown
+   * option's value-matching key and, verbatim, its label (see
+   * iconLabel below). */
   name: string;
   url: string;
 }
 
 // Bundled repo assets (unlike the fonts in local-fonts.ts, these aren't
-// gitignored -- see src/other-assets/Icons/README.md for the licensing
-// note on that). require.context still tolerates the folder being empty
-// (no build error), so the dropdown just has nothing but "None" in it
-// until someone drops files in, same as any other optional-content
-// pattern in this app.
+// gitignored -- check the license of whatever image you use before
+// dropping it here). require.context still tolerates the folder being
+// empty (no build error), so the dropdown just has nothing but "None"
+// in it until someone drops files in, same as any other optional-
+// content pattern in this app.
 const iconFiles = require.context(
   "../other-assets/Icons",
   false,
