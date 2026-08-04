@@ -103,8 +103,16 @@ function useIconCallbacksForChart(chartId: string): IconCallbacks {
 
 function useRecentAction(timestamp: number | undefined, durationMs: number) {
   const [justChanged, setJustChanged] = useState(false);
+  // Not the "derive state from props" antipattern this rule normally
+  // targets -- justChanged genuinely needs a timer (setTimeout below) to
+  // flip itself back off after `remaining` ms, which isn't something a
+  // plain render-time calculation can do on its own. timestamp/durationMs
+  // are external inputs (a prop from Redux-tracked drawing state, not
+  // local state this hook owns), so re-deriving + rescheduling whenever
+  // either changes is the effect doing its actual job, not a workaround.
   useEffect(() => {
     if (!timestamp) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
       setJustChanged(false);
       return;
     }

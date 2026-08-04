@@ -38,16 +38,14 @@ import {
 } from "@blueprintjs/icons";
 import { css } from "@codemirror/lang-css";
 import ReactCodeMirror from "@uiw/react-codemirror";
-import { useAtom, useAtomValue } from "jotai";
+import { useAtomValue } from "jotai";
 import { nanoid } from "nanoid";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useHref } from "react-router-dom";
 import {
   colorToCss,
-  googleClientIdAtom,
   readColumnBColors,
   readSheetValues,
-  requestSheetsToken,
   sheetsApiKeyAtom,
   sheetsTokenAtom,
   spreadsheetIdAtom,
@@ -59,7 +57,6 @@ import {
   parsePoolsFromRows,
   parsePendingRows,
   mergePendingIntoPool,
-  ParsedPool,
   ParsedSheet,
   colIndexToLetter,
   sumScores,
@@ -193,9 +190,8 @@ interface ExportStatus {
 }
 
 function MatchesImportPanel() {
-  const [token, setToken] = useAtom(sheetsTokenAtom);
+  const token = useAtomValue(sheetsTokenAtom);
   const spreadsheetId = useAtomValue(spreadsheetIdAtom);
-  const clientId = useAtomValue(googleClientIdAtom);
   const dispatch = useAppDispatch();
   // Same room-synced settings the pool-results OBS overlay uses (see
   // event.slice.ts) -- applied here too so this table and the overlay are
@@ -232,7 +228,10 @@ function MatchesImportPanel() {
   }, [token, spreadsheetId]);
 
   useEffect(() => {
-    loadPools();
+    // loadPools already catches its own errors internally (sets `status`
+    // on failure, never rejects) -- void makes the intentional fire-and-
+    // forget explicit rather than leaving an unhandled-looking promise.
+    void loadPools();
   }, [loadPools]);
 
   const importPoolFromPending = async (

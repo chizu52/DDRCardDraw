@@ -38,9 +38,22 @@ export const sheetsApiKeyAtom = atomWithStorage<string | null>(
 
 const SCOPES = "https://www.googleapis.com/auth/spreadsheets";
 
+// Just the shape this file actually calls (Google Identity Services'
+// token client) -- not the full GIS API surface, which would need
+// installing a types package for the rest of it we don't use.
 declare global {
   interface Window {
-    google: any;
+    google: {
+      accounts: {
+        oauth2: {
+          initTokenClient(config: {
+            client_id: string;
+            scope: string;
+            callback: (response: { access_token: string }) => void;
+          }): { requestAccessToken(): void };
+        };
+      };
+    };
   }
 }
 
@@ -140,12 +153,22 @@ export async function readColumnBColors(
     );
   }
   const data = await res.json();
-  const rowData = data.sheets?.[0]?.data?.[0]?.rowData || [];
-  return rowData.map((r: any) => {
+  const rowData: SheetsRowData[] = data.sheets?.[0]?.data?.[0]?.rowData || [];
+  return rowData.map((r) => {
     const bg = r.values?.[0]?.effectiveFormat?.backgroundColor;
     if (!bg) return null;
     return { r: bg.red ?? 1, g: bg.green ?? 1, b: bg.blue ?? 1 };
   });
+}
+
+// Just the fields actually read above -- not the full Sheets API
+// RowData shape.
+interface SheetsRowData {
+  values?: {
+    effectiveFormat?: {
+      backgroundColor?: { red?: number; green?: number; blue?: number };
+    };
+  }[];
 }
 export async function batchUpdateValues(
   token: string,
