@@ -21,6 +21,13 @@ export const routablePoolResultsPath = (
 ) =>
   `../pool-results?${new URLSearchParams({ apiKey, spreadsheetId }).toString()}`;
 
+// Same stable-URL-plus-URL-embedded-credentials pattern as
+// routablePoolResultsPath above -- which phase to show is room-synced
+// state (event.selectedBracketPhase), only the start.gg API key comes
+// from the URL. See bracket-tree.tsx.
+export const routableBracketTreePath = (apiKey: string) =>
+  `../bracket-tree?${new URLSearchParams({ apiKey }).toString()}`;
+
 export function copyObsSource(href: string) {
   void copyPlainTextToClipboard(href, "Copied OBS source URL to clipboard");
 }

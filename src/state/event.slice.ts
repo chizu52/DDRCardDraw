@@ -34,6 +34,14 @@ interface EventState {
    * lets the user pick e.g. gold+silver only (the original behavior) vs.
    * also coloring bronze/4th-and-below. See sheets/row-colors.ts. */
   overlayRowColorTiers: RowColorTiers;
+  /** Which start.gg phase the bracket-tree OBS overlay
+   * (obs-sources/bracket-tree.tsx) currently shows -- a phase id, same
+   * room-synced "pick it from the Matches Settings tab, not a new OBS
+   * URL" pattern as selectedPool. */
+  selectedBracketPhase: string | null;
+  /** Same idea as poolsRefreshedAt -- bumped to force every connected
+   * bracket-tree overlay to refetch from start.gg immediately. */
+  bracketRefreshedAt: number;
 }
 
 const initialState: EventState = {
@@ -54,6 +62,8 @@ const initialState: EventState = {
   overlayAdvanceCount: 1,
   overlayRowColors: true,
   overlayRowColorTiers: DEFAULT_ROW_COLOR_TIERS,
+  selectedBracketPhase: null,
+  bracketRefreshedAt: 0,
 };
 
 export const eventSlice = createSlice({
@@ -142,6 +152,17 @@ export const eventSlice = createSlice({
     ) {
       state.overlayRowColorTiers[action.payload.tier] = action.payload.enabled;
     },
+    setSelectedBracketPhase(state, action: PayloadAction<string | null>) {
+      state.selectedBracketPhase = action.payload;
+    },
+    signalBracketRefresh: {
+      prepare() {
+        return { payload: Date.now() };
+      },
+      reducer(state, action: PayloadAction<number>) {
+        state.bracketRefreshedAt = action.payload;
+      },
+    },
   },
   extraReducers(builder) {
     builder.addCase(mergeDraws, (state, { payload }) => {
@@ -188,5 +209,11 @@ export function addOverlaySettings(state: EventState) {
   }
   if (!state.overlayRowColorTiers) {
     state.overlayRowColorTiers = { ...DEFAULT_ROW_COLOR_TIERS };
+  }
+  if (state.selectedBracketPhase === undefined) {
+    state.selectedBracketPhase = null;
+  }
+  if (state.bracketRefreshedAt === undefined) {
+    state.bracketRefreshedAt = 0;
   }
 }

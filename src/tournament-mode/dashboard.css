@@ -25,10 +25,23 @@
   background-color: #29a634 !important;
 }
 
-.finishedCheckbox input:not(:checked) ~ :global(.bp6-control-indicator)::before {
+.finishedCheckbox
+  input:not(:checked)
+  ~ :global(.bp6-control-indicator)::before {
   background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath d='M4 4L12 12M12 4L4 12' stroke='white' stroke-width='2' stroke-linecap='round'/%3e%3c/svg%3e");
 }
 
 .finishedCheckbox:hover input:checked ~ :global(.bp6-control-indicator) {
   background-color: #238c2c !important;
+}
+
+/* Shared by every card in the Settings tab (Pool Results / Bracket Tree /
+   Schedule) so they read as one consistent set of boxes rather than each
+   picking its own width -- see dashboard.tsx's MatchesSettingsPanel. */
+.settingsSection {
+  max-width: 700px;
+}
+
+.settingsSection h3 {
+  margin-top: 0;
 }

@@ -264,6 +264,28 @@ const router = createBrowserRouter([
       },
     ],
   },
+  {
+    // Same room-synced-state pattern as pool-results above (stable URL,
+    // which bracket/phase to show lives in event.selectedBracketPhase,
+    // set from the Matches Settings tab). The start.gg API key still
+    // comes from the URL -- see bracket-tree.tsx, which sets up its own
+    // urql client/Provider scoped to that key, independent of this app's
+    // own startgg-gql/index.ts client (which reads its token from this
+    // device's localStorage, not available inside an isolated OBS
+    // browser profile).
+    path: "e/:roomName/bracket-tree",
+    element: <ObsSource />,
+    children: [
+      {
+        index: true,
+        lazy: async () => {
+          const { BracketTreeOverlay } =
+            await import("./obs-sources/bracket-tree");
+          return { Component: BracketTreeOverlay };
+        },
+      },
+    ],
+  },
 ]);
 
 function ObsSource() {

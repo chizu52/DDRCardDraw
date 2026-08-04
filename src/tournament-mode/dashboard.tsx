@@ -12,6 +12,7 @@ import {
   FormGroup,
   H3,
   H4,
+  HTMLSelect,
   InputGroup,
   NumericInput,
   Tab,
@@ -60,11 +61,13 @@ import {
   topScoreRanks,
 } from "../sheets/parse-pools";
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
+import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
 import { eventSlice } from "../state/event.slice";
 import { useAppDispatch, useAppState } from "../state/store";
 import { useTheme } from "../theme-toggle";
 import {
   copyObsSource,
+  routableBracketTreePath,
   routableGlobalSourcePath,
   routablePoolResultsPath,
 } from "./copy-obs-source";
@@ -584,61 +587,136 @@ function MatchesSettingsPanel() {
   const dispatch = useAppDispatch();
 
   return (
-    <section style={{ maxWidth: "600px" }}>
-      <h3>Pool Results Overlay</h3>
-      <FormGroup label="Advancements" inline>
-        <NumericInput
-          value={advanceCount}
-          min={1}
-          max={4}
-          clampValueOnBlur
-          onValueChange={(n) => {
-            if (Number.isFinite(n)) {
-              dispatch(
-                eventSlice.actions.setOverlayAdvanceCount(Math.round(n)),
-              );
-            }
-          }}
-          style={{ width: "60px" }}
+    // Each overlay's settings live in its own elevated Card -- previously
+    // this was one flat scrolling section with Pool Results unboxed and
+    // Bracket/Schedule only set apart by a thin top border, which made it
+    // hard to tell at a glance where one overlay's settings ended and the
+    // next began. A consistent card boundary + gap between them (rather
+    // than each section styling its own divider differently) is what
+    // actually reads as "three separate things," not just three headings.
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+      <Card elevation={1} className={styles.settingsSection}>
+        <h3>Pool Results Overlay</h3>
+        <FormGroup label="Advancements" inline>
+          <NumericInput
+            value={advanceCount}
+            min={1}
+            max={4}
+            clampValueOnBlur
+            onValueChange={(n) => {
+              if (Number.isFinite(n)) {
+                dispatch(
+                  eventSlice.actions.setOverlayAdvanceCount(Math.round(n)),
+                );
+              }
+            }}
+            style={{ width: "60px" }}
+          />
+        </FormGroup>
+        <Checkbox
+          checked={rowColors}
+          label="Colored Placements upon Finalization"
+          onChange={(e) =>
+            dispatch(
+              eventSlice.actions.setOverlayRowColors(e.currentTarget.checked),
+            )
+          }
         />
+        <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
+          <RowColorTierCheckbox
+            tier="first"
+            label="1st place (gold)"
+            tiers={rowColorTiers}
+            disabled={!rowColors}
+          />
+          <RowColorTierCheckbox
+            tier="second"
+            label="2nd place (silver)"
+            tiers={rowColorTiers}
+            disabled={!rowColors}
+          />
+          <RowColorTierCheckbox
+            tier="third"
+            label="3rd place (bronze)"
+            tiers={rowColorTiers}
+            disabled={!rowColors}
+          />
+          <RowColorTierCheckbox
+            tier="fourthPlus"
+            label="4th place and below (gray)"
+            tiers={rowColorTiers}
+            disabled={!rowColors}
+          />
+        </div>
+        <CopyOverlayUrlButton />
+      </Card>
+      <BracketSettingsSection />
+    </div>
+  );
+}
+
+/** Controls for the bracket-tree OBS overlay (see
+ * obs-sources/bracket-tree.tsx) -- which start.gg phase it shows is
+ * room-synced state (event.selectedBracketPhase), same "pick it here,
+ * not a new OBS URL" pattern as the pool-results overlay's pool
+ * selection. Phase list reuses the same GauntletDivisions query the
+ * Matches tab's own start.gg picker already depends on
+ * (useStartggPhases, in startgg-gql/index.ts) -- no new query for that
+ * part. */
+function BracketSettingsSection() {
+  const dispatch = useAppDispatch();
+  const selectedPhase = useAppState((s) => s.event.selectedBracketPhase);
+  const [phasesResult] = useStartggPhases();
+  const phases = phasesResult.data?.event?.phases || [];
+  const startggApiKey = useAtomValue(startggKeyAtom);
+  const ready = !!startggApiKey;
+  const href = useHref(routableBracketTreePath(startggApiKey || ""));
+
+  return (
+    <Card elevation={1} className={styles.settingsSection}>
+      <h3>Start.gg Bracket Overlay</h3>
+      <FormGroup label="Bracket to display" inline>
+        <HTMLSelect
+          value={selectedPhase ?? ""}
+          onChange={(e) =>
+            dispatch(
+              eventSlice.actions.setSelectedBracketPhase(
+                e.currentTarget.value || null,
+              ),
+            )
+          }
+        >
+          <option value="">None selected</option>
+          {phases.map((phase) => (
+            <option key={phase?.id} value={phase?.id ?? undefined}>
+              {phase?.name}
+            </option>
+          ))}
+        </HTMLSelect>
       </FormGroup>
-      <Checkbox
-        checked={rowColors}
-        label="Colored Placements upon Finalization"
-        onChange={(e) =>
-          dispatch(
-            eventSlice.actions.setOverlayRowColors(e.currentTarget.checked),
-          )
-        }
-      />
-      <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
-        <RowColorTierCheckbox
-          tier="first"
-          label="1st place (gold)"
-          tiers={rowColorTiers}
-          disabled={!rowColors}
-        />
-        <RowColorTierCheckbox
-          tier="second"
-          label="2nd place (silver)"
-          tiers={rowColorTiers}
-          disabled={!rowColors}
-        />
-        <RowColorTierCheckbox
-          tier="third"
-          label="3rd place (bronze)"
-          tiers={rowColorTiers}
-          disabled={!rowColors}
-        />
-        <RowColorTierCheckbox
-          tier="fourthPlus"
-          label="4th place and below (gray)"
-          tiers={rowColorTiers}
-          disabled={!rowColors}
-        />
-      </div>
-      <CopyOverlayUrlButton />
-    </section>
+      <ButtonGroup>
+        <Button
+          icon={<Refresh />}
+          onClick={() => dispatch(eventSlice.actions.signalBracketRefresh())}
+        >
+          Refresh
+        </Button>
+        <Button
+          icon={<Duplicate />}
+          disabled={!ready}
+          title={
+            ready
+              ? undefined
+              : "Save a start.gg API key first (see the start.gg connection panel)"
+          }
+          onClick={() =>
+            copyObsSource(new URL(href, document.location.href).href)
+          }
+        >
+          Copy Overlay URL
+        </Button>
+      </ButtonGroup>
+    </Card>
   );
 }
 

@@ -1,18 +1,26 @@
 import { Section, SectionCard, Tabs, Tab } from "@blueprintjs/core";
 import { PlayerNamesControls } from "../controls/player-names";
 import { DrawingList } from "../drawing-list";
-import { atom, useAtom } from "jotai";
+import { atom, useAtom, useAtomValue } from "jotai";
 import styles from "./main-view.css";
 import { lazy, Suspense } from "react";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorFallback } from "../utils/error-fallback";
 import { DelayedSpinner } from "../common-components/delayed-spinner";
 import { SheetsCredsManager } from "../sheets/sheets-creds-manager";
+import { sheetsTokenAtom, spreadsheetIdAtom } from "../sheets/sheets-export";
 export type MainTabId = "drawings" | "players" | "sets" | "sheets";
 export const mainTabAtom = atom<MainTabId>("drawings");
 const EligibleChartsList = lazy(() => import("../eligible-charts"));
 export function MainView() {
   const [currentTab, setCurrentTab] = useAtom(mainTabAtom);
+  // Same "already configured" check as SheetsExportGated (sheets-creds-
+  // manager.tsx) -- matches the start.gg panel below, which collapses by
+  // default once its own credentials are already saved and stays open
+  // otherwise, instead of always reopening on every refresh regardless
+  // of connection state.
+  const sheetsToken = useAtomValue(sheetsTokenAtom);
+  const spreadsheetId = useAtomValue(spreadsheetIdAtom);
   return (
     <Tabs
       id="main-view"
@@ -45,7 +53,9 @@ export function MainView() {
           <Section
             title="Google Spreadsheet Credentials"
             collapsible
-            collapseProps={{ defaultIsOpen: true }}
+            collapseProps={{
+              defaultIsOpen: !sheetsToken || !spreadsheetId,
+            }}
             style={{ maxWidth: "50em" }}
           >
             <SectionCard>
