@@ -81,10 +81,18 @@ function EligibleChartsList() {
 
   return (
     <>
+      {/* top: 0, not 50px -- that 50 would only make sense if this stuck
+          to the page/window scroll, clearing the outer app Navbar's own
+          50px height above it. It doesn't: this Navbar lives inside
+          .bp6-tab-panel, which scrolls independently (its own
+          overflow-y: auto), so it's already the full scrolling viewport
+          on its own. A 50px offset just left an uncovered band at the
+          panel's own top edge that scrolled-past content (cards, the
+          histogram) stayed visible through instead of being covered. */}
       <Navbar
         style={{
           position: "sticky",
-          top: "50px",
+          top: 0,
         }}
       >
         <NavbarGroup>

@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ScheduleDay, ScheduleItem } from "../state/event.slice";
 import { useAppState } from "../state/store";
-import { FitTo1080 } from "./fit-to-1080";
 // webpack's asset/resource handling (same as src/assets/ddr-tools-256.png,
 // see webpack.config.js) emits this as its own static file rather than
 // inlining it into the JS bundle -- important at this file's size (~14MB,
@@ -27,14 +26,24 @@ const COLORS = {
   // subtitle-label text at this weight needs a bit more contrast
   // against the dark panel to stay legible at broadcast compression.
   muted: "#9aa2ac",
-  mint: "#7ed9b5",
+  // Started as an exact copy of bracket-tree.tsx's `live`/`winnerScore`
+  // green (#3dcc91), but that hue (~155°) sits close enough to teal that
+  // it read as "mint," not "green" -- shifted down to ~142° (closer to
+  // a plain, saturated green) while keeping roughly the same
+  // brightness/vibrancy, still named `mint` only because nothing else in
+  // this file references the current-row border by a different key.
+  mint: "#22c55e",
   gold: "#efc75e",
   coral: "#f0a868",
-  // A solid mint-into-panel blend for the `current` row's background --
-  // NOT a translucent rgba() over the card's own busy scrimmed-banner
-  // background (the previous approach), which diluted contrast and made
-  // the highlighted row read worse than the plain panel rows around it.
-  currentBg: "#2c433c",
+  // NOT mint's HSL complement -- tried that (a 180° hue rotation lands
+  // in red/magenta territory), and even blended/darkened down it still
+  // read as "red," not "green's complement." What actually pairs with a
+  // green border without clashing is a dark, desaturated shade of that
+  // SAME hue (same idea as bracket-tree.tsx's dark panel base under a
+  // bright accent) -- this is mint's own (new, ~142°) hue at roughly
+  // 21% saturation, 22% lightness, same recipe as before just re-derived
+  // from the shifted border color.
+  currentBg: "#2c4435",
 };
 // Two independent slots, not one shared FONT_FAMILY -- a bold hand-drawn
 // display face reads fine at the title's large size but hurts legibility
@@ -146,15 +155,23 @@ function formatDisplayTime(time: string | undefined): DisplayTime | null {
 
 // Row colors come in as plain "#rrggbb" from the dashboard's native
 // <input type="color"> (see dashboard.tsx's ScheduleDayEditor), which
-// can't express alpha itself -- converts to rgba() so the pill's
-// background can be a soft, translucent tint of that color rather than
-// the fully-saturated swatch value, which would be too loud/heavy for a
-// background sitting behind text.
-function hexToRgba(hex: string, alpha: number): string {
-  const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!match) return hex;
-  const [, r, g, b] = match;
-  return `rgba(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)}, ${alpha})`;
+// can't express alpha itself. Pre-blended into a SOLID color against
+// COLORS.panel rather than left as a translucent rgba() tint -- the time
+// box sits on top of the row's own background, which differs by row
+// state (COLORS.currentBg vs COLORS.panel) -- a translucent tint let
+// that show through, so the exact same row.color box read as a
+// different effective color on the current row than on every other row.
+// Blending against a fixed base up front keeps it looking identical
+// regardless of what row it's in.
+function blendOverPanel(hex: string, alpha: number): string {
+  const fgMatch = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  const bgMatch = /^#([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(COLORS.panel);
+  if (!fgMatch || !bgMatch) return hex;
+  const mix = (fg: string, bg: string) =>
+    Math.round(parseInt(fg, 16) * alpha + parseInt(bg, 16) * (1 - alpha));
+  const [, fr, fg, fb] = fgMatch;
+  const [, br, bgc, bb] = bgMatch;
+  return `rgb(${mix(fr, br)}, ${mix(fg, bgc)}, ${mix(fb, bb)})`;
 }
 
 function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
@@ -213,6 +230,58 @@ function formatDayDate(day: ScheduleDay, nowMs: number): string {
   });
 }
 
+// Centers `children` within its (position:relative) parent using
+// measured, integer-pixel offsets instead of the CSS `left: 50%` +
+// `transform: translate(-50%, -50%)` trick tried first -- that reliably
+// lands the content at a sub-pixel position (confirmed directly: e.g.
+// `left: 75.99px`), which browsers render by anti-aliasing across the
+// pixel boundary, reading as slightly blurrier text than a crisp
+// integer-pixel position does. Runs in useLayoutEffect (before paint,
+// so no visible jump) and stays hidden until the first measurement
+// lands, since there's nothing meaningful to show before the content's
+// own natural size is known.
+function CenteredTimeText({ children }: { children: React.ReactNode }) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [offset, setOffset] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    const box = content?.parentElement;
+    if (!content || !box) return;
+    // box.getBoundingClientRect() (not clientWidth/Height) -- this box
+    // has a border on the right only (the row divider), and clientWidth
+    // excludes that border, which would re-introduce the same
+    // half-border offset bug the calc(50% + 1.5px) fix above was
+    // working around. Rounded before dividing so the two numbers being
+    // subtracted are both whole pixels going in, not just the result
+    // coming out.
+    const boxRect = box.getBoundingClientRect();
+    setOffset({
+      left: Math.round((Math.round(boxRect.width) - content.offsetWidth) / 2),
+      top: Math.round((Math.round(boxRect.height) - content.offsetHeight) / 2),
+    });
+  }, [children]);
+
+  return (
+    <div
+      ref={contentRef}
+      style={{
+        position: "absolute",
+        left: offset?.left ?? 0,
+        top: offset?.top ?? 0,
+        visibility: offset ? "visible" : "hidden",
+        display: "inline-flex",
+        alignItems: "baseline",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 // One stable overlay source -- which day it shows is room-synced state
 // (event.selectedScheduleDay), switched live from the Settings tab's
 // radio buttons, same pattern as selectedBracketPhase/selectedPool.
@@ -250,7 +319,7 @@ export function Schedule() {
   const rows = sortedByTime(items).filter((row) => row.time || row.event);
 
   return (
-    <FitTo1080>
+    <>
       <style>{FONT_FACE_CSS}</style>
       <style>{ANIMATIONS_CSS}</style>
       {/* key -- day and scheduleUpdatedAt are both room-synced, changed
@@ -382,7 +451,6 @@ export function Schedule() {
                 style={{
                   fontFamily: TITLE_FONT_FAMILY,
                   color: COLORS.text,
-                  fontWeight: 800,
                   fontSize: 44,
                   animation: "scheduleFadeIn 0.4s ease both",
                   animationDelay: "0.1s",
@@ -413,14 +481,10 @@ export function Schedule() {
                   animationDelay: "0.2s",
                 }}
               >
-                <div
-                  style={{ color: COLORS.muted, fontWeight: 700, fontSize: 16 }}
-                >
+                <div style={{ color: COLORS.muted, fontSize: 20 }}>
                   Schedule for:
                 </div>
-                <div
-                  style={{ color: COLORS.gold, fontWeight: 700, fontSize: 16 }}
-                >
+                <div style={{ color: COLORS.gold, fontSize: 20 }}>
                   {DAY_LABELS[day]}
                   {formatDayDate(day, nowMs) &&
                     `, ${formatDayDate(day, nowMs)}`}
@@ -432,7 +496,6 @@ export function Schedule() {
               <div
                 style={{
                   color: COLORS.coral,
-                  fontWeight: 800,
                   fontSize: 24,
                   fontVariantNumeric: "tabular-nums",
                   animation: "scheduleFadeIn 0.4s ease both",
@@ -453,19 +516,29 @@ export function Schedule() {
                 const isCompleted = !!row.completed;
                 const isCurrent = !!row.current && !isCompleted;
                 const displayTime = formatDisplayTime(row.time);
-                // Operator-picked per row (dashboard.tsx's
-                // ScheduleDayEditor) -- falls back to the plain neutral
-                // defaults when unset, same as every other optional
-                // per-row visual.
-                const rowBorderColor = row.color || COLORS.border;
+                // The outer row border is now a flat, uniform signal
+                // (soft gray, or green for the current row) rather than
+                // per-row picked color -- row.color still drives the
+                // time pill below, just not this. Keeps the "what's
+                // happening now" cue to exactly one place instead of
+                // competing with an operator's arbitrary per-row accent
+                // color on the same element.
+                const rowBorderColor = isCurrent ? COLORS.mint : COLORS.border;
                 const pillBorderColor = row.color || "rgba(255, 255, 255, 0.8)";
                 return (
                   <div
                     key={i}
                     style={{
                       display: "flex",
-                      alignItems: "center",
-                      gap: 20,
+                      // stretch, not center -- the time box below relies
+                      // on this to fill the row's full height, rather
+                      // than sizing itself and leaving a gap of row
+                      // background visible above/below it.
+                      alignItems: "stretch",
+                      // No gap -- the time box's own borderRight now
+                      // reads as the divider between it and the text
+                      // content, replacing the old empty space between
+                      // two separately-bordered pieces.
                       // Insets each row a little further than the
                       // header panel above it (which stays full width)
                       // -- equal margin on both sides keeps it centered
@@ -487,14 +560,17 @@ export function Schedule() {
                       background: isCurrent ? COLORS.currentBg : COLORS.panel,
                       border: `3px solid ${rowBorderColor}`,
                       borderRadius: 14,
-                      // A tiny bit tighter than the header's own "32px
-                      // 32px" -- the header is the main header, these
-                      // are secondary content, and shrinking the rows
-                      // slightly (instead of only growing the header)
-                      // widens the visible size gap between the two
-                      // without making the header disproportionately
-                      // huge on its own.
-                      padding: "18px 24px",
+                      // Clips the time box's own square right edge/
+                      // background to the row's rounded corners -- the
+                      // box's own left corners are rounded to match (see
+                      // below), this is just a safety net for subpixel
+                      // rounding between the two.
+                      overflow: "hidden",
+                      // No padding here anymore -- it moved onto the two
+                      // children individually now that they're two
+                      // visually distinct sections (time box, text) of
+                      // one divided row, rather than free-floating
+                      // content inside a single padded shell.
                       // completed rows fade to 0.9 (not fully opaque) as
                       // a light "stepped back" cue on top of the
                       // strikethrough/muted-color treatment -- has to be
@@ -509,69 +585,89 @@ export function Schedule() {
                       animationDelay: `${0.3 + i * 0.05}s`,
                     }}
                   >
-                    {/* Pill border AND background both key off the
+                    {/* A boxed section of the row now, not a separate
+                        floating pill -- stretches to the row's full
+                        height and its borderRight is the only border,
+                        reading as a divider between it and the text
+                        next to it rather than a fully-enclosed shape of
+                        its own. Border/background still key off the
                         row's own color (row.color if the operator
-                        picked one, otherwise plain neutral defaults) --
-                        the background is a soft, low-alpha TINT of it
-                        rather than the same full-strength swatch value
-                        the border uses, since a solid saturated fill
-                        behind the numeral/period text would be too loud
-                        and would fight the text for contrast. */}
+                        picked one, otherwise plain neutral defaults). */}
                     <div
                       style={{
                         boxSizing: "border-box",
-                        display: "inline-flex",
-                        // baseline, not center -- the numeral (18px) and
-                        // period (11px) are different font sizes, so
-                        // centering by box height (the default "center"
-                        // behavior) lines up their MIDDLES instead of
-                        // their text baselines, which reads as the
-                        // period floating above where it should sit.
-                        alignItems: "baseline",
-                        justifyContent: "center",
+                        // position:relative + the child's absolute
+                        // top/left:50% + translate(-50%,-50%) below,
+                        // rather than flex's align/justify-items:center
+                        // -- flexbox centers by LINE-BOX (which pads out
+                        // for font ascent/descent metrics), not by the
+                        // text's actual rendered bounding box, so a
+                        // baseline-aligned two-different-font-sizes
+                        // group like this one landed visibly off the
+                        // box's true center. Transform-centering
+                        // measures the group's own real bounding box
+                        // against the box's exact midpoint instead.
+                        position: "relative",
                         background: row.color
-                          ? hexToRgba(row.color, 0.18)
-                          : "rgba(255, 255, 255, 0.06)",
-                        border: `3px solid ${pillBorderColor}`,
-                        borderRadius: 500,
-                        padding: "8px 14px",
-                        minWidth: 100,
+                          ? blendOverPanel(row.color, 0.18)
+                          : blendOverPanel("#ffffff", 0.06),
+                        borderRight: `3px solid ${pillBorderColor}`,
+                        // Matches the row's own 14px corner radius minus
+                        // its 3px border, so the box's outer edge nests
+                        // flush against the inside of that rounded
+                        // corner instead of showing a square peeking out
+                        // past a round one. Only the left corners --
+                        // it's a divider on the right, not its own
+                        // separately-rounded shape.
+                        borderRadius: "11px 0 0 11px",
+                        // Fixed width, not just a minWidth floor -- a
+                        // minWidth let a two-digit hour ("11:00") grow
+                        // this box wider than a one-digit hour's ("3:00")
+                        // row right next to it, so the divider line
+                        // (this box's own borderRight) landed at a
+                        // different x position row-to-row instead of
+                        // lining up in one column. 150px comfortably
+                        // fits the widest realistic value ("12:00 PM")
+                        // at this font size with room to spare.
+                        width: 150,
                         flexShrink: 0,
                       }}
                     >
                       {displayTime && (
-                        <>
+                        <CenteredTimeText>
+                          {/* White by default -- completed rows keep the
+                              old muted treatment instead, so a done row's
+                              time still reads as part of the same
+                              grayed-out/struck-through row rather than
+                              standing out as the one bright element left
+                              in it. */}
                           <span
                             style={{
-                              color: COLORS.muted,
-                              fontWeight: 800,
-                              fontSize: 18,
+                              color: isCompleted ? COLORS.muted : COLORS.text,
+                              fontSize: 30,
                             }}
                           >
                             {displayTime.numeral}
                           </span>
                           <span
                             style={{
-                              color: COLORS.muted,
-                              fontWeight: 600,
-                              fontSize: 11,
+                              color: isCompleted ? COLORS.muted : COLORS.text,
+                              fontSize: 16,
                               opacity: 0.75,
                               marginLeft: 3,
                             }}
                           >
                             {displayTime.period}
                           </span>
-                        </>
+                        </CenteredTimeText>
                       )}
                     </div>
-                    <div>
+                    <div style={{ padding: "18px 24px" }}>
                       <div
                         style={{
                           fontFamily: TITLE_FONT_FAMILY,
                           color: isCompleted ? COLORS.muted : COLORS.text,
-                          fontWeight: 800,
                           fontSize: 24,
-                          textDecoration: isCompleted ? "line-through" : "none",
                         }}
                       >
                         {row.event}
@@ -595,6 +691,6 @@ export function Schedule() {
           )}
         </div>
       </div>
-    </FitTo1080>
+    </>
   );
 }

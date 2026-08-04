@@ -8,7 +8,6 @@ import {
   useClient,
 } from "urql";
 import { useStartggPhaseBracket, StartggSet } from "../startgg-gql";
-import { FitTo1080 } from "./fit-to-1080";
 import {
   layoutBracket,
   computeSideGeometry,
@@ -215,56 +214,54 @@ function BracketTreeInner({ phaseId }: { phaseId: string }) {
   );
 
   return (
-    <FitTo1080>
+    <div
+      style={{
+        fontFamily: FONT_FAMILY,
+        background: "#111418",
+        padding: 20,
+        borderRadius: 8,
+        display: "inline-block",
+      }}
+    >
       <div
         style={{
-          fontFamily: FONT_FAMILY,
-          background: "#111418",
-          padding: 20,
-          borderRadius: 8,
-          display: "inline-block",
+          color: COLORS.text,
+          fontWeight: 700,
+          fontSize: 40,
+          marginBottom: 20,
+          textAlign: "center",
         }}
       >
-        <div
-          style={{
-            color: COLORS.text,
-            fontWeight: 700,
-            fontSize: 40,
-            marginBottom: 20,
-            textAlign: "center",
-          }}
-        >
-          {phase.name}
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+        {phase.name}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+        <BracketTree
+          label="Winners"
+          side={layout.winners}
+          setsById={setsById}
+          currentPhaseId={phase.id}
+          nowMs={nowMs}
+          seedProgressionById={seedProgressionById}
+          phantomSetsById={phantomSetsById}
+        />
+        {layout.losers && (
           <BracketTree
-            label="Winners"
-            side={layout.winners}
+            label="Losers"
+            side={layout.losers}
             setsById={setsById}
             currentPhaseId={phase.id}
             nowMs={nowMs}
+            // Only the losers side needs this -- a winners-round-1
+            // entrant trivially "appears in winners" via this exact
+            // set, so passing it there too would wrongly suppress its
+            // own legitimate pill. See indexWinnersEntrantIds's doc.
+            winnersEntrantIds={winnersEntrantIds}
             seedProgressionById={seedProgressionById}
             phantomSetsById={phantomSetsById}
           />
-          {layout.losers && (
-            <BracketTree
-              label="Losers"
-              side={layout.losers}
-              setsById={setsById}
-              currentPhaseId={phase.id}
-              nowMs={nowMs}
-              // Only the losers side needs this -- a winners-round-1
-              // entrant trivially "appears in winners" via this exact
-              // set, so passing it there too would wrongly suppress its
-              // own legitimate pill. See indexWinnersEntrantIds's doc.
-              winnersEntrantIds={winnersEntrantIds}
-              seedProgressionById={seedProgressionById}
-              phantomSetsById={phantomSetsById}
-            />
-          )}
-        </div>
+        )}
       </div>
-    </FitTo1080>
+    </div>
   );
 }
 
