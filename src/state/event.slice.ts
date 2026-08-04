@@ -38,6 +38,24 @@ export interface ScheduleItem {
 
 export type ScheduleDay = "fri" | "sat" | "sun";
 
+/** The schedule overlay's train-station-style status badge -- operator
+ * set (dashboard.tsx's ScheduleSettingsSection radios + minutes box),
+ * not computed from row times vs. the clock: a live event's actual
+ * "are we ahead/behind" call is a judgment the person running it makes,
+ * not something derivable purely from whichever row happens to be
+ * marked current. */
+export type ScheduleStatusState = "ahead" | "onTime" | "delayed";
+
+/** Fallback for a day with no status set yet -- a stable module-level
+ * reference (not a fresh object literal inline at each selector call),
+ * same reasoning as EMPTY_SCHEDULE in obs-sources/schedule.tsx: a new
+ * object every render reads as "changed" to react-redux's reference
+ * check even when the underlying value didn't actually change. */
+export const DEFAULT_SCHEDULE_STATUS: {
+  state: ScheduleStatusState;
+  minutes: number;
+} = { state: "onTime", minutes: 0 };
+
 interface EventState {
   eventName: string;
   cabs: Record<string, CabInfo>;
@@ -104,6 +122,17 @@ interface EventState {
    * to save an actual file to. null renders nothing, same "absent means
    * don't show it" idea as scheduleSubtitle's empty string. */
   scheduleIcon: string | null;
+  /** Per-day header badge state + the number shown alongside it (e.g.
+   * "Delayed 15" -- minutes, though nothing here enforces that unit;
+   * it's just whatever number the operator typed). Per-day, not global,
+   * like `schedules` -- Friday running behind doesn't mean Saturday
+   * (a fresh day, probably starting back on schedule) should show
+   * "Delayed" too the moment its tab is opened. Absent day means
+   * DEFAULT_SCHEDULE_STATUS, same "absent means the default" idea as
+   * everything else here. See ScheduleStatusState above. */
+  scheduleStatus: Partial<
+    Record<ScheduleDay, { state: ScheduleStatusState; minutes: number }>
+  >;
 }
 
 const initialState: EventState = {
@@ -131,6 +160,7 @@ const initialState: EventState = {
   scheduleUpdatedAt: 0,
   scheduleSubtitle: "",
   scheduleIcon: null,
+  scheduleStatus: {},
 };
 
 export const eventSlice = createSlice({
@@ -286,6 +316,34 @@ export const eventSlice = createSlice({
         state.scheduleUpdatedAt = action.payload.updatedAt;
       },
     },
+    // Per-day (see scheduleStatus's own doc) -- staged alongside that
+    // day's own rows in dashboard.tsx's ScheduleDayEditor and sent by
+    // the same Submit click, not dispatched live the instant the
+    // operator touches the radio.
+    setScheduleStatus: {
+      prepare(status: {
+        day: ScheduleDay;
+        state: ScheduleStatusState;
+        minutes: number;
+      }) {
+        return { payload: { ...status, updatedAt: Date.now() } };
+      },
+      reducer(
+        state,
+        action: PayloadAction<{
+          day: ScheduleDay;
+          state: ScheduleStatusState;
+          minutes: number;
+          updatedAt: number;
+        }>,
+      ) {
+        state.scheduleStatus[action.payload.day] = {
+          state: action.payload.state,
+          minutes: action.payload.minutes,
+        };
+        state.scheduleUpdatedAt = action.payload.updatedAt;
+      },
+    },
   },
   extraReducers(builder) {
     builder.addCase(mergeDraws, (state, { payload }) => {
@@ -353,5 +411,16 @@ export function addOverlaySettings(state: EventState) {
   }
   if (state.scheduleIcon === undefined) {
     state.scheduleIcon = null;
+  }
+  // Was a single global {state,minutes} object before scheduleStatus
+  // went per-day -- an old room's persisted value here wouldn't match
+  // the new Partial<Record<ScheduleDay, ...>> shape at all, so it's
+  // discarded (reset to {}) rather than migrated into some arbitrary
+  // day.
+  if (
+    !state.scheduleStatus ||
+    typeof (state.scheduleStatus as { state?: unknown }).state === "string"
+  ) {
+    state.scheduleStatus = {};
   }
 }

@@ -1,5 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ScheduleDay, ScheduleItem } from "../state/event.slice";
+import {
+  DEFAULT_SCHEDULE_STATUS,
+  type ScheduleDay,
+  type ScheduleItem,
+  type ScheduleStatusState,
+} from "../state/event.slice";
 import { useAppState } from "../state/store";
 // webpack's asset/resource handling (same as src/assets/ddr-tools-256.png,
 // see webpack.config.js) emits this as its own static file rather than
@@ -22,28 +27,13 @@ const COLORS = {
   panel: "#1c2127",
   border: "#3a3f49",
   text: "#f6f7f9",
-  // Lightened slightly from an earlier #8a919c -- description/date/
-  // subtitle-label text at this weight needs a bit more contrast
-  // against the dark panel to stay legible at broadcast compression.
   muted: "#9aa2ac",
-  // Started as an exact copy of bracket-tree.tsx's `live`/`winnerScore`
-  // green (#3dcc91), but that hue (~155°) sits close enough to teal that
-  // it read as "mint," not "green" -- shifted down to ~142° (closer to
-  // a plain, saturated green) while keeping roughly the same
-  // brightness/vibrancy, still named `mint` only because nothing else in
-  // this file references the current-row border by a different key.
   mint: "#22c55e",
   gold: "#efc75e",
   coral: "#f0a868",
-  // NOT mint's HSL complement -- tried that (a 180° hue rotation lands
-  // in red/magenta territory), and even blended/darkened down it still
-  // read as "red," not "green's complement." What actually pairs with a
-  // green border without clashing is a dark, desaturated shade of that
-  // SAME hue (same idea as bracket-tree.tsx's dark panel base under a
-  // bright accent) -- this is mint's own (new, ~142°) hue at roughly
-  // 21% saturation, 22% lightness, same recipe as before just re-derived
-  // from the shifted border color.
   currentBg: "#2c4435",
+  blue: "#3A7CDE",
+  red: "#F54927",
 };
 // Two independent slots, not one shared FONT_FAMILY -- a bold hand-drawn
 // display face reads fine at the title's large size but hurts legibility
@@ -153,6 +143,30 @@ function formatDisplayTime(time: string | undefined): DisplayTime | null {
   };
 }
 
+// Applies the schedule status's minutes value to a row's wall-clock
+// time for DISPLAY only -- never touches the row's own stored `time`,
+// since which rows this even applies to (not current, not completed)
+// changes live as the event progresses, and the operator can flip
+// ahead/on time/delayed back and forth. Baking it into the stored data
+// would compound on every status change instead of always reflecting
+// just the current one. Date's own setHours normalizes an out-of-range
+// minutes value (negative or >59) into the right hour/minute pair for
+// free, so a shift crossing an hour (or midnight) wraps correctly
+// without any extra rollover handling here.
+function shiftTimeString(
+  time: string | undefined,
+  deltaMinutes: number,
+): string | undefined {
+  if (!time || !deltaMinutes) return time;
+  const [hStr, mStr] = time.split(":");
+  const hours = Number(hStr);
+  const minutes = Number(mStr);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return time;
+  const d = new Date();
+  d.setHours(hours, minutes + deltaMinutes, 0, 0);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 // Row colors come in as plain "#rrggbb" from the dashboard's native
 // <input type="color"> (see dashboard.tsx's ScheduleDayEditor), which
 // can't express alpha itself. Pre-blended into a SOLID color against
@@ -177,6 +191,21 @@ function blendOverPanel(hex: string, alpha: number): string {
 function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
   return [...items].sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
 }
+
+// Train-station-board-style status, bottom-right of the header (see the
+// badge in Schedule below) -- operator-set (dashboard.tsx's
+// ScheduleDayEditor radios + minutes box, staged/submitted alongside
+// that day's own rows), not computed from row times vs. the clock.
+const SCHEDULE_STATUS_LABELS: Record<ScheduleStatusState, string> = {
+  ahead: "Ahead of Schedule by:",
+  onTime: "On-Time",
+  delayed: "Delayed by:",
+};
+const SCHEDULE_STATUS_COLORS: Record<ScheduleStatusState, string> = {
+  ahead: COLORS.mint,
+  onTime: COLORS.blue,
+  delayed: COLORS.red,
+};
 
 // A real live clock (unlike formatDisplayTime above, which formats a
 // user-typed wall-clock string with no actual Date behind it at all).
@@ -250,18 +279,34 @@ function CenteredTimeText({ children }: { children: React.ReactNode }) {
     const content = contentRef.current;
     const box = content?.parentElement;
     if (!content || !box) return;
-    // box.getBoundingClientRect() (not clientWidth/Height) -- this box
-    // has a border on the right only (the row divider), and clientWidth
-    // excludes that border, which would re-introduce the same
-    // half-border offset bug the calc(50% + 1.5px) fix above was
-    // working around. Rounded before dividing so the two numbers being
-    // subtracted are both whole pixels going in, not just the result
-    // coming out.
-    const boxRect = box.getBoundingClientRect();
-    setOffset({
-      left: Math.round((Math.round(boxRect.width) - content.offsetWidth) / 2),
-      top: Math.round((Math.round(boxRect.height) - content.offsetHeight) / 2),
-    });
+    const measure = () => {
+      // box.getBoundingClientRect() (not clientWidth/Height) -- this
+      // box has a border on the right only (the row divider), and
+      // clientWidth excludes that border, which would re-introduce the
+      // same half-border offset bug the calc(50% + 1.5px) fix above was
+      // working around. Rounded before dividing so the two numbers
+      // being subtracted are both whole pixels going in, not just the
+      // result coming out.
+      const boxRect = box.getBoundingClientRect();
+      setOffset({
+        left: Math.round((Math.round(boxRect.width) - content.offsetWidth) / 2),
+        top: Math.round(
+          (Math.round(boxRect.height) - content.offsetHeight) / 2,
+        ),
+      });
+    };
+    measure();
+    // Re-measure once every @font-face has actually finished loading --
+    // the measurement above necessarily runs against whatever font is
+    // available at that instant (the system fallback, while a real
+    // title-font.otf/body-font.otf is still downloading -- see
+    // local-fonts.ts), and a custom font's own glyph widths are rarely
+    // identical to the fallback's. Without this, the box was measured
+    // and centered against the WRONG font, then visibly reflowed (with
+    // nothing re-centering it) the instant the real font finished
+    // loading -- the "times move on refresh" symptom, confirmed
+    // directly.
+    void document.fonts.ready.then(measure);
   }, [children]);
 
   return (
@@ -294,6 +339,11 @@ export function Schedule() {
   const subtitle = useAppState((s) => s.event.scheduleSubtitle);
   const icon = useAppState((s) => s.event.scheduleIcon);
   const scheduleUpdatedAt = useAppState((s) => s.event.scheduleUpdatedAt);
+  const scheduleStatus = useAppState((s) =>
+    day
+      ? (s.event.scheduleStatus[day] ?? DEFAULT_SCHEDULE_STATUS)
+      : DEFAULT_SCHEDULE_STATUS,
+  );
 
   // Same ticking pattern as bracket-tree.tsx's ElapsedTimerPill --
   // Date.now() has to live inside the effect, not called directly in
@@ -317,6 +367,15 @@ export function Schedule() {
   }
 
   const rows = sortedByTime(items).filter((row) => row.time || row.event);
+  // The minutes box only qualifies ahead/delayed -- "On Time 5m" doesn't
+  // mean anything the way "Ahead of Schedule 5m"/"Delayed 5m" do, so
+  // it's left off that one state specifically rather than shown
+  // unconditionally.
+  const statusLabel =
+    scheduleStatus.state === "onTime"
+      ? SCHEDULE_STATUS_LABELS.onTime
+      : `${SCHEDULE_STATUS_LABELS[scheduleStatus.state]} ${scheduleStatus.minutes} minutes`;
+  const statusColor = SCHEDULE_STATUS_COLORS[scheduleStatus.state];
 
   return (
     <>
@@ -396,6 +455,10 @@ export function Schedule() {
               of two different treatments stitched together. */}
           <div
             style={{
+              // Anchors the on-time/delayed badge below to this panel's
+              // own bottom-right corner, not the outer card's -- see
+              // that badge's own comment.
+              position: "relative",
               background: COLORS.panel,
               border: `3px solid rgb(255, 255, 255)`,
               borderRadius: 14,
@@ -403,8 +466,14 @@ export function Schedule() {
               // header carries the title, the single biggest thing on
               // the overlay, so the panel itself reads as a clear step
               // up from the rows below it, not the same size box with
-              // bigger text inside an identically-sized shell.
-              padding: "32px 32px",
+              // bigger text inside an identically-sized shell. Extra
+              // bottom padding for the status badge below -- its
+              // position:absolute (anchored to this panel, not the
+              // outer card) would otherwise sit ON TOP of the day/clock
+              // column instead of below it, since the panel's own
+              // height is normally just tall enough for that column's
+              // own content with no badge-sized gap left under it.
+              padding: "32px 32px 60px",
               display: "flex",
               alignItems: "flex-start",
               justifyContent: "space-between",
@@ -505,6 +574,32 @@ export function Schedule() {
                 {formatClock(nowMs)}
               </div>
             </div>
+            {/* Train-station-board-style status, bottom-right of the
+                header panel -- operator-set (see scheduleStatus/
+                SCHEDULE_STATUS_LABELS above), always shown once a day's
+                selected. Has to be a CHILD of the header panel (not a
+                sibling after it closes) so its position:absolute
+                anchors to that panel's own position:relative, not the
+                outer card's. */}
+            <div
+              style={{
+                position: "absolute",
+                bottom: 16,
+                right: 16,
+                padding: "6px 16px",
+                borderRadius: 999,
+                border: `3px solid ${statusColor}`,
+                background: blendOverPanel(statusColor, 0.15),
+                color: statusColor,
+                fontSize: 16,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                animation: "scheduleFadeIn 0.4s ease both",
+                animationDelay: "0.4s",
+              }}
+            >
+              {statusLabel}
+            </div>
           </div>
           {rows.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -515,15 +610,44 @@ export function Schedule() {
                 // definitive of the two claims if it ever did.
                 const isCompleted = !!row.completed;
                 const isCurrent = !!row.current && !isCompleted;
-                const displayTime = formatDisplayTime(row.time);
-                // The outer row border is now a flat, uniform signal
-                // (soft gray, or green for the current row) rather than
-                // per-row picked color -- row.color still drives the
-                // time pill below, just not this. Keeps the "what's
-                // happening now" cue to exactly one place instead of
-                // competing with an operator's arbitrary per-row accent
-                // color on the same element.
-                const rowBorderColor = isCurrent ? COLORS.mint : COLORS.border;
+                // "All future schedules" -- every row that isn't the
+                // one happening right now and hasn't already happened,
+                // regardless of where it falls time-wise relative to
+                // `current`. Only these get the status's minutes value
+                // applied to their displayed time (ahead subtracts,
+                // delayed adds) and their time colored to match --
+                // current/completed rows keep their own already-
+                // established treatment untouched.
+                const isUpcoming = !isCurrent && !isCompleted;
+                const statusDelta =
+                  scheduleStatus.state === "ahead"
+                    ? -scheduleStatus.minutes
+                    : scheduleStatus.state === "delayed"
+                      ? scheduleStatus.minutes
+                      : 0;
+                const timeIsShifted = isUpcoming && statusDelta !== 0;
+                const displayTime = formatDisplayTime(
+                  timeIsShifted
+                    ? shiftTimeString(row.time, statusDelta)
+                    : row.time,
+                );
+                const timeColor = timeIsShifted
+                  ? SCHEDULE_STATUS_COLORS[scheduleStatus.state]
+                  : isCompleted
+                    ? COLORS.muted
+                    : COLORS.text;
+                // The outer row border is a flat, uniform signal now,
+                // not per-row picked color (row.color still drives the
+                // time pill below, just not this) -- green for the
+                // current row, a plain muted gray for a completed one
+                // (matching its already-dimmed text/opacity rather than
+                // standing out), plain white for every other, still-
+                // upcoming row.
+                const rowBorderColor = isCurrent
+                  ? COLORS.mint
+                  : isCompleted
+                    ? COLORS.border
+                    : COLORS.text;
                 const pillBorderColor = row.color || "rgba(255, 255, 255, 0.8)";
                 return (
                   <div
@@ -636,22 +760,22 @@ export function Schedule() {
                       {displayTime && (
                         <CenteredTimeText>
                           {/* White by default -- completed rows keep the
-                              old muted treatment instead, so a done row's
-                              time still reads as part of the same
+                              old muted treatment instead (so a done
+                              row's time still reads as part of the same
                               grayed-out/struck-through row rather than
                               standing out as the one bright element left
-                              in it. */}
-                          <span
-                            style={{
-                              color: isCompleted ? COLORS.muted : COLORS.text,
-                              fontSize: 30,
-                            }}
-                          >
+                              in it), and a row whose displayed time got
+                              shifted by the schedule status instead
+                              takes THAT status's color, so the shifted
+                              value is visibly flagged as adjusted rather
+                              than looking like an unchanged, directly-
+                              entered time. */}
+                          <span style={{ color: timeColor, fontSize: 30 }}>
                             {displayTime.numeral}
                           </span>
                           <span
                             style={{
-                              color: isCompleted ? COLORS.muted : COLORS.text,
+                              color: timeColor,
                               fontSize: 16,
                               opacity: 0.75,
                               marginLeft: 3,

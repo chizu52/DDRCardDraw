@@ -65,9 +65,11 @@ import {
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
 import {
+  DEFAULT_SCHEDULE_STATUS,
   eventSlice,
   type ScheduleDay,
   type ScheduleItem,
+  type ScheduleStatusState,
 } from "../state/event.slice";
 import { useAppDispatch, useAppState } from "../state/store";
 import { useTheme } from "../theme-toggle";
@@ -1041,7 +1043,17 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
   const savedSchedule = useAppState(
     (s) => s.event.schedules[day] ?? EMPTY_SCHEDULE,
   );
+  // Per-day (like savedSchedule above), staged/submitted alongside this
+  // day's own rows via the same dirty flag and Submit button below --
+  // moved here (out of the always-live "Day to display" controls above)
+  // so a status change goes out deliberately, reviewed together with
+  // whatever row edits are also pending, rather than the instant the
+  // operator touches the radio.
+  const savedStatus = useAppState(
+    (s) => s.event.scheduleStatus[day] ?? DEFAULT_SCHEDULE_STATUS,
+  );
   const [schedule, setSchedule] = useState<ScheduleItem[]>(savedSchedule);
+  const [status, setStatus] = useState(savedStatus);
   // An explicit flag the user's own edits set, NOT a derived comparison
   // of schedule vs savedSchedule -- comparing values conflates "the user
   // is actively editing, don't clobber it" with "this component just
@@ -1071,8 +1083,9 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
     if (!dirty) {
       // eslint-disable-next-line react-hooks-js/set-state-in-effect
       setSchedule(savedSchedule);
+      setStatus(savedStatus);
     }
-  }, [savedSchedule, dirty]);
+  }, [savedSchedule, savedStatus, dirty]);
 
   function updateRow(index: number, patch: Partial<ScheduleItem>) {
     setSchedule((prev) =>
@@ -1111,6 +1124,7 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
 
   function submit() {
     dispatch(eventSlice.actions.setDaySchedule({ day, items: schedule }));
+    dispatch(eventSlice.actions.setScheduleStatus({ day, ...status }));
     setDirty(false);
   }
 
@@ -1123,6 +1137,44 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
 
   return (
     <>
+      {/* Global status (see savedStatus's own comment above), staged
+          here alongside this day's rows -- same dirty flag, same Submit
+          button below sends both together. */}
+      <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+        <RadioGroup
+          label="Schedule status"
+          inline
+          selectedValue={status.state}
+          onChange={(e) => {
+            setStatus((prev) => ({
+              ...prev,
+              state: e.currentTarget.value as ScheduleStatusState,
+            }));
+            setDirty(true);
+          }}
+          options={[
+            { label: "Ahead of Schedule", value: "ahead" },
+            { label: "On Time", value: "onTime" },
+            { label: "Delayed", value: "delayed" },
+          ]}
+        />
+        <FormGroup label="Minutes" inline>
+          <NumericInput
+            value={status.minutes}
+            min={0}
+            clampValueOnBlur
+            onValueChange={(n) => {
+              setStatus((prev) => ({
+                ...prev,
+                minutes: Number.isFinite(n) ? Math.round(n) : 0,
+              }));
+              setDirty(true);
+            }}
+            style={{ width: "70px" }}
+          />
+        </FormGroup>
+      </div>
+      <Divider style={{ margin: "1rem 0" }} />
       {/* Horizontally scrollable, not just "let it overflow" -- the
           TimePicker's own up/down-arrow buttons give it a wide, rigid
           intrinsic width that a plain browser table-layout treats as
