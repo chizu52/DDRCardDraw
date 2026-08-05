@@ -39,10 +39,11 @@ const COLORS = {
 // display face reads fine at the title's large size but hurts legibility
 // at the smaller sizes everything else on the card uses, so the title
 // gets its own font, separate from the rest of the card's body text.
-// Both fall back to the same plain system stack when their local font
-// file is absent (titleFont/bodyFont null -- see local-fonts.ts), which
-// is the common case for anyone other than this dev machine, since
-// neither font file is committed to the repo.
+// titleFont/bodyFont are never actually null -- local-fonts.ts always
+// resolves each slot to either a locally-supplied title-font.*/
+// body-font.* or its own bundled, openly-licensed fallback font. The
+// ternary below is just defensive in case that ever changes; it doesn't
+// currently fall through to SYSTEM_FONT_STACK in practice.
 const SYSTEM_FONT_STACK = "Roboto, Helvetica, Arial, sans-serif";
 const TITLE_FONT_FAMILY = titleFont
   ? `TitleFont, ${SYSTEM_FONT_STACK}`
