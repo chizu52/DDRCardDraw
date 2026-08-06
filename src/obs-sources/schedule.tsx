@@ -102,7 +102,171 @@ const ANIMATIONS_CSS = `
   from { opacity: 0; transform: translateY(-16px); }
   to { opacity: 0.9; transform: translateY(0); }
 }
+/* The panel's own entrance when the displayed DAY changes -- distinct
+   from the plainer scheduleFadeIn used by the header pieces (which
+   still just fade in as part of that same sequence). A day switch is a
+   deliberate "different board" moment, not just new numbers on the
+   existing one, so it gets its own slightly more pronounced settle-in
+   (scale + slide) rather than reusing the same bare fade every other
+   entrance on this overlay uses. */
+@keyframes scheduleDayIn {
+  from { opacity: 0; transform: translateY(-10px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 `;
+// Values that change WITHOUT the whole panel re-entering -- the day
+// label, the schedule status badge, and every row's displayed time --
+// crossfade via useCrossfade below instead of a @keyframes animation. A
+// single keyframe can't coordinate with a content swap (it has no way to
+// know when it's actually reached fully transparent), so this is plain
+// `opacity` + `transition`, driven from a timer in JS: fade the OLD
+// value out, swap to the new value only once it's fully invisible, then
+// fade that in. VALUE_FADE_MS governs both halves equally -- a slow,
+// symmetric fade out/in, not a quick blip, and never asymmetric between
+// the two directions.
+const VALUE_FADE_MS = 700;
+
+// --- Every other tunable animation duration/delay on this overlay,
+// collected here instead of left as scattered "0.4s"-style literals in
+// the JSX below, specifically so they're easy to find and adjust by
+// hand. All delay/duration values are in SECONDS (matching inline CSS
+// string conventions like "0.4s"), except VALUE_FADE_MS above, which is
+// in milliseconds (it's also used as a plain JS setTimeout duration,
+// not just a CSS string). ---
+
+/** The whole panel's entrance (scheduleDayIn) -- plays when the
+ * displayed DAY changes, and once, on this overlay's very first mount. */
+const DAY_CHANGE_DURATION_S = 0.4;
+/** Each header piece's own fade-in (icon, title, the "Schedule for:"
+ * row, the clock) -- scheduleFadeIn. All four play at once as DAY_CHANGE
+ * plays, staggered start-to-start by HEADER_STAGGER_S (the icon starts
+ * slightly earlier still, by HEADER_ICON_LEAD_S, so it's already
+ * settling in by the time the title beside it starts). */
+const HEADER_FADE_DURATION_S = 0.4;
+const HEADER_STAGGER_S = 0.1;
+const HEADER_ICON_LEAD_S = 0.05;
+
+/** A row's own staggered slide-in entrance (scheduleSlideDown/
+ * scheduleSlideDownFade) -- only plays right after a day change (see
+ * entranceSettled). ROW_ENTRANCE_BASE_DELAY_S before the first row
+ * starts (lines up with the header settling in above), then
+ * ROW_ENTRANCE_STAGGER_S between each subsequent row. */
+const ROW_ENTRANCE_DURATION_S = 0.5;
+const ROW_ENTRANCE_BASE_DELAY_S = 0.3;
+const ROW_ENTRANCE_STAGGER_S = 0.05;
+
+/** Once a row's entrance has settled, how long its background/border/
+ * opacity (and its own event-text color) take to crossfade when
+ * current/completed changes -- see the row's own `transition`. */
+const ROW_SETTLE_TRANSITION_S = 0.3;
+
+/**
+ * Holds onto the OLD `value` (and keeps rendering it) while fading it out,
+ * and only swaps to the new one -- fully invisible at that point -- before
+ * fading back in. Returns what to actually render (`rendered`, which lags
+ * the live `value` during the out-phase) and the `opacity` to apply; pair
+ * with `transition: opacity ${fadeMs}ms ease` on the element (a plain CSS
+ * transition, not a keyframe animation -- the swap has to be coordinated
+ * from here, in JS, since CSS alone has no way to know when the fade has
+ * actually reached 0).
+ *
+ * Deliberately PER ELEMENT, not one shared clock for the whole overlay --
+ * a shared-clock version put the day label, status badge, and every row's
+ * time on one timer so they'd always move in lockstep, but that meant
+ * literally everything faded out and back in on ANY change, even elements
+ * whose own displayed value didn't actually change (the day label
+ * dimming when only the status changed, say). Each element fading
+ * independently -- only when ITS OWN value changes -- is what makes
+ * "only updated information fades" true. They still all call this same
+ * hook with the same fadeMs, so anything that IS changing together still
+ * moves at the identical speed; they just aren't forced to move together
+ * when only one of them actually has new information to show.
+ *
+ * `isEqual` decides what counts as "changed" -- pass reference equality
+ * for primitives (day), or a field comparison for an object (schedule
+ * status, a row's time+color) since a fresh object literal from a
+ * selector/computation is never `===` its predecessor even when nothing
+ * meaningful about it actually changed.
+ *
+ * fadeMs governs BOTH halves equally -- fadeMs to fade out, then exactly
+ * fadeMs to fade back in. Never asymmetric between the two directions.
+ *
+ * A cycle, once started, always runs to completion in fadeMs+fadeMs --
+ * a value that changes again mid-cycle does NOT restart the clock, it
+ * just gets picked up as the target whenever the CURRENT cycle's swap
+ * point arrives. Restarting the timer on every new value (an earlier
+ * version) meant switching between a few days/statuses in quick
+ * succession kept cancelling it before it ever fired, leaving the
+ * element stuck fully invisible for as long as changes kept arriving.
+ */
+function useCrossfade<T>(
+  value: T,
+  fadeMs: number,
+  isEqual: (a: T, b: T) => boolean,
+): { rendered: T; opacity: number } {
+  const [rendered, setRendered] = useState(value);
+  const [opacity, setOpacity] = useState(1);
+  // What `rendered` currently reflects, and the truly-live value -- refs,
+  // not state, so the effect below can reason about both synchronously
+  // without a stale closure, regardless of how many renders happen
+  // while a cycle is in flight.
+  const shownRef = useRef(value);
+  const latestValueRef = useRef(value);
+  const cyclingRef = useRef(false);
+  const timer1Ref = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const timer2Ref = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  // Bumped when a cycle finishes, purely to force one more render so the
+  // effect re-runs and can reconcile -- see the end-of-cycle note below.
+  const [, forceReconcile] = useState(0);
+  latestValueRef.current = value;
+
+  useEffect(() => {
+    // A cycle's already running -- it reads latestValueRef itself when
+    // it swaps, so it'll pick up this value on its own; don't touch its
+    // timers.
+    if (cyclingRef.current) return;
+    if (isEqual(value, shownRef.current)) return; // already showing it
+
+    cyclingRef.current = true;
+    setOpacity(0);
+    timer1Ref.current = setTimeout(() => {
+      // latestValueRef.current, not the `value` this closure captured
+      // -- if it moved again during the fade-out, show wherever it
+      // actually ended up, not whatever triggered this cycle.
+      shownRef.current = latestValueRef.current;
+      setRendered(latestValueRef.current);
+      setOpacity(1);
+      timer2Ref.current = setTimeout(() => {
+        cyclingRef.current = false;
+        // A value that changed during the fade-IN half (after the swap
+        // above) left shownRef behind, and clearing cyclingRef in a
+        // timer doesn't itself re-render -- so without this the effect
+        // would never re-run to notice, and the element would sit on a
+        // stale value until some unrelated render (a clock tick, up to
+        // a second later) happened to reconcile it. This forces exactly
+        // that reconciling render immediately, so a change is at worst
+        // one fade-cycle late, never stuck showing the wrong thing.
+        forceReconcile((n) => n + 1);
+      }, fadeMs);
+    }, fadeMs);
+  });
+
+  // Cleanup only on unmount -- clearing these on every render (the way a
+  // dependency-array effect would) is exactly the "cancel the pending
+  // swap" behavior this hook is deliberately avoiding.
+  useEffect(() => {
+    return () => {
+      clearTimeout(timer1Ref.current);
+      clearTimeout(timer2Ref.current);
+    };
+  }, []);
+
+  return { rendered, opacity };
+}
 
 const DAY_LABELS: Record<ScheduleDay, string> = {
   fri: "Friday",
@@ -198,9 +362,9 @@ function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
 // ScheduleDayEditor radios + minutes box, staged/submitted alongside
 // that day's own rows), not computed from row times vs. the clock.
 const SCHEDULE_STATUS_LABELS: Record<ScheduleStatusState, string> = {
-  ahead: "Ahead of Schedule by:",
+  ahead: "Ahead of Schedule by",
   onTime: "On-Time",
-  delayed: "Delayed by:",
+  delayed: "Behind Schedule by",
 };
 const SCHEDULE_STATUS_COLORS: Record<ScheduleStatusState, string> = {
   ahead: COLORS.mint,
@@ -270,7 +434,16 @@ function formatDayDate(day: ScheduleDay, nowMs: number): string {
 // so no visible jump) and stays hidden until the first measurement
 // lands, since there's nothing meaningful to show before the content's
 // own natural size is known.
-function CenteredTimeText({ children }: { children: React.ReactNode }) {
+function CenteredTimeText({
+  children,
+  style,
+}: {
+  children: React.ReactNode;
+  /** merged in beneath the centering styles below -- e.g. the caller's
+   * own opacity + transition for a value that's crossfading (see
+   * useCrossfade); omit for a box that never fades on its own. */
+  style?: React.CSSProperties;
+}) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [offset, setOffset] = useState<{ left: number; top: number } | null>(
     null,
@@ -321,9 +494,281 @@ function CenteredTimeText({ children }: { children: React.ReactNode }) {
         display: "inline-flex",
         alignItems: "baseline",
         whiteSpace: "nowrap",
+        // Caller-supplied opacity/transition (see useCrossfade) layers
+        // on top of the centering styles above -- spread last so it can
+        // still override `visibility` if it ever needed to, though in
+        // practice it only ever touches opacity/transition.
+        ...style,
       }}
     >
       {children}
+    </div>
+  );
+}
+
+/** Compares two possibly-null DisplayTimes by their rendered text, not
+ * object identity -- formatDisplayTime returns a fresh object every
+ * call even when its input didn't actually change. */
+function displayTimeEqual(a: DisplayTime | null, b: DisplayTime | null) {
+  if (a === null || b === null) return a === b;
+  return a.numeral === b.numeral && a.period === b.period;
+}
+
+// A single schedule row. `scheduleStatus` is the LIVE status, same as
+// Schedule reads from Redux -- each row computes its own displayTime/
+// timeColor from it and crossfades that pair with its own useCrossfade
+// call below, independently of the day label and status badge (see
+// useCrossfade's own doc for why per-element rather than one shared
+// clock). current/completed changes are separate (a plain CSS
+// transition, see below) since those are per-row and not a value this
+// row is "informed about" the way a status shift is.
+function ScheduleRow({
+  row,
+  index,
+  scheduleStatus,
+  entranceSettled,
+}: {
+  row: ScheduleItem;
+  index: number;
+  scheduleStatus: { state: ScheduleStatusState; minutes: number };
+  entranceSettled: boolean;
+}) {
+  // completed wins over current if a row somehow has both -- the
+  // editor's own radio-column UI never produces that combination, but
+  // "already happened" is the more definitive of the two claims if it
+  // ever did.
+  const isCompleted = !!row.completed;
+  const isCurrent = !!row.current && !isCompleted;
+  // "All future schedules" -- every row that isn't the one happening
+  // right now and hasn't already happened, regardless of where it falls
+  // time-wise relative to `current`. Only these get the status's
+  // minutes value applied to their displayed time (ahead subtracts,
+  // delayed adds) and their time colored to match -- current/completed
+  // rows keep their own already-established treatment untouched.
+  const isUpcoming = !isCurrent && !isCompleted;
+  const statusDelta =
+    scheduleStatus.state === "ahead"
+      ? -scheduleStatus.minutes
+      : scheduleStatus.state === "delayed"
+        ? scheduleStatus.minutes
+        : 0;
+  const timeIsShifted = isUpcoming && statusDelta !== 0;
+  const displayTime = formatDisplayTime(
+    timeIsShifted ? shiftTimeString(row.time, statusDelta) : row.time,
+  );
+  const timeColor = timeIsShifted
+    ? SCHEDULE_STATUS_COLORS[scheduleStatus.state]
+    : isCompleted
+      ? COLORS.muted
+      : COLORS.text;
+  // The outer row border is a flat, uniform signal now, not per-row
+  // picked color (row.color still drives the time pill below, just not
+  // this) -- green for the current row, a plain muted gray for a
+  // completed one (matching its already-dimmed text/opacity rather than
+  // standing out), plain white for every other, still-upcoming row.
+  const rowBorderColor = isCurrent
+    ? COLORS.mint
+    : isCompleted
+      ? COLORS.border
+      : COLORS.text;
+  const pillBorderColor = row.color || "rgba(255, 255, 255, 0.8)";
+
+  // Crossfades the numeral/period AND color together (not just the
+  // numbers) -- otherwise, mid-fade, the still-old time would briefly
+  // render in the ALREADY-new status color, which is exactly the kind
+  // of "updated immediately" mismatch this is meant to avoid.
+  //
+  // Always active, not gated on `timeIsShifted` -- switching the
+  // schedule status to On-Time, specifically, is exactly a row going
+  // from shifted to unshifted, and gating on timeIsShifted was falling
+  // through for that transition and snapping instantly instead of
+  // fading. useCrossfade's own isEqual check already no-ops correctly
+  // when nothing actually changed (a row whose time never shifts just
+  // never triggers a cycle), so there's no need to additionally gate it
+  // here.
+  const { rendered: renderedTimeDisplay, opacity: timeOpacity } =
+    useCrossfade(
+      { time: displayTime, color: timeColor },
+      VALUE_FADE_MS,
+      (a, b) => a.color === b.color && displayTimeEqual(a.time, b.time),
+    );
+  const timeToShow = renderedTimeDisplay.time;
+  const colorToShow = renderedTimeDisplay.color;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        // stretch, not center -- the time box below relies on this to
+        // fill the row's full height, rather than sizing itself and
+        // leaving a gap of row background visible above/below it.
+        alignItems: "stretch",
+        // No gap -- the time box's own borderRight now reads as the
+        // divider between it and the text content, replacing the old
+        // empty space between two separately-bordered pieces.
+        // Insets each row a little further than the header panel above
+        // it (which stays full width) -- equal margin on both sides
+        // keeps it centered while reading as a tad narrower, rather
+        // than matching the header's own edge-to-edge width.
+        margin: "0 14px",
+        // Solid backgrounds only -- a completed row used to fade its
+        // entire background/border/text to 45% opacity via the entrance
+        // animation's own end state, which read as barely-there rather
+        // than legibly "done." It now stays a fully opaque panel and is
+        // marked done via the strikethrough + muted marker/text below
+        // instead.
+        // `current` reads entirely from this background tint now -- no
+        // separate colored border needed (or dot, or left accent stripe
+        // -- all removed) once the panel fill itself already carries
+        // that signal on its own.
+        background: isCurrent ? COLORS.currentBg : COLORS.panel,
+        border: `3px solid ${rowBorderColor}`,
+        borderRadius: 14,
+        // Clips the time box's own square right edge/background to the
+        // row's rounded corners -- the box's own left corners are
+        // rounded to match (see below), this is just a safety net for
+        // subpixel rounding between the two.
+        overflow: "hidden",
+        // No padding here anymore -- it moved onto the two children
+        // individually now that they're two visually distinct sections
+        // (time box, text) of one divided row, rather than
+        // free-floating content inside a single padded shell.
+        // completed rows fade to 0.9 (not fully opaque) as a light
+        // "stepped back" cue on top of the strikethrough/muted-color
+        // treatment -- a plain inline value now rather than only a
+        // keyframe end state, since `animation` is no longer always
+        // present on this element (see entranceSettled) -- while it IS
+        // still playing, the animation's own end state (same 0.9
+        // value) wins until it finishes, so there's no visible seam at
+        // the handoff either way.
+        opacity: isCompleted ? 0.9 : 1,
+        // Only active in practice once entranceSettled -- while the
+        // entrance animation is still playing, it owns these same
+        // properties outright. Once settled, this is what makes a
+        // later current/completed toggle crossfade smoothly instead of
+        // hard-cutting (the only alternative left now that it no longer
+        // replays the whole slide-in entrance for that kind of change
+        // -- see Schedule's outer panel comment for why).
+        transition:
+          "background-color 0.3s ease, border-color 0.3s ease, opacity 0.3s ease",
+        ...(entranceSettled
+          ? {}
+          : {
+              animation: isCompleted
+                ? "scheduleSlideDownFade 0.5s ease both"
+                : "scheduleSlideDown 0.5s ease both",
+              animationDelay: `${0.3 + index * 0.05}s`,
+            }),
+      }}
+    >
+      {/* A boxed section of the row now, not a separate floating pill
+          -- stretches to the row's full height and its borderRight is
+          the only border, reading as a divider between it and the text
+          next to it rather than a fully-enclosed shape of its own.
+          Border/background still key off the row's own color (row.color
+          if the operator picked one, otherwise plain neutral
+          defaults). */}
+      <div
+        style={{
+          boxSizing: "border-box",
+          // position:relative + the child's absolute top/left:50% +
+          // translate(-50%,-50%) below, rather than flex's
+          // align/justify-items:center -- flexbox centers by LINE-BOX
+          // (which pads out for font ascent/descent metrics), not by
+          // the text's actual rendered bounding box, so a
+          // baseline-aligned two-different-font-sizes group like this
+          // one landed visibly off the box's true center.
+          // Transform-centering measures the group's own real bounding
+          // box against the box's exact midpoint instead.
+          position: "relative",
+          background: row.color
+            ? blendOverPanel(row.color, 0.18)
+            : blendOverPanel("#ffffff", 0.06),
+          borderRight: `3px solid ${pillBorderColor}`,
+          // Matches the row's own 14px corner radius minus its 3px
+          // border, so the box's outer edge nests flush against the
+          // inside of that rounded corner instead of showing a square
+          // peeking out past a round one. Only the left corners -- it's
+          // a divider on the right, not its own separately-rounded
+          // shape.
+          borderRadius: "11px 0 0 11px",
+          // Fixed width, not just a minWidth floor -- a minWidth let a
+          // two-digit hour ("11:00") grow this box wider than a
+          // one-digit hour's ("3:00") row right next to it, so the
+          // divider line (this box's own borderRight) landed at a
+          // different x position row-to-row instead of lining up in
+          // one column. 150px comfortably fits the widest realistic
+          // value ("12:00 PM") at this font size with room to spare.
+          width: 150,
+          flexShrink: 0,
+        }}
+      >
+        {timeToShow && (
+          <CenteredTimeText
+            style={{
+              // This row's own crossfade opacity -- naturally 1 with
+              // nothing to fade on a fresh mount (useCrossfade starts
+              // `rendered`/`opacity` from the value it's given, so
+              // there's no "old" value to fade from yet), so this
+              // doesn't need any entranceSettled-style guard the way a
+              // shared clock would have: a brand-new row just shows its
+              // time normally, and only fades on a later, genuine
+              // change to it.
+              opacity: timeOpacity,
+              transition: `opacity ${VALUE_FADE_MS}ms ease`,
+            }}
+          >
+            {/* White by default -- completed rows keep the old muted
+                treatment instead (so a done row's time still reads as
+                part of the same grayed-out/struck-through row rather
+                than standing out as the one bright element left in
+                it), and a row whose displayed time got shifted by the
+                schedule status instead takes THAT status's color, so
+                the shifted value is visibly flagged as adjusted rather
+                than looking like an unchanged, directly-entered time. */}
+            <span style={{ color: colorToShow, fontSize: 30 }}>
+              {timeToShow.numeral}
+            </span>
+            <span
+              style={{
+                color: colorToShow,
+                fontSize: 16,
+                opacity: 0.75,
+                marginLeft: 3,
+              }}
+            >
+              {timeToShow.period}
+            </span>
+          </CenteredTimeText>
+        )}
+      </div>
+      <div style={{ padding: "18px 24px" }}>
+        <div
+          style={{
+            fontFamily: TITLE_FONT_FAMILY,
+            color: isCompleted ? COLORS.muted : COLORS.text,
+            fontSize: 24,
+            // Matches the row's own background/border transition
+            // above, so completing a row reads as one smooth crossfade
+            // rather than the panel drifting to its new color while
+            // the text snaps to muted a beat later.
+            transition: "color 0.3s ease",
+          }}
+        >
+          {row.event}
+        </div>
+        {row.description && (
+          <div
+            style={{
+              fontFamily: BODY_FONT_FAMILY,
+              color: COLORS.muted,
+              fontSize: 16,
+            }}
+          >
+            {row.description}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -339,7 +784,6 @@ export function Schedule() {
   );
   const subtitle = useAppState((s) => s.event.scheduleSubtitle);
   const icon = useAppState((s) => s.event.scheduleIcon);
-  const scheduleUpdatedAt = useAppState((s) => s.event.scheduleUpdatedAt);
   const scheduleStatus = useAppState((s) =>
     day
       ? (s.event.scheduleStatus[day] ?? DEFAULT_SCHEDULE_STATUS)
@@ -363,38 +807,97 @@ export function Schedule() {
     return () => clearInterval(id);
   }, []);
 
+  // Rows only get their staggered slide-in entrance (scheduleSlideDown/
+  // scheduleSlideDownFade below) while this is false -- true for the
+  // brief window right after the panel (re)mounts on a day change, then
+  // flips permanently true until the next one. Once settled, a row's
+  // background/border/opacity are plain inline styles with a CSS
+  // `transition` instead (see the row's style below) -- current/
+  // completed toggling smoothly crossfades between those two resting
+  // looks rather than replaying an entrance meant for "this row is
+  // appearing for the first time." Keyed on `day` (not e.g. items.length)
+  // since a day change is the only thing that still remounts the panel
+  // -- see the outer key's own comment.
+  const [entranceSettled, setEntranceSettled] = useState(false);
+  useEffect(() => {
+    setEntranceSettled(false);
+    // matches the row stagger formula below (ROW_ENTRANCE_BASE_DELAY_S
+    // + ROW_ENTRANCE_STAGGER_S/row) plus that row's own
+    // ROW_ENTRANCE_DURATION_S, with a little slack so the handoff to
+    // plain styles/transitions never lands mid-animation
+    const maxDelaySec =
+      ROW_ENTRANCE_BASE_DELAY_S +
+      Math.max(0, items.length - 1) * ROW_ENTRANCE_STAGGER_S;
+    const id = setTimeout(
+      () => setEntranceSettled(true),
+      (maxDelaySec + ROW_ENTRANCE_DURATION_S) * 1000 + 100,
+    );
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately day-only, see comment above
+  }, [day]);
+
+  // Two independent crossfades, one per header element -- see
+  // useCrossfade's own doc for why not one shared clock. Each fades only
+  // when ITS OWN relevant value changes:
+  //  - the day label: only `day` itself.
+  //  - the status badge: `day` too, in addition to state/minutes -- a
+  //    day switch shows a DIFFERENT day's status, which is new
+  //    information for this badge even on the coincidence that its
+  //    state/minutes happen to match the previous day's, so it still
+  //    counts as "updated" and gets its own fade.
+  // Called unconditionally (before the `!day` return below) since hooks
+  // can't be conditional -- day can be null (the Settings tab's "None"),
+  // which useCrossfade doesn't care about either way.
+  const { rendered: renderedDay, opacity: dayOpacity } = useCrossfade<
+    ScheduleDay | null
+  >(day, VALUE_FADE_MS, Object.is);
+  const { rendered: renderedStatus, opacity: statusOpacity } = useCrossfade(
+    { day, state: scheduleStatus.state, minutes: scheduleStatus.minutes },
+    VALUE_FADE_MS,
+    (a, b) => a.day === b.day && a.state === b.state && a.minutes === b.minutes,
+  );
+
   if (!day) {
     return null;
   }
 
   const rows = sortedByTime(items).filter((row) => row.time || row.event);
+  // Derived from `renderedStatus` (this badge's own lagged value), NOT
+  // the live `scheduleStatus` -- it keeps showing the OLD state/minutes
+  // until fully invisible, then swaps, so the label/color here must lag
+  // in step, not jump ahead of what's on screen.
   // The minutes box only qualifies ahead/delayed -- "On Time 5m" doesn't
   // mean anything the way "Ahead of Schedule 5m"/"Delayed 5m" do, so
   // it's left off that one state specifically rather than shown
   // unconditionally.
   const statusLabel =
-    scheduleStatus.state === "onTime"
+    renderedStatus.state === "onTime"
       ? SCHEDULE_STATUS_LABELS.onTime
-      : `${SCHEDULE_STATUS_LABELS[scheduleStatus.state]} ${scheduleStatus.minutes} minutes`;
-  const statusColor = SCHEDULE_STATUS_COLORS[scheduleStatus.state];
+      : `${SCHEDULE_STATUS_LABELS[renderedStatus.state]} ${renderedStatus.minutes} minutes`;
+  const statusColor = SCHEDULE_STATUS_COLORS[renderedStatus.state];
 
   return (
     <>
       <style>{FONT_FACE_CSS}</style>
       <style>{ANIMATIONS_CSS}</style>
-      {/* key -- day and scheduleUpdatedAt are both room-synced, changed
-          live from the dashboard (switching days via radio buttons, or
-          submitting an edit to the currently-shown day), never by
-          reloading this page. Without a key forcing this whole panel to
-          remount on either change, React just patches the existing DOM
-          nodes' text in place and every entrance animation below (each
-          of which only plays once per mount) would never replay --
-          only on the overlay's very first page load. Keying the OUTER
-          panel (not just the row list) means both triggers replay the
-          entire sequence -- panel, title, day badge, subtitle, clock,
-          then rows -- not just whichever piece actually changed. */}
+      {/* No key here (deliberately) -- this panel mounts once, when the
+          overlay itself first loads, and then stays mounted for the
+          whole OBS session. Its own entrance below plays that one time
+          only. Nothing about this day's data -- which day is selected,
+          its status, which row is current/completed, row text, etc. --
+          ever remounts the whole panel to show a change; a full
+          re-entrance of everything (title, day badge, clock, every row
+          sliding back in) read as far more disruptive than any single
+          edit actually warrants, switching days included. Each of those
+          instead updates only the piece that actually changed: the day
+          label and status badge get their own small scheduleValuePulse
+          flash (see their own keys below), same for any status-shifted
+          row time, and a row's current/completed look is a plain CSS
+          transition once its entrance has settled (see entranceSettled
+          above, which still keys the ROW entrance specifically off
+          `day` -- a day switch is real new content, just not a reason
+          to tear down and rebuild the whole panel around it). */}
       <div
-        key={`${day}-${scheduleUpdatedAt}`}
         style={{
           // The card's base is the BODY font -- most of its text (rows,
           // clock, schedule-day line) is body content. The title
@@ -414,8 +917,11 @@ export function Schedule() {
           // further staggered) -- otherwise the whole card seems to
           // just appear out of nowhere the instant before its own
           // contents start animating in, which reads as a glitch more
-          // than an entrance.
-          animation: "scheduleFadeIn 0.3s ease both",
+          // than an entrance. scheduleDayIn specifically (not the
+          // plainer scheduleFadeIn the header pieces use) -- this only
+          // ever plays for an actual day switch now, so it's allowed to
+          // read as more deliberate than a bare fade.
+          animation: "scheduleDayIn 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both",
         }}
       >
         {/* The banner art as a soft out-of-focus backdrop rather than a
@@ -554,10 +1060,28 @@ export function Schedule() {
                 <div style={{ color: COLORS.muted, fontSize: 20 }}>
                   Schedule for:
                 </div>
-                <div style={{ color: COLORS.gold, fontSize: 20 }}>
-                  {DAY_LABELS[day]}
-                  {formatDayDate(day, nowMs) &&
-                    `, ${formatDayDate(day, nowMs)}`}
+                <div
+                  style={{
+                    color: COLORS.gold,
+                    fontSize: 20,
+                    opacity: dayOpacity,
+                    transition: `opacity ${VALUE_FADE_MS}ms ease`,
+                  }}
+                >
+                  {/* renderedDay, not `day` -- see useCrossfade above:
+                      switching days fades this OLD text fully out first,
+                      only swapping to the new day's label once invisible,
+                      then fades that in. Guards null defensively (day is
+                      guaranteed non-null past the early return above,
+                      but the crossfade's `rendered` briefly lags behind
+                      it, so it hasn't necessarily caught up yet). */}
+                  {renderedDay && (
+                    <>
+                      {DAY_LABELS[renderedDay]}
+                      {formatDayDate(renderedDay, nowMs) &&
+                        `, ${formatDayDate(renderedDay, nowMs)}`}
+                    </>
+                  )}
                 </div>
               </div>
               {/* Live clock -- a real Date.now()-based time, not to be
@@ -589,14 +1113,22 @@ export function Schedule() {
                 right: 16,
                 padding: "6px 16px",
                 borderRadius: 999,
+                // statusLabel/statusColor are both already derived from
+                // renderedStatus above, not the live value -- an
+                // operator flipping ahead/on-time/delayed, editing the
+                // minutes, or switching days (this badge shows a
+                // different day's status even when it coincidentally
+                // has the same state/minutes as the last one) fades
+                // this fully out, THEN swaps text+color, THEN fades it
+                // back in. See this badge's own useCrossfade call above.
                 border: `3px solid ${statusColor}`,
                 background: blendOverPanel(statusColor, 0.15),
                 color: statusColor,
                 fontSize: 16,
                 letterSpacing: "0.04em",
                 textTransform: "uppercase",
-                animation: "scheduleFadeIn 0.4s ease both",
-                animationDelay: "0.4s",
+                opacity: statusOpacity,
+                transition: `opacity ${VALUE_FADE_MS}ms ease`,
               }}
             >
               {statusLabel}
@@ -604,214 +1136,15 @@ export function Schedule() {
           </div>
           {rows.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {rows.map((row, i) => {
-                // completed wins over current if a row somehow has both
-                // -- the editor's own radio-column UI never produces
-                // that combination, but "already happened" is the more
-                // definitive of the two claims if it ever did.
-                const isCompleted = !!row.completed;
-                const isCurrent = !!row.current && !isCompleted;
-                // "All future schedules" -- every row that isn't the
-                // one happening right now and hasn't already happened,
-                // regardless of where it falls time-wise relative to
-                // `current`. Only these get the status's minutes value
-                // applied to their displayed time (ahead subtracts,
-                // delayed adds) and their time colored to match --
-                // current/completed rows keep their own already-
-                // established treatment untouched.
-                const isUpcoming = !isCurrent && !isCompleted;
-                const statusDelta =
-                  scheduleStatus.state === "ahead"
-                    ? -scheduleStatus.minutes
-                    : scheduleStatus.state === "delayed"
-                      ? scheduleStatus.minutes
-                      : 0;
-                const timeIsShifted = isUpcoming && statusDelta !== 0;
-                const displayTime = formatDisplayTime(
-                  timeIsShifted
-                    ? shiftTimeString(row.time, statusDelta)
-                    : row.time,
-                );
-                const timeColor = timeIsShifted
-                  ? SCHEDULE_STATUS_COLORS[scheduleStatus.state]
-                  : isCompleted
-                    ? COLORS.muted
-                    : COLORS.text;
-                // The outer row border is a flat, uniform signal now,
-                // not per-row picked color (row.color still drives the
-                // time pill below, just not this) -- green for the
-                // current row, a plain muted gray for a completed one
-                // (matching its already-dimmed text/opacity rather than
-                // standing out), plain white for every other, still-
-                // upcoming row.
-                const rowBorderColor = isCurrent
-                  ? COLORS.mint
-                  : isCompleted
-                    ? COLORS.border
-                    : COLORS.text;
-                const pillBorderColor = row.color || "rgba(255, 255, 255, 0.8)";
-                return (
-                  <div
-                    key={i}
-                    style={{
-                      display: "flex",
-                      // stretch, not center -- the time box below relies
-                      // on this to fill the row's full height, rather
-                      // than sizing itself and leaving a gap of row
-                      // background visible above/below it.
-                      alignItems: "stretch",
-                      // No gap -- the time box's own borderRight now
-                      // reads as the divider between it and the text
-                      // content, replacing the old empty space between
-                      // two separately-bordered pieces.
-                      // Insets each row a little further than the
-                      // header panel above it (which stays full width)
-                      // -- equal margin on both sides keeps it centered
-                      // while reading as a tad narrower, rather than
-                      // matching the header's own edge-to-edge width.
-                      margin: "0 14px",
-                      // Solid backgrounds only -- a completed row used to
-                      // fade its entire background/border/text to 45%
-                      // opacity via the entrance animation's own end
-                      // state, which read as barely-there rather than
-                      // legibly "done." It now stays a fully opaque
-                      // panel and is marked done via the strikethrough +
-                      // muted marker/text below instead.
-                      // `current` reads entirely from this background
-                      // tint now -- no separate colored border needed
-                      // (or dot, or left accent stripe -- all removed)
-                      // once the panel fill itself already carries that
-                      // signal on its own.
-                      background: isCurrent ? COLORS.currentBg : COLORS.panel,
-                      border: `3px solid ${rowBorderColor}`,
-                      borderRadius: 14,
-                      // Clips the time box's own square right edge/
-                      // background to the row's rounded corners -- the
-                      // box's own left corners are rounded to match (see
-                      // below), this is just a safety net for subpixel
-                      // rounding between the two.
-                      overflow: "hidden",
-                      // No padding here anymore -- it moved onto the two
-                      // children individually now that they're two
-                      // visually distinct sections (time box, text) of
-                      // one divided row, rather than free-floating
-                      // content inside a single padded shell.
-                      // completed rows fade to 0.9 (not fully opaque) as
-                      // a light "stepped back" cue on top of the
-                      // strikethrough/muted-color treatment -- has to be
-                      // its own keyframe's end state, not a separate
-                      // inline `opacity` alongside `animation`, since
-                      // `animation-fill-mode: both` makes the entrance
-                      // animation's own end state permanently win over a
-                      // same-property inline style once it finishes.
-                      animation: isCompleted
-                        ? "scheduleSlideDownFade 0.5s ease both"
-                        : "scheduleSlideDown 0.5s ease both",
-                      animationDelay: `${0.3 + i * 0.05}s`,
-                    }}
-                  >
-                    {/* A boxed section of the row now, not a separate
-                        floating pill -- stretches to the row's full
-                        height and its borderRight is the only border,
-                        reading as a divider between it and the text
-                        next to it rather than a fully-enclosed shape of
-                        its own. Border/background still key off the
-                        row's own color (row.color if the operator
-                        picked one, otherwise plain neutral defaults). */}
-                    <div
-                      style={{
-                        boxSizing: "border-box",
-                        // position:relative + the child's absolute
-                        // top/left:50% + translate(-50%,-50%) below,
-                        // rather than flex's align/justify-items:center
-                        // -- flexbox centers by LINE-BOX (which pads out
-                        // for font ascent/descent metrics), not by the
-                        // text's actual rendered bounding box, so a
-                        // baseline-aligned two-different-font-sizes
-                        // group like this one landed visibly off the
-                        // box's true center. Transform-centering
-                        // measures the group's own real bounding box
-                        // against the box's exact midpoint instead.
-                        position: "relative",
-                        background: row.color
-                          ? blendOverPanel(row.color, 0.18)
-                          : blendOverPanel("#ffffff", 0.06),
-                        borderRight: `3px solid ${pillBorderColor}`,
-                        // Matches the row's own 14px corner radius minus
-                        // its 3px border, so the box's outer edge nests
-                        // flush against the inside of that rounded
-                        // corner instead of showing a square peeking out
-                        // past a round one. Only the left corners --
-                        // it's a divider on the right, not its own
-                        // separately-rounded shape.
-                        borderRadius: "11px 0 0 11px",
-                        // Fixed width, not just a minWidth floor -- a
-                        // minWidth let a two-digit hour ("11:00") grow
-                        // this box wider than a one-digit hour's ("3:00")
-                        // row right next to it, so the divider line
-                        // (this box's own borderRight) landed at a
-                        // different x position row-to-row instead of
-                        // lining up in one column. 150px comfortably
-                        // fits the widest realistic value ("12:00 PM")
-                        // at this font size with room to spare.
-                        width: 150,
-                        flexShrink: 0,
-                      }}
-                    >
-                      {displayTime && (
-                        <CenteredTimeText>
-                          {/* White by default -- completed rows keep the
-                              old muted treatment instead (so a done
-                              row's time still reads as part of the same
-                              grayed-out/struck-through row rather than
-                              standing out as the one bright element left
-                              in it), and a row whose displayed time got
-                              shifted by the schedule status instead
-                              takes THAT status's color, so the shifted
-                              value is visibly flagged as adjusted rather
-                              than looking like an unchanged, directly-
-                              entered time. */}
-                          <span style={{ color: timeColor, fontSize: 30 }}>
-                            {displayTime.numeral}
-                          </span>
-                          <span
-                            style={{
-                              color: timeColor,
-                              fontSize: 16,
-                              opacity: 0.75,
-                              marginLeft: 3,
-                            }}
-                          >
-                            {displayTime.period}
-                          </span>
-                        </CenteredTimeText>
-                      )}
-                    </div>
-                    <div style={{ padding: "18px 24px" }}>
-                      <div
-                        style={{
-                          fontFamily: TITLE_FONT_FAMILY,
-                          color: isCompleted ? COLORS.muted : COLORS.text,
-                          fontSize: 24,
-                        }}
-                      >
-                        {row.event}
-                      </div>
-                      {row.description && (
-                        <div
-                          style={{
-                            fontFamily: BODY_FONT_FAMILY,
-                            color: COLORS.muted,
-                            fontSize: 16,
-                          }}
-                        >
-                          {row.description}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              {rows.map((row, i) => (
+                <ScheduleRow
+                  key={i}
+                  row={row}
+                  index={i}
+                  scheduleStatus={scheduleStatus}
+                  entranceSettled={entranceSettled}
+                />
+              ))}
             </div>
           )}
         </div>
