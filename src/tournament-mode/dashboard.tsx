@@ -26,6 +26,7 @@ import { TimePicker } from "@blueprintjs/datetime";
 import {
   Add,
   ArrowRight,
+  Clipboard,
   Duplicate,
   Edit,
   EyeOff,
@@ -608,7 +609,17 @@ function MatchesSettingsPanel() {
     // actually reads as "three separate things," not just three headings.
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
       <Card elevation={1} className={styles.settingsSection}>
-        <h3>Pool Results Overlay</h3>
+        {/* Same minimal-icon-in-the-heading treatment as the other two
+            settings sections below -- see BracketSettingsSection's own
+            comment on this. Icon sits right next to the heading text
+            (small gap, no space-between) rather than pushed out to the
+            card's far edge. */}
+        <h3
+          style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+        >
+          Pool Results Overlay
+          <CopyOverlayUrlButton />
+        </h3>
         <FormGroup label="Advancements" inline>
           <NumericInput
             value={advanceCount}
@@ -660,7 +671,6 @@ function MatchesSettingsPanel() {
             disabled={!rowColors}
           />
         </div>
-        <CopyOverlayUrlButton />
       </Card>
       <BracketSettingsSection />
       <ScheduleSettingsSection />
@@ -687,7 +697,34 @@ function BracketSettingsSection() {
 
   return (
     <Card elevation={1} className={styles.settingsSection}>
-      <h3>Start.gg Bracket Overlay</h3>
+      {/* minimal, icon-only Refresh + copy-URL right next to the heading
+          text itself -- same treatment as the Pool Results tab's own
+          "Pools" heading (see its Button minimal above), rather than
+          labeled buttons lost among the other controls below. */}
+      <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        Start.gg Bracket Overlay
+        <div style={{ display: "flex", gap: "0.25rem" }}>
+          <Button
+            icon={<Refresh />}
+            minimal
+            title="Refresh bracket data"
+            onClick={() => dispatch(eventSlice.actions.signalBracketRefresh())}
+          />
+          <Button
+            icon={<Clipboard />}
+            minimal
+            disabled={!ready}
+            title={
+              ready
+                ? "Copy bracket overlay URL"
+                : "Save a start.gg API key first (see the start.gg connection panel)"
+            }
+            onClick={() =>
+              copyObsSource(new URL(href, document.location.href).href)
+            }
+          />
+        </div>
+      </h3>
       <FormGroup label="Bracket to display" inline>
         <HTMLSelect
           value={selectedPhase ?? ""}
@@ -707,28 +744,6 @@ function BracketSettingsSection() {
           ))}
         </HTMLSelect>
       </FormGroup>
-      <ButtonGroup>
-        <Button
-          icon={<Refresh />}
-          onClick={() => dispatch(eventSlice.actions.signalBracketRefresh())}
-        >
-          Refresh
-        </Button>
-        <Button
-          icon={<Duplicate />}
-          disabled={!ready}
-          title={
-            ready
-              ? undefined
-              : "Save a start.gg API key first (see the start.gg connection panel)"
-          }
-          onClick={() =>
-            copyObsSource(new URL(href, document.location.href).href)
-          }
-        >
-          Copy Overlay URL
-        </Button>
-      </ButtonGroup>
     </Card>
   );
 }
@@ -899,7 +914,20 @@ function ScheduleSettingsSection() {
       elevation={1}
       className={`${styles.settingsSection} ${styles.scheduleSettingsSection}`}
     >
-      <h3>Schedule Overlay</h3>
+      {/* Same minimal-icon-in-the-heading treatment as the other two
+          settings sections above -- see BracketSettingsSection's own
+          comment on this. */}
+      <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        Schedule Overlay
+        <Button
+          icon={<Clipboard />}
+          minimal
+          title="Copy schedule overlay URL"
+          onClick={() =>
+            copyObsSource(new URL(href, document.location.href).href)
+          }
+        />
+      </h3>
       {/* Grouped and tinted specifically because "Day to display" below
           is a room-synced radio group that immediately changes what's
           live on stream -- functionally unrelated to, but visually
@@ -989,14 +1017,6 @@ function ScheduleSettingsSection() {
             ...SCHEDULE_DAYS.map(({ id, label }) => ({ label, value: id })),
           ]}
         />
-        <Button
-          icon={<Duplicate />}
-          onClick={() =>
-            copyObsSource(new URL(href, document.location.href).href)
-          }
-        >
-          Copy Overlay URL
-        </Button>
       </div>
       <Divider style={{ margin: "1rem 0 0.75rem" }} />
       <div className={styles.scheduleEditorLabel}>Edit a schedule</div>
@@ -1377,18 +1397,16 @@ function CopyOverlayUrlButton() {
   );
   return (
     <Button
-      icon={<Duplicate />}
+      icon={<Clipboard />}
+      minimal
       disabled={!ready}
       title={
         ready
-          ? undefined
+          ? "Copy pool results overlay URL"
           : "Save a Sheets API key in Google Sheets settings first (see the Sheets connection panel)"
       }
       onClick={() => copyObsSource(new URL(href, document.location.href).href)}
-      style={{ marginTop: "0.75rem" }}
-    >
-      Overlay URL
-    </Button>
+    />
   );
 }
 
