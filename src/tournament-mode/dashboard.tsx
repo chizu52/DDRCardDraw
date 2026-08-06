@@ -1139,8 +1139,20 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
     <>
       {/* Global status (see savedStatus's own comment above), staged
           here alongside this day's rows -- same dirty flag, same Submit
-          button below sends both together. */}
-      <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          button below sends both together. FormGroup below is NOT
+          `inline` -- RadioGroup always stacks its label above its
+          options, so giving Minutes the same shape (label above input)
+          is what makes the two blocks comparable in the first place.
+          `alignItems: "flex-start"` on the row then lines "Schedule
+          status" up with "Minutes"; the 14.5px marginTop on the
+          FormGroup below separately re-centers *its own* label+input
+          pair on the radio row specifically (not on the taller
+          RadioGroup block as a whole) -- measured against the rendered
+          radio row's own height, which doesn't move independently of
+          this, so it isn't expected to drift; re-measure and adjust
+          this number if the radio row's own font-size/line-height ever
+          changes. */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: "1rem" }}>
         <RadioGroup
           label="Schedule status"
           inline
@@ -1158,7 +1170,7 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
             { label: "Delayed", value: "delayed" },
           ]}
         />
-        <FormGroup label="Minutes" inline>
+        <FormGroup label="Minutes" style={{ marginTop: "14.5px" }}>
           <NumericInput
             value={status.minutes}
             min={0}
