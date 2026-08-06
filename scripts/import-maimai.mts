@@ -84,7 +84,9 @@ function normalizeSong(song): Song {
 
     if (
       song.isLocked &&
-      !["Xaleid◆scopiX", "Ref:rain (for 7th Heaven)"].includes(song.title)
+      !["Xaleid◆scopiX", "Ref:rain (for 7th Heaven)", "Break The Speakers"].includes(
+        song.title,
+      )
     ) {
       flags.push("unlockable");
     }
