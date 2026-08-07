@@ -702,7 +702,7 @@ function BracketSettingsSection() {
           "Pools" heading (see its Button minimal above), rather than
           labeled buttons lost among the other controls below. */}
       <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        Start.gg Bracket Overlay
+        Start.gg Bracket Tree
         <div style={{ display: "flex", gap: "0.25rem" }}>
           <Button
             icon={<Refresh />}
