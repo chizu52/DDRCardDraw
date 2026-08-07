@@ -8,7 +8,12 @@ import {
 } from "@blueprintjs/core";
 import { ConfigSelect } from ".";
 import { PlayerListInput } from "./player-list-input";
-import { MatchPicker, GauntletPicker, PickedMatch } from "../matches";
+import {
+  MatchPicker,
+  GauntletPicker,
+  SheetGauntletPicker,
+  PickedMatch,
+} from "../matches";
 import { StartggApiKeyGated } from "../startgg-gql/components";
 import { createDraw } from "../state/thunks";
 import { useAppDispatch } from "../state/store";
@@ -37,7 +42,25 @@ export function DrawDialog(props: Props) {
       players: match.players,
       title: match.title,
       id: match.id,
-      phaseName: match.phaseName,
+      // MatchPicker/GauntletPicker always pass a real string (falling
+      // back to "" themselves) -- the || "" here is just to satisfy
+      // PickedMatch's phaseName being optional (SheetGauntletPicker's
+      // picks never set it, since there's no start.gg phase behind them).
+      phaseName: match.phaseName || "",
+    });
+  }
+
+  // Same idea as handleStartggDraw, but for a pool picked from the
+  // spreadsheet (SheetGauntletPicker) instead of a start.gg phase --
+  // deliberately type: "sheet", not "startgg" (see SheetGauntletMeta's
+  // own comment in models/Drawing.ts for why).
+  function handleSheetGauntletDraw(match: PickedMatch) {
+    return handleDraw({
+      type: "sheet",
+      subtype: "gauntlet",
+      players: match.players,
+      title: match.title,
+      id: match.id,
     });
   }
 
@@ -87,6 +110,16 @@ export function DrawDialog(props: Props) {
             }
           >
             start.gg (gauntlet)
+          </Tab>
+        )}
+        {appMode === "event" && (
+          <Tab
+            id="sheet-group"
+            panel={
+              <SheetGauntletPicker onPickMatch={handleSheetGauntletDraw} />
+            }
+          >
+            spreadsheet (gauntlet)
           </Tab>
         )}
       </Tabs>

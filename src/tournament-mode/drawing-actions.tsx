@@ -34,7 +34,9 @@ import { useDrawing } from "../drawing-context";
 import {
   CHART_DRAWN,
   CHART_PLACEHOLDER,
+  isGauntletMeta,
   playerById,
+  SheetGauntletMeta,
   StartggGauntletMeta,
 } from "../models/Drawing";
 import {
@@ -241,11 +243,10 @@ export function DrawingActions() {
   const drawingId = useDrawing((s) => s.compoundId);
   const drawingMeta = useDrawing((s) => s.meta);
   const highlighAtRandom = useHighlightRandom();
-  const isGauntlet =
-    drawingMeta.type === "startgg" && drawingMeta.subtype === "gauntlet";
+  const isGauntlet = isGauntletMeta(drawingMeta);
   const { showBoundary } = useErrorBoundary();
   const [gauntletEditorMeta, setGauntletEditorMeta] = useState<
-    StartggGauntletMeta | undefined
+    StartggGauntletMeta | SheetGauntletMeta | undefined
   >(undefined);
 
   const addToCabMenu = (
@@ -333,7 +334,9 @@ export function DrawingActions() {
               variant="minimal"
               icon={<Th />}
               onClick={() => {
-                setGauntletEditorMeta(drawingMeta);
+                if (isGauntletMeta(drawingMeta)) {
+                  setGauntletEditorMeta(drawingMeta);
+                }
               }}
             />
           </Tooltip>
@@ -426,6 +429,11 @@ function EditMatchMenu({ drawingId }: { drawingId: string }) {
       break;
     case "startgg":
       // @todo figure out what edit looks like for startgg?
+      editPlayersDialog = null;
+      break;
+    case "sheet":
+      // @todo figure out what edit looks like for a spreadsheet-sourced
+      // gauntlet? Same unbuilt state as "startgg" above.
       editPlayersDialog = null;
   }
 

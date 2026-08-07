@@ -1,7 +1,7 @@
 import { useParams } from "react-router-dom";
 import { drawingsSlice } from "../state/drawings.slice";
 import { useAppState } from "../state/store";
-import { getAllPlayers } from "../models/Drawing";
+import { getAllPlayers, isGauntletMeta } from "../models/Drawing";
 
 export function GlobalLabel() {
   const params = useParams<"roomName" | "labelId">();
@@ -56,8 +56,7 @@ export function CabPlayer(props: {
     const player = parent.meta.players[props.p - 1];
     const playerId = player?.id;
     const name = player?.name || "";
-    const hideWins =
-      parent.meta.type === "startgg" && parent.meta.subtype === "gauntlet";
+    const hideWins = isGauntletMeta(parent.meta);
     if (hideWins) {
       return name;
     }

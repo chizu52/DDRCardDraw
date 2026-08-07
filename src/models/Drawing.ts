@@ -79,6 +79,32 @@ export interface StartggGauntletMeta extends StartggMeta {
   scoresByEntrant?: Record<string, Record<string, number | undefined>>;
 }
 
+/** A gauntlet drawn from a spreadsheet pool (see sheets/parse-pools.ts)
+ * instead of a start.gg phase -- for formats like Gauntlet Pools that
+ * start.gg has no bracket type for at all. Deliberately NOT nested
+ * under StartggMeta/type:"startgg" -- this draw has no start.gg phase
+ * or entrant ids behind it, so claiming that type would be a lie the
+ * associatedMatchIds/PhaseName-style start.gg-specific code elsewhere
+ * would trip on. Otherwise mirrors StartggGauntletMeta's shape (id,
+ * scoresByEntrant) so the same GauntletScoreEditor works unmodified --
+ * see isGauntletMeta below. */
+export interface SheetGauntletMeta extends DrawMeta {
+  type: "sheet";
+  subtype: "gauntlet";
+  /** The pool's title cell from the spreadsheet (e.g. "Pool 1", "Pool
+   * L1") -- this format has no phase/set id to key off, so the pool
+   * title itself is the stable identifier, filling the same role
+   * StartggGauntletMeta.id (a phase id) plays for the "already drawn"
+   * check in matches.tsx's associatedMatchIds. Parsed pool titles are
+   * unique within a sheet by construction (parsePoolsFromRows), so
+   * this is safe to use as-is. */
+  id: string;
+  /** Player ids here are freshly-minted (newPlayer), not start.gg
+   * entrant ids -- a sheet pool's rows are just player name strings,
+   * nothing to key scoresByEntrant off otherwise. */
+  scoresByEntrant?: Record<string, Record<string, number | undefined>>;
+}
+
 export interface SimpleMeta extends DrawMeta {
   type: "simple";
 }
@@ -112,13 +138,26 @@ export function playerNameById(
     : playerDisplayName(meta.players[index], index);
 }
 
+/** True for either gauntlet source (start.gg phase or spreadsheet pool)
+ * -- the two meta types share subtype/id/scoresByEntrant but differ in
+ * `type`, so callers that only care "is this a gauntlet, regardless of
+ * where its players came from" (score-editor visibility, win-count
+ * display) should use this instead of re-deriving the OR by hand at
+ * each call site. `"subtype" in meta` guards SimpleMeta, which has no
+ * subtype field at all. */
+export function isGauntletMeta(
+  meta: Drawing["meta"],
+): meta is StartggGauntletMeta | SheetGauntletMeta {
+  return "subtype" in meta && meta.subtype === "gauntlet";
+}
+
 /** used to reference a sub draw, or the charts in the parent draw by omitting the target */
 export type CompoundSetId = [parentId: string, targetId: string];
 
 export interface Drawing {
   id: string;
   configId: string;
-  meta: SimpleMeta | StartggVersusMeta | StartggGauntletMeta;
+  meta: SimpleMeta | StartggVersusMeta | StartggGauntletMeta | SheetGauntletMeta;
   winners: Record<string, string | null>;
   charts?: Array<DrawnChart | PlayerPickPlaceholder>;
   bans: Record<string, PlayerActionOnChart | null>;
