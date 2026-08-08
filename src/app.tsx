@@ -303,6 +303,24 @@ const router = createBrowserRouter([
       },
     ],
   },
+  {
+    // Same URL-embedded-Sheets-credentials pattern as pool-results above,
+    // but no room-synced "which pool" selector -- this overlay always
+    // shows the whole Gauntlet Pools diagram (every pool in the sheet at
+    // once), not one pool at a time. See gauntlet-pools.tsx.
+    path: "e/:roomName/gauntlet-pools",
+    element: <ObsSource />,
+    children: [
+      {
+        index: true,
+        lazy: async () => {
+          const { GauntletPoolsOverlay } =
+            await import("./obs-sources/gauntlet-pools");
+          return { Component: GauntletPoolsOverlay };
+        },
+      },
+    ],
+  },
 ]);
 
 function ObsSource() {

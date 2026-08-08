@@ -34,6 +34,17 @@ export const routableBracketTreePath = (apiKey: string) =>
 // overlay source total, not three. See schedule.tsx.
 export const routableSchedulePath = () => `../schedule`;
 
+// Same URL-embedded-credentials pattern as routablePoolResultsPath --
+// unlike that overlay though, there's no room-synced "which pool"
+// selector here at all: this shows every pool in the sheet at once (the
+// whole Gauntlet Pools diagram), so there's nothing to switch live in
+// the first place. See gauntlet-pools.tsx.
+export const routableGauntletPoolsPath = (
+  apiKey: string,
+  spreadsheetId: string,
+) =>
+  `../gauntlet-pools?${new URLSearchParams({ apiKey, spreadsheetId }).toString()}`;
+
 export function copyObsSource(href: string) {
   void copyPlainTextToClipboard(href, "Copied OBS source URL to clipboard");
 }

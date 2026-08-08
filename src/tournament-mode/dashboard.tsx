@@ -77,6 +77,7 @@ import { useTheme } from "../theme-toggle";
 import {
   copyObsSource,
   routableBracketTreePath,
+  routableGauntletPoolsPath,
   routableGlobalSourcePath,
   routablePoolResultsPath,
   routableSchedulePath,
@@ -672,9 +673,62 @@ function MatchesSettingsPanel() {
           />
         </div>
       </Card>
+      <GauntletPoolsSettingsSection />
       <BracketSettingsSection />
       <ScheduleSettingsSection />
     </div>
+  );
+}
+
+/** Controls for the Gauntlet Pools diagram OBS overlay (see
+ * obs-sources/gauntlet-pools.tsx) -- reads the same "Pools" sheet tab
+ * Pool Results does, so it needs the same Sheets credentials, but
+ * nothing else: unlike the other three sections, there's no
+ * room-synced selector here at all (which pool to show, which day,
+ * which phase) because this overlay always renders every pool in the
+ * sheet at once, not one thing at a time. */
+function GauntletPoolsSettingsSection() {
+  return (
+    <Card elevation={1} className={styles.settingsSection}>
+      {/* Same minimal-icon-in-the-heading treatment as the other three
+          settings sections -- see BracketSettingsSection's own comment
+          on this. */}
+      <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        Gauntlet Pools Overlay
+        <CopyGauntletPoolsUrlButton />
+      </h3>
+      <p className="bp6-text-muted" style={{ margin: 0 }}>
+        Shows every pool in the "Pools" sheet at once, laid out as the
+        Gauntlet Pools diagram (Pool 1-3 cascading into Pool L1-L2).
+        Nothing to configure here -- add this URL as a Browser Source and
+        it stays in sync with the sheet automatically.
+      </p>
+    </Card>
+  );
+}
+
+/** Same URL-embedded-Sheets-credentials pattern as Pool Results' own
+ * CopyOverlayUrlButton above (see its comment) -- this overlay reads
+ * the exact same "Pools" tab, so it's gated on the same credentials. */
+function CopyGauntletPoolsUrlButton() {
+  const apiKey = useAtomValue(sheetsApiKeyAtom);
+  const spreadsheetId = useAtomValue(spreadsheetIdAtom);
+  const ready = !!apiKey && !!spreadsheetId;
+  const href = useHref(
+    routableGauntletPoolsPath(apiKey || "", spreadsheetId || ""),
+  );
+  return (
+    <Button
+      icon={<Clipboard />}
+      minimal
+      disabled={!ready}
+      title={
+        ready
+          ? "Copy Gauntlet Pools overlay URL"
+          : "Save a Sheets API key in Google Sheets settings first (see the Sheets connection panel)"
+      }
+      onClick={() => copyObsSource(new URL(href, document.location.href).href)}
+    />
   );
 }
 

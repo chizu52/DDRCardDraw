@@ -66,3 +66,46 @@ function findLocalFont(baseName: "title" | "body"): LocalFont {
 
 export const titleFont = findLocalFont("title");
 export const bodyFont = findLocalFont("body");
+
+const SYSTEM_FONT_STACK = "Roboto, Helvetica, Arial, sans-serif";
+/** Falls back to the system stack whenever a slot has no real font --
+ * never happens in practice (findLocalFont above always resolves to
+ * FALLBACK_FONT at worst), this is just defensive. */
+export const TITLE_FONT_FAMILY = titleFont
+  ? `TitleFont, ${SYSTEM_FONT_STACK}`
+  : SYSTEM_FONT_STACK;
+export const BODY_FONT_FAMILY = bodyFont
+  ? `BodyFont, ${SYSTEM_FONT_STACK}`
+  : SYSTEM_FONT_STACK;
+
+/** Raw `@font-face` CSS for titleFont/bodyFont, rendered into a plain
+ * `<style>` tag (a `style` prop can't express @font-face any more than
+ * it can @keyframes) -- shared by any overlay that wants the same
+ * custom-font system schedule.tsx introduced, so each one doesn't need
+ * to redeclare this block by hand. Each rule only emits if that slot's
+ * local file actually exists; skipping it (rather than pointing `src`
+ * at a missing file) is what lets TITLE_FONT_FAMILY/BODY_FONT_FAMILY
+ * safely fall through to the system stack instead of the browser
+ * retrying a 404 and rendering invisible text in the meantime. */
+export const LOCAL_FONT_FACE_CSS = `
+${
+  titleFont
+    ? `@font-face {
+  font-family: "TitleFont";
+  src: url(${titleFont.url}) format("${titleFont.format}");
+  font-weight: 400;
+  font-style: normal;
+}`
+    : ""
+}
+${
+  bodyFont
+    ? `@font-face {
+  font-family: "BodyFont";
+  src: url(${bodyFont.url}) format("${bodyFont.format}");
+  font-weight: 400;
+  font-style: normal;
+}`
+    : ""
+}
+`;
