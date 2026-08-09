@@ -157,7 +157,13 @@ export async function readColumnBColors(
   return rowData.map((r) => {
     const bg = r.values?.[0]?.effectiveFormat?.backgroundColor;
     if (!bg) return null;
-    return { r: bg.red ?? 1, g: bg.green ?? 1, b: bg.blue ?? 1 };
+    // `?? 0`, not `?? 1` -- see fetchPublicColumnBColors's identical fix
+    // (sheets-public-read.ts) for the full explanation: the Sheets API
+    // omits a color channel from its JSON when that channel is exactly
+    // 0, not when it's "unspecified, default to white." A pure red or
+    // pure green cell was silently coming back as white under the old
+    // `?? 1` fallback.
+    return { r: bg.red ?? 0, g: bg.green ?? 0, b: bg.blue ?? 0 };
   });
 }
 

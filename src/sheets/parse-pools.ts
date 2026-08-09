@@ -2,6 +2,14 @@ export interface PoolPlayerRow {
   player: string;
   songs: string[];
   total: string;
+  /** Raw text from the Final Ranking column (e.g. "1st"), if this sheet
+   * has one -- empty string otherwise. The actual advance/eliminated
+   * decision comes from that column's cell background color (read
+   * separately -- see gauntlet-pools.tsx's classifyRankingColor -- since
+   * the number of players who actually advance out of a pool isn't fixed
+   * at any particular rank cutoff), not from parsing this text. Kept
+   * here for display/debugging only. */
+  finalRanking: string;
   rowIndex: number;
 }
 
@@ -11,6 +19,10 @@ export interface ParsedPool {
   headerRowIndex: number;
   songCols: number[];
   totalCol: number | null;
+  /** Column holding each player's Final Ranking text + advance-signaling
+   * background color -- null if this sheet's header row doesn't have a
+   * Final Ranking column. */
+  finalRankingCol: number | null;
   finishedCol: number | null;
   finished: boolean;
   rows: PoolPlayerRow[];
@@ -25,10 +37,12 @@ const MAX_CONSECUTIVE_EMPTY = 20;
 function findHeaderColumns(headerRow: string[]): {
   songCols: number[];
   totalCol: number | null;
+  finalRankingCol: number | null;
   finishedCol: number | null;
 } {
   const songCols: number[] = [];
   let totalCol: number | null = null;
+  let finalRankingCol: number | null = null;
   let finishedCol: number | null = null;
   // Scan the whole row (not stopping at Total) so columns further right,
   // like Final Ranking / Finished, are still found.
@@ -37,13 +51,20 @@ function findHeaderColumns(headerRow: string[]): {
     if (!cell) continue;
     if (/finished/i.test(cell)) {
       finishedCol = col;
+    } else if (/final\s*ranking/i.test(cell)) {
+      // Checked as its own branch (not folded into the totalCol===null
+      // fallback below) so it's captured regardless of where it falls
+      // relative to Total -- previously this cell matched neither
+      // /finished/i nor /total/i and, once totalCol was already set,
+      // fell through and was silently discarded.
+      finalRankingCol = col;
     } else if (totalCol === null && /total/i.test(cell)) {
       totalCol = col;
     } else if (totalCol === null) {
       songCols.push(col);
     }
   }
-  return { songCols, totalCol, finishedCol };
+  return { songCols, totalCol, finalRankingCol, finishedCol };
 }
 
 // The real header (the row carrying Song 1/2/3/4/Total/Finished labels)
@@ -78,9 +99,8 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
   // per-pool-redetection bug (misreading a stray "Final Ranking" label as a
   // lone "Song 1" column) and the newer wrong-row bug (a title-only row like
   // "Gauntlet Pools" above the real header).
-  const { songCols, totalCol, finishedCol } = findHeaderColumns(
-    rows[findHeaderRowIndex(rows)] || [],
-  );
+  const { songCols, totalCol, finalRankingCol, finishedCol } =
+    findHeaderColumns(rows[findHeaderRowIndex(rows)] || []);
 
   // Deliberately NOT starting from headerRowIndex + 1: in the current sheet
   // layout that row *is* Pool 1's own title row (see above), so skipping
@@ -98,6 +118,7 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
         headerRowIndex: i,
         songCols,
         totalCol,
+        finalRankingCol,
         finishedCol,
         finished: false,
         rows: [],
@@ -111,8 +132,18 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
     if (current && slotIndex < 4) {
       const songs = songCols.map((c) => (row[c] || "").trim());
       const total = totalCol !== null ? (row[totalCol] || "").trim() : "";
+      const finalRanking =
+        current.finalRankingCol !== null
+          ? (row[current.finalRankingCol] || "").trim()
+          : "";
       if (cell) {
-        current.rows.push({ player: cell, songs, total, rowIndex: i });
+        current.rows.push({
+          player: cell,
+          songs,
+          total,
+          finalRanking,
+          rowIndex: i,
+        });
         // The sheet only carries the Finished flag on a pool's first player
         // row, not on every row -- mirror that convention here.
         if (slotIndex === 0 && finishedCol !== null) {

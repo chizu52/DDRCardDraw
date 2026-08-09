@@ -64,10 +64,15 @@ import {
   topScoreRanks,
 } from "../sheets/parse-pools";
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
+import {
+  fetchPublicSheetValues,
+  PublicSheetReadError,
+} from "../sheets/sheets-public-read";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
 import {
   DEFAULT_SCHEDULE_STATUS,
   eventSlice,
+  type GauntletPoolMappingEdge,
   type ScheduleDay,
   type ScheduleItem,
   type ScheduleStatusState,
@@ -84,6 +89,7 @@ import {
 } from "./copy-obs-source";
 import styles from "./dashboard.css";
 import { iconLabel, localIcons } from "../obs-sources/local-icons";
+import { LOSER_POOL_TITLE } from "../obs-sources/gauntlet-pools";
 
 // Score Scope (the Python CV score reader) runs a small local HTTP
 // server so this button can trigger a fresh capture before importing,
@@ -699,11 +705,231 @@ function GauntletPoolsSettingsSection() {
       </h3>
       <p className="bp6-text-muted" style={{ margin: 0 }}>
         Shows every pool in the "Pools" sheet at once, laid out as the
-        Gauntlet Pools diagram (Pool 1-3 cascading into Pool L1-L2).
-        Nothing to configure here -- add this URL as a Browser Source and
-        it stays in sync with the sheet automatically.
+        Gauntlet Pools diagram. Add this URL as a Browser Source and it
+        stays in sync with the sheet automatically. Bottom-N routing is
+        read automatically from the Final Ranking column when an
+        eliminated player's cell names a destination pool -- use the
+        table below to add or override routes the sheet doesn't already
+        say.
       </p>
+      <Divider style={{ margin: "0.75rem 0" }} />
+      <GauntletPoolMappingEditor />
     </Card>
+  );
+}
+
+/** Fetches the current pool titles from the "Pools" sheet, split into
+ * winner/loser lists by the same LOSER_POOL_TITLE rule
+ * gauntlet-pools.tsx itself uses -- so this editor's dropdown options
+ * and the overlay's own edge-resolution always classify pools
+ * identically. Uses the same public-key read (sheetsApiKeyAtom/
+ * spreadsheetIdAtom) CopyGauntletPoolsUrlButton already reads, not the
+ * OAuth-authenticated readSheetValues path used elsewhere in this file
+ * -- anyone who can use the Gauntlet Pools overlay at all already has
+ * those two atoms set (it's a hard precondition for that overlay's URL
+ * to resolve), and this is read-only, so there's no reason to require
+ * the interactive OAuth popup for it. */
+function useGauntletPoolTitles() {
+  const apiKey = useAtomValue(sheetsApiKeyAtom);
+  const spreadsheetId = useAtomValue(spreadsheetIdAtom);
+  // Same "sheet changed, refetch now" signal the overlay itself listens
+  // to -- an operator who just exported a new pool shouldn't have to
+  // wait out either overlay's own 60s fallback poll before this
+  // dropdown offers it.
+  const poolsRefreshedAt = useAppState((s) => s.event.poolsRefreshedAt);
+  const [state, setState] = useState<{
+    winnerTitles: string[];
+    loserTitles: string[];
+    error: string | null;
+  }>({ winnerTitles: [], loserTitles: [], error: null });
+
+  useEffect(() => {
+    if (!apiKey || !spreadsheetId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await fetchPublicSheetValues(
+          apiKey,
+          spreadsheetId,
+          "Pools",
+        );
+        if (cancelled) return;
+        const { pools } = parsePoolsFromRows(rows);
+        setState({
+          winnerTitles: pools
+            .filter((p) => !LOSER_POOL_TITLE.test(p.title))
+            .map((p) => p.title),
+          loserTitles: pools
+            .filter((p) => LOSER_POOL_TITLE.test(p.title))
+            .map((p) => p.title),
+          error: null,
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setState((prev) => ({
+          ...prev,
+          error:
+            err instanceof PublicSheetReadError || err instanceof Error
+              ? err.message
+              : "Couldn't read the sheet.",
+        }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, spreadsheetId, poolsRefreshedAt]);
+
+  return { ...state, ready: !!apiKey && !!spreadsheetId };
+}
+
+function emptyMappingEdge(): GauntletPoolMappingEdge {
+  return { winnerPool: "", loserPool: "" };
+}
+
+/** Keeps a saved-but-currently-unavailable title visible/selectable in
+ * its dropdown, rather than it silently vanishing (or the select
+ * mismatching its own value) when the live sheet fetch is stale, still
+ * loading, or failing. */
+function optionsFor(liveTitles: string[], currentValue: string): string[] {
+  return currentValue && !liveTitles.includes(currentValue)
+    ? [...liveTitles, currentValue]
+    : liveTitles;
+}
+
+/** Editor for event.gauntletPoolMapping -- modeled directly on
+ * ScheduleDayEditor below (local buffer, an explicit `dirty` boolean
+ * rather than a derived comparison -- see that component's own comment
+ * on why that distinction matters -- a resync-while-not-dirty effect,
+ * per-row helpers, and a Submit button that dispatches the whole array
+ * at once). The two differences from that pattern: no per-day
+ * parameter (this is one flat list), and its two dropdowns need their
+ * own read-only fetch of current pool titles (useGauntletPoolTitles)
+ * since, unlike free-text schedule fields, an unrecognized pool title
+ * here would just silently fail to draw a connector with no feedback. */
+function GauntletPoolMappingEditor() {
+  const dispatch = useAppDispatch();
+  const savedMapping = useAppState((s) => s.event.gauntletPoolMapping);
+  const [mapping, setMapping] = useState<GauntletPoolMappingEdge[]>(
+    savedMapping,
+  );
+  const [dirty, setDirty] = useState(false);
+  const {
+    winnerTitles,
+    loserTitles,
+    error: titlesError,
+    ready,
+  } = useGauntletPoolTitles();
+
+  useEffect(() => {
+    if (!dirty) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setMapping(savedMapping);
+    }
+  }, [savedMapping, dirty]);
+
+  function updateRow(index: number, patch: Partial<GauntletPoolMappingEdge>) {
+    setMapping((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
+    setDirty(true);
+  }
+
+  function addRow() {
+    setMapping((prev) => [...prev, emptyMappingEdge()]);
+    setDirty(true);
+  }
+
+  function removeRow(index: number) {
+    setMapping((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  }
+
+  function submit() {
+    dispatch(eventSlice.actions.setGauntletPoolMapping(mapping));
+    setDirty(false);
+  }
+
+  return (
+    <>
+      <div className={styles.scheduleEditorLabel}>
+        Bottom-N routing (winner pool droppers to loser pool)
+      </div>
+      {!ready && (
+        <Callout intent="primary" style={{ marginBottom: "0.5rem" }}>
+          Save a Sheets API key and spreadsheet ID first (see the Sheets
+          connection panel) to populate these dropdowns.
+        </Callout>
+      )}
+      {titlesError && (
+        <Callout intent="warning" style={{ marginBottom: "0.5rem" }}>
+          Couldn't load current pool titles from the sheet: {titlesError}.
+          Existing rows below can still be edited or removed.
+        </Callout>
+      )}
+      <div style={{ overflowX: "auto" }}>
+        <table className={styles.scheduleTable}>
+          <thead>
+            <tr>
+              <th>Winner pool</th>
+              <th>Loser pool</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {mapping.map((row, i) => (
+              <tr key={i}>
+                <td>
+                  <HTMLSelect
+                    value={row.winnerPool}
+                    onChange={(e) =>
+                      updateRow(i, { winnerPool: e.currentTarget.value })
+                    }
+                  >
+                    <option value="">Choose a pool...</option>
+                    {optionsFor(winnerTitles, row.winnerPool).map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </HTMLSelect>
+                </td>
+                <td>
+                  <HTMLSelect
+                    value={row.loserPool}
+                    onChange={(e) =>
+                      updateRow(i, { loserPool: e.currentTarget.value })
+                    }
+                  >
+                    <option value="">Choose a pool...</option>
+                    {optionsFor(loserTitles, row.loserPool).map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </HTMLSelect>
+                </td>
+                <td>
+                  <Button icon={<Trash />} onClick={() => removeRow(i)} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <ButtonGroup className={styles.scheduleAddRow}>
+        <Button icon={<Add />} onClick={addRow}>
+          Add row
+        </Button>
+        <Button
+          disabled={!dirty}
+          intent={dirty ? "primary" : undefined}
+          onClick={submit}
+        >
+          Submit
+        </Button>
+      </ButtonGroup>
+    </>
   );
 }
 

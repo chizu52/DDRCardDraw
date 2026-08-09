@@ -56,6 +56,24 @@ export const DEFAULT_SCHEDULE_STATUS: {
   minutes: number;
 } = { state: "onTime", minutes: 0 };
 
+/** One manually-entered Bottom-N routing edge for the Gauntlet Pools OBS
+ * overlay (obs-sources/gauntlet-pools.tsx) -- which loser pool a winner
+ * pool's droppers actually feed. Referenced by pool TITLE, not index or
+ * column position, so an edge survives pools being reordered in the
+ * sheet and naturally goes stale (silently dropped, not shown/crashed
+ * on -- see gauntlet-pools.tsx's own edge filtering) if a pool is later
+ * renamed or removed. A flat list of edges, not a 1:1 array/Record --
+ * one winner pool's droppers can feed more than one loser pool, and one
+ * loser pool can receive from more than one winner pool. Nothing in the
+ * "Pools" sheet records this relationship (unlike who advances within a
+ * pool, which is read from Final Ranking's color -- see
+ * classifyRankingColor), so it's entered manually here rather than
+ * derived. */
+export interface GauntletPoolMappingEdge {
+  winnerPool: string;
+  loserPool: string;
+}
+
 interface EventState {
   eventName: string;
   cabs: Record<string, CabInfo>;
@@ -69,6 +87,10 @@ interface EventState {
    * pool-results overlay to refetch from Sheets immediately, instead of
    * waiting for its own poll interval -- see dashboard.tsx's exportPool. */
   poolsRefreshedAt: number;
+  /** Operator-entered Bottom-N routing for the Gauntlet Pools overlay --
+   * see GauntletPoolMappingEdge. Edited from dashboard.tsx's
+   * GauntletPoolMappingEditor. */
+  gauntletPoolMapping: GauntletPoolMappingEdge[];
   /** Same settings as sheets-creds-manager.tsx's other Sheets config, but
    * room-synced (not device-local) since they affect what the overlay
    * displays for everyone, not just this device -- see
@@ -150,6 +172,7 @@ const initialState: EventState = {
 }`,
   selectedPool: null,
   poolsRefreshedAt: 0,
+  gauntletPoolMapping: [],
   overlayAdvanceCount: 1,
   overlayRowColors: true,
   overlayRowColorTiers: DEFAULT_ROW_COLOR_TIERS,
@@ -236,6 +259,18 @@ export const eventSlice = createSlice({
       reducer(state, action: PayloadAction<number>) {
         state.poolsRefreshedAt = action.payload;
       },
+    },
+    // Replaces the whole mapping list at once -- the editor
+    // (dashboard.tsx's GauntletPoolMappingEditor) buffers edits locally
+    // and only dispatches this on explicit "Submit," same pattern as
+    // setDaySchedule. No prepare()/timestamp companion (unlike
+    // setDaySchedule's updatedAt) -- this overlay has no entrance
+    // animation that needs re-keying on every edit.
+    setGauntletPoolMapping(
+      state,
+      action: PayloadAction<GauntletPoolMappingEdge[]>,
+    ) {
+      state.gauntletPoolMapping = action.payload;
     },
     setOverlayAdvanceCount(state, action: PayloadAction<number>) {
       state.overlayAdvanceCount = action.payload;
@@ -381,6 +416,9 @@ export function addOverlaySettings(state: EventState) {
   }
   if (state.poolsRefreshedAt === undefined) {
     state.poolsRefreshedAt = 0;
+  }
+  if (!state.gauntletPoolMapping) {
+    state.gauntletPoolMapping = [];
   }
   if (state.overlayAdvanceCount === undefined) {
     state.overlayAdvanceCount = 1;
