@@ -360,6 +360,66 @@ function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
   return [...items].sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
 }
 
+// Automatic mode's own "now," as "HH:mm" (24-hour, zero-padded) -- the
+// exact same format ScheduleItem.time is already stored/typed in (see
+// its own doc), so the two compare correctly as plain strings. Derived
+// from the machine's own LOCAL wall clock (Date's plain getHours/
+// getMinutes, no explicit timeZone), same convention this file's own
+// corner clock (formatClock) already uses -- explicit user request:
+// not a hardcoded timezone. An operator typing "20:30" into a row means
+// their own local 8:30pm, whatever timezone the machine they typed it
+// on happens to be in, so comparing against THIS machine's local time
+// is what actually lines up with what they typed (matters most when
+// the OBS machine and the entry device are the same one, the common
+// case here).
+function currentLocalTimeString(ms: number): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// Automatic mode caps the overlay to "whatever's happening now, plus
+// the next few" rather than showing the whole day at once.
+const MAX_AUTO_VISIBLE_ITEMS = 4;
+
+/** Automatic mode's own row selection, adapted from a sibling fork's
+ * own automatic-scheduling PR (github.com/vlnguyen/
+ * DDRCardDraw-Storm-2026#45) -- ported the logic, not the code verbatim
+ * (that version hardcoded America/New_York; see currentLocalTimeString
+ * above for why this uses local time instead), and wired into THIS
+ * file's own existing current/completed rendering (ScheduleRow) rather
+ * than a separate visual treatment, so automatic mode still looks like
+ * the rest of this overlay's established design language.
+ *
+ * `rows` must already be sorted by time ascending. Walks the list and
+ * remembers the LAST row whose time has already arrived (<= `now`) --
+ * that's where the visible window starts, sliced to
+ * MAX_AUTO_VISIBLE_ITEMS. A row before that point (already finished) is
+ * simply not in the slice at all, rather than shown dimmed the way
+ * manual mode's own `completed` rows are -- "drop off the list" is the
+ * whole point of automatic mode, not a dimmed leftover.
+ * `isFirstRowCurrent` is false only when NOTHING has started yet (the
+ * whole day is still ahead) -- in that case this shows from the very
+ * first row with nothing marked current, same as an event that hasn't
+ * begun should read. */
+function visibleRows(
+  rows: ScheduleItem[],
+  now: string,
+): { rows: ScheduleItem[]; isFirstRowCurrent: boolean } {
+  let start = 0;
+  let started = false;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].time && rows[i].time! <= now) {
+      start = i;
+      started = true;
+    }
+  }
+  return {
+    rows: rows.slice(start, start + MAX_AUTO_VISIBLE_ITEMS),
+    isFirstRowCurrent: started,
+  };
+}
+
 // Train-station-board-style status, bottom-right of the header (see the
 // badge in Schedule below) -- operator-set (dashboard.tsx's
 // ScheduleDayEditor radios + minutes box, staged/submitted alongside
@@ -525,23 +585,37 @@ function displayTimeEqual(a: DisplayTime | null, b: DisplayTime | null) {
 // clock). current/completed changes are separate (a plain CSS
 // transition, see below) since those are per-row and not a value this
 // row is "informed about" the way a status shift is.
+//
+// `current`/`completed` are passed in explicitly now, not read off
+// `row` directly -- manual mode passes exactly `row.current`/
+// `row.completed` (unchanged behavior), automatic mode instead derives
+// them from comparing `row.time` against the real clock (see
+// Schedule's own visibleRows call). This component doesn't need to
+// know which mode produced them, so both modes share the identical
+// rendering below rather than automatic mode needing its own separate
+// row treatment.
 function ScheduleRow({
   row,
   index,
   scheduleStatus,
   entranceSettled,
+  current,
+  completed,
 }: {
   row: ScheduleItem;
   index: number;
   scheduleStatus: { state: ScheduleStatusState; minutes: number };
   entranceSettled: boolean;
+  current: boolean;
+  completed: boolean;
 }) {
-  // completed wins over current if a row somehow has both -- the
-  // editor's own radio-column UI never produces that combination, but
+  // completed wins over current if both are somehow true -- manual
+  // mode's editor never produces that combination itself, but
   // "already happened" is the more definitive of the two claims if it
-  // ever did.
-  const isCompleted = !!row.completed;
-  const isCurrent = !!row.current && !isCompleted;
+  // ever did, and this normalization has to hold regardless of which
+  // mode computed the inputs.
+  const isCompleted = completed;
+  const isCurrent = current && !isCompleted;
   // "All future schedules" -- every row that isn't the one happening
   // right now and hasn't already happened, regardless of where it falls
   // time-wise relative to `current`. Only these get the status's
@@ -792,6 +866,10 @@ export function Schedule() {
       ? (s.event.scheduleStatus[day] ?? DEFAULT_SCHEDULE_STATUS)
       : DEFAULT_SCHEDULE_STATUS,
   );
+  // "manual" (default) leaves current/completed exactly as the operator
+  // set them; "automatic" derives them live from the clock instead --
+  // see event.slice.ts's own doc on scheduleMode.
+  const scheduleMode = useAppState((s) => s.event.scheduleMode);
 
   // Same ticking pattern as bracket-tree.tsx's ElapsedTimerPill --
   // Date.now() has to live inside the effect, not called directly in
@@ -864,7 +942,44 @@ export function Schedule() {
     return null;
   }
 
-  const rows = sortedByTime(items).filter((row) => row.time || row.event);
+  const sorted = sortedByTime(items).filter((row) => row.time || row.event);
+  const isAutomatic = scheduleMode === "automatic";
+  // Same ahead/delayed -> minutes convention ScheduleRow's own
+  // statusDelta already uses (ahead subtracts, delayed adds) -- real
+  // bug, fixed: automatic mode was comparing the clock against each
+  // row's raw, AS-TYPED time, completely ignoring this. Setting a delay
+  // shifts what viewers see displayed on upcoming rows (ScheduleRow's
+  // own timeIsShifted logic, untouched), but automatic mode's own
+  // "has this started yet" check needs to agree with that same shifted
+  // schedule, not the original one, or a Delayed event would still
+  // mark items current/drop them at their ORIGINAL time -- effectively
+  // ignoring the delay entirely, exactly the reported bug.
+  const statusDelta =
+    scheduleStatus.state === "ahead"
+      ? -scheduleStatus.minutes
+      : scheduleStatus.state === "delayed"
+        ? scheduleStatus.minutes
+        : 0;
+  // A row's own EFFECTIVE time is `row.time + statusDelta` (shiftTimeString's
+  // own convention -- see ScheduleRow). "Has it started" means
+  // `row.time + statusDelta <= now`, i.e. `row.time <= now - statusDelta` --
+  // rather than shifting every row's own time forward (and then needing
+  // to make sure ScheduleRow doesn't shift it AGAIN for display), it's
+  // equivalent and simpler to shift `now` backward by the same amount
+  // once here, then compare against rows' unmodified, as-typed times.
+  const nowForComparison =
+    (statusDelta
+      ? shiftTimeString(currentLocalTimeString(nowMs), -statusDelta)
+      : currentLocalTimeString(nowMs)) ?? currentLocalTimeString(nowMs);
+  // Manual mode: show everything for the day, unchanged. Automatic
+  // mode: slice down to "current plus the next few" via visibleRows,
+  // comparing each row's own time against the real clock (nowMs, this
+  // component's own existing ticking clock -- no separate poll timer
+  // needed, this already updates once a second), adjusted for any live
+  // Ahead/Delayed status above.
+  const { rows, isFirstRowCurrent } = isAutomatic
+    ? visibleRows(sorted, nowForComparison)
+    : { rows: sorted, isFirstRowCurrent: false };
   // Derived from `renderedStatus` (this badge's own lagged value), NOT
   // the live `scheduleStatus` -- it keeps showing the OLD state/minutes
   // until fully invisible, then swaps, so the label/color here must lag
@@ -1161,6 +1276,15 @@ export function Schedule() {
                   index={i}
                   scheduleStatus={scheduleStatus}
                   entranceSettled={entranceSettled}
+                  // Manual: exactly row.current/row.completed, same as
+                  // always. Automatic: only the first VISIBLE row can
+                  // read as current (and only if visibleRows actually
+                  // found a started item) -- completed is always false
+                  // here, since a genuinely finished row is already
+                  // excluded from `rows` entirely rather than shown
+                  // dimmed (see visibleRows' own doc).
+                  current={isAutomatic ? i === 0 && isFirstRowCurrent : !!row.current}
+                  completed={isAutomatic ? false : !!row.completed}
                 />
               ))}
             </div>

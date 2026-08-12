@@ -136,6 +136,19 @@ interface EventState {
   scheduleStatus: Partial<
     Record<ScheduleDay, { state: ScheduleStatusState; minutes: number }>
   >;
+  /** "manual" (default) keeps the schedule overlay's original behavior
+   * -- current/completed per row are exactly whatever the operator set
+   * by hand in dashboard.tsx's ScheduleDayEditor. "automatic" instead
+   * derives current/upcoming live by comparing each row's own stored
+   * `time` against the real clock (see schedule.tsx's visibleRows),
+   * capping the overlay to the current item plus the next few and
+   * dropping items off the list once their time has passed -- no
+   * manual clicking through the schedule during the event. Global, not
+   * per-day (same as scheduleSubtitle/scheduleIcon) -- this is how the
+   * WHOLE overlay behaves, not a per-day choice. Adapted from a sibling
+   * fork's own automatic-mode PR (github.com/vlnguyen/
+   * DDRCardDraw-Storm-2026#45). */
+  scheduleMode: "manual" | "automatic";
   /** A free-text title shown on the gauntlet-pools overlay's own header
    * bar -- same "global caption, empty renders the generic fallback"
    * idea as scheduleSubtitle (falls back to "Gauntlet Pools" in the
@@ -185,6 +198,7 @@ const initialState: EventState = {
   scheduleSubtitle: "",
   scheduleIcon: null,
   scheduleStatus: {},
+  scheduleMode: "manual",
   gauntletPoolsTitle: "",
   gauntletPoolsIcon: null,
   gauntletPoolsUpcoming: {},
@@ -394,6 +408,9 @@ export const eventSlice = createSlice({
         state.scheduleUpdatedAt = action.payload.updatedAt;
       },
     },
+    setScheduleMode(state, action: PayloadAction<"manual" | "automatic">) {
+      state.scheduleMode = action.payload;
+    },
   },
   extraReducers(builder) {
     builder.addCase(mergeDraws, (state, { payload }) => {
@@ -469,6 +486,9 @@ export function addOverlaySettings(state: EventState) {
     typeof (state.scheduleStatus as { state?: unknown }).state === "string"
   ) {
     state.scheduleStatus = {};
+  }
+  if (state.scheduleMode === undefined) {
+    state.scheduleMode = "manual";
   }
   if (state.gauntletPoolsTitle === undefined) {
     state.gauntletPoolsTitle = "";

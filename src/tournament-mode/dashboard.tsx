@@ -1064,6 +1064,12 @@ function readIconFile(file: File): Promise<string> {
 function ScheduleSettingsSection() {
   const dispatch = useAppDispatch();
   const selectedDay = useAppState((s) => s.event.selectedScheduleDay);
+  // "Manual" (default) leaves current/completed exactly as set below in
+  // each day's own editor; "Automatic" derives them live from the real
+  // clock instead (see event.slice.ts's own doc on scheduleMode) --
+  // manual mode's own controls are untouched either way, this only
+  // decides whether the overlay actually reads them.
+  const scheduleMode = useAppState((s) => s.event.scheduleMode);
   const href = useHref(routableSchedulePath());
   const [currentDay, setCurrentDay] = useState<ScheduleDay>("fri");
 
@@ -1244,6 +1250,28 @@ function ScheduleSettingsSection() {
           options={[
             { label: "None", value: "" },
             ...SCHEDULE_DAYS.map(({ id, label }) => ({ label, value: id })),
+          ]}
+        />
+        {/* Explicit user request: a way to switch the whole overlay
+            between the original manual current/completed control (each
+            day's own editor below, untouched) and automatic mode, which
+            derives them live from the clock instead -- see
+            event.slice.ts's own doc on scheduleMode and schedule.tsx's
+            visibleRows for how automatic mode actually works. */}
+        <RadioGroup
+          label="Scheduling mode"
+          inline
+          selectedValue={scheduleMode}
+          onChange={(e) =>
+            dispatch(
+              eventSlice.actions.setScheduleMode(
+                e.currentTarget.value as "manual" | "automatic",
+              ),
+            )
+          }
+          options={[
+            { label: "Manual", value: "manual" },
+            { label: "Automatic", value: "automatic" },
           ]}
         />
       </div>
