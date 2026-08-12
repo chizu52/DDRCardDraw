@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Callout, Tag } from "@blueprintjs/core";
-import { ArrowRight } from "@blueprintjs/icons";
+import { Callout } from "@blueprintjs/core";
 import {
   parsePoolsFromRows,
   topScoreRanks,
+  colIndexToLetter,
+  finalRankingStatusByName,
+  formatSongScore,
   ParsedPool,
 } from "../sheets/parse-pools";
 import {
@@ -12,9 +14,33 @@ import {
   fetchPublicSheetValues,
   PublicSheetReadError,
 } from "../sheets/sheets-public-read";
+import { decodeSheetsConnection } from "../sheets/sheets-connection-param";
 import { CellColor, colorToCss } from "../sheets/sheets-export";
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
 import { useAppState } from "../state/store";
+import {
+  BODY_FONT_FAMILY,
+  LOCAL_FONT_FACE_CSS,
+  TITLE_FONT_FAMILY,
+} from "./local-fonts";
+
+// Same dark broadcast-panel tokens gauntlet-pools.tsx/schedule.tsx use --
+// explicit user request to bring this overlay in line with those two
+// rather than staying on its own separate light/white Blueprint-table
+// look. Scope is colors/fonts/status-pill styling only (confirmed with
+// the user) -- no banner backdrop or title/icon header bar here, this
+// overlay keeps its existing single pool-title header bar, just
+// recolored.
+const COLORS = {
+  panel: "#1c2127",
+  border: "#3a3f49",
+  text: "#f6f7f9",
+  muted: "#9aa2ac",
+  mint: "#22c55e",
+  gold: "#efc75e",
+  coral: "#f0a868",
+  red: "#ef4444",
+};
 
 // Fallback poll interval -- covers the case where nobody on the Matches
 // tab is around to trigger event.poolsRefreshedAt (see the useEffect
@@ -27,13 +53,31 @@ type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "not-found" }
-  | { status: "ok"; pool: ParsedPool; headerColor: CellColor | null };
+  | {
+      status: "ok";
+      pool: ParsedPool;
+      headerColor: CellColor | null;
+      /** Final Ranking column's own cell colors, one per raw sheet row --
+       * same mechanism gauntlet-pools.tsx uses (see its own
+       * classifyRankingColor/finalRankingStatusByName) so advancement here
+       * reads from the sheet's own color-coding instead of a manually
+       * configured count that can drift out of sync with what the sheet
+       * actually says. */
+      rankingColors: (CellColor | null)[];
+    };
 
 export function PoolResultsOverlay() {
   const [params] = useSearchParams();
-  const apiKey = params.get("apiKey");
-  const spreadsheetId = params.get("spreadsheetId");
-  const sheetName = params.get("sheet") || "Pools";
+  // Credentials now travel as one opaque `src` param (see
+  // sheets-connection-param.ts) rather than plain readable
+  // `apiKey`/`spreadsheetId` params -- explicit user request. Falls back
+  // to those old params directly when `src` isn't present so an OBS
+  // source already configured with the old-style URL (copied before this
+  // change) keeps working without needing to be re-copied/re-pasted.
+  const decoded = decodeSheetsConnection(params.get("src"));
+  const apiKey = decoded.apiKey ?? params.get("apiKey");
+  const spreadsheetId = decoded.spreadsheetId ?? params.get("spreadsheetId");
+  const sheetName = decoded.sheet ?? params.get("sheet") ?? "Pools";
 
   // Which pool to show, and how to display it, are room-synced state (see
   // event.slice.ts) instead of URL params -- set from the Matches tab's
@@ -43,7 +87,6 @@ export function PoolResultsOverlay() {
   // credentials below stay URL-based (see copy-obs-source.ts for why).
   const poolTitle = useAppState((s) => s.event.selectedPool);
   const poolsRefreshedAt = useAppState((s) => s.event.poolsRefreshedAt);
-  const advanceCount = useAppState((s) => s.event.overlayAdvanceCount);
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
 
@@ -70,15 +113,32 @@ export function PoolResultsOverlay() {
         if (cancelled) return;
         const { pools } = parsePoolsFromRows(rows);
         const pool = pools.find((p) => p.title === poolTitle);
-        setState(
-          pool
-            ? {
-                status: "ok",
-                pool,
-                headerColor: colors[pool.headerRowIndex] ?? null,
-              }
-            : { status: "not-found" },
-        );
+        if (!pool) {
+          setState({ status: "not-found" });
+          return;
+        }
+        // Same two-stage fetch as gauntlet-pools.tsx -- the Final Ranking
+        // column's letter isn't known until after parsing (found by
+        // header text), so this can't run alongside the values/header-color
+        // fetch above. No Final Ranking column on this sheet at all
+        // (finalRankingCol null) just skips the fetch -- advancement then
+        // reads as "unknown" for every row (classifyRankingColor's
+        // callers), not a crash.
+        const rankingColors =
+          pool.finalRankingCol != null
+            ? await fetchPublicColumnBColors(
+                apiKey!,
+                spreadsheetId!,
+                `${sheetName}!${colIndexToLetter(pool.finalRankingCol)}:${colIndexToLetter(pool.finalRankingCol)}`,
+              ).catch(() => [] as (CellColor | null)[])
+            : [];
+        if (cancelled) return;
+        setState({
+          status: "ok",
+          pool,
+          headerColor: colors[pool.headerRowIndex] ?? null,
+          rankingColors,
+        });
       } catch (err) {
         if (cancelled) return;
         const message =
@@ -144,30 +204,31 @@ export function PoolResultsOverlay() {
     <PoolTable
       pool={state.pool}
       headerColor={state.headerColor}
-      advanceCount={advanceCount}
+      rankingColors={state.rankingColors}
       rowColors={rowColors}
       rowColorTiers={rowColorTiers}
     />
   );
 }
 
-// Same card/table shape as the Matches tab (dashboard.tsx's
-// MatchesImportPanel) -- same thStyle/tdStyle layout, same header-color
-// chip (colorToCss, shared from sheets-export.ts), same gold/silver rank
-// highlighting -- so the broadcast overlay reads as a themed extension of
-// the app's own UI rather than a one-off custom design. See the note
-// above the style consts below for why colors are literal values here
-// rather than reusing dashboard.tsx's CSS var references.
+// Dark broadcast-panel theme now, matching gauntlet-pools.tsx/
+// schedule.tsx (explicit user request) rather than the Matches tab's own
+// light Blueprint-table look this used to mirror -- same thStyle/tdStyle
+// layout and same header-color chip (colorToCss, shared from
+// sheets-export.ts) as before, just recolored. Row tier highlighting
+// (rowColorForRank) and the zebra-stripe fallback are untouched --
+// both are already low-opacity rgba() tints that blend correctly over
+// either a light or dark base, so nothing there needed to change.
 function PoolTable({
   pool,
   headerColor,
-  advanceCount,
+  rankingColors,
   rowColors,
   rowColorTiers,
 }: {
   pool: ParsedPool;
   headerColor: CellColor | null;
-  advanceCount: number;
+  rankingColors: (CellColor | null)[];
   rowColors: boolean;
   rowColorTiers: RowColorTiers;
 }) {
@@ -176,16 +237,51 @@ function PoolTable({
   // highlighting already uses, so a still-in-progress pool never shows a
   // premature "this player already advanced".
   const ranks = pool.finished ? topScoreRanks(pool) : new Map<number, number>();
+  // Same name-keyed lookup gauntlet-pools.tsx uses (see
+  // finalRankingStatusByName's own doc for why by NAME, not row position)
+  // -- gated on pool.finished for the same reason `ranks` above is: a
+  // Final Ranking cell can be pre-colored by template before any real
+  // name is in it, so attributing a specific person to a winning slot
+  // before the pool is genuinely done would be a guess, not a fact yet.
+  const statusByName = pool.finished
+    ? finalRankingStatusByName(pool, rankingColors)
+    : new Map<string, "advancing" | "eliminated">();
 
   return (
     <div style={cardStyle}>
+      {/* A plain `style` prop can't express @font-face -- see
+          local-fonts.ts's own comment on this. */}
+      <style>{LOCAL_FONT_FACE_CSS}</style>
       <div
-        style={{ ...headerBarStyle, backgroundColor: colorToCss(headerColor) }}
+        style={{
+          ...headerBarStyle,
+          // colorToCss(null) would return "#f5f5f5" (near-white) --
+          // right for this overlay's OLD light card, wrong for the dark
+          // COLORS.panel one now. "No sheet color set" falls through to
+          // headerBarStyle's own background instead (same fix
+          // gauntlet-pools.tsx's PoolBox already applied for the exact
+          // same reason).
+          backgroundColor: headerColor ? colorToCss(headerColor) : undefined,
+        }}
       >
         <span>{pool.title}</span>
-        <Tag round intent={pool.finished ? "success" : "danger"}>
+        {/* Solid pill, not Blueprint's Tag `intent`/`round` -- same
+            "washed out over an arbitrary header tint" problem
+            gauntlet-pools.tsx's own status pills already solved (see
+            its STATUS_COLORS/statusPillStyle). Only two states here
+            (not gauntlet-pools' three) -- this overlay only ever shows
+            the ONE pool the operator has actually selected, so there's
+            no "Upcoming" to distinguish from "Live." Same grey=final /
+            red=live color meaning as gauntlet-pools' own pills, for
+            genuine cross-overlay consistency. */}
+        <span
+          style={{
+            ...statusPillStyle,
+            backgroundColor: pool.finished ? COLORS.muted : COLORS.red,
+          }}
+        >
           {pool.finished ? "Final" : "Live"}
-        </Tag>
+        </span>
       </div>
       <table
         style={{
@@ -231,24 +327,40 @@ function PoolTable({
             const backgroundColor =
               tierColor ??
               (rowIdx % 2 === 0 ? "transparent" : "rgba(143,153,168,0.08)");
-            const advances = rank !== undefined && rank <= advanceCount;
+            // Automatic now -- reads the sheet's own Final Ranking color
+            // for this player's name, same as gauntlet-pools.tsx, rather
+            // than a manually configured cutoff count that could drift
+            // out of sync with what the sheet actually marks (a pool's
+            // real advance count varies: 1, 2, or 3 players, never a
+            // single fixed number across every pool).
+            const status =
+              statusByName.get(row.player.trim().toLowerCase()) ?? null;
             return (
               <tr key={rowIdx} style={{ backgroundColor }}>
                 <td style={{ ...tdStyle, fontWeight: 500 }}>
-                  <div style={playerCellStyle}>
-                    <span style={playerNameStyle}>{row.player}</span>
-                    {advances && (
-                      <Tag
-                        minimal
-                        intent="success"
-                        icon={<ArrowRight size={12} />}
-                      />
-                    )}
-                  </div>
+                  {/* Same convention as gauntlet-pools.tsx's own
+                      PoolRowList -- advancing/eliminated status reads
+                      from the player's own NAME color, not a separate
+                      Tag/icon (replaces the old ArrowRight Tag), so
+                      this overlay's row highlighting looks and behaves
+                      identically to the diagram overlay's. */}
+                  <span
+                    style={{
+                      ...playerNameStyle,
+                      color:
+                        status === "advancing"
+                          ? COLORS.mint
+                          : status === "eliminated"
+                            ? COLORS.muted
+                            : COLORS.text,
+                    }}
+                  >
+                    {row.player}
+                  </span>
                 </td>
                 {row.songs.map((s, j) => (
                   <td key={j} style={tdStyle}>
-                    {s || "--"}
+                    {formatSongScore(s) || "--"}
                   </td>
                 ))}
                 <td
@@ -265,82 +377,93 @@ function PoolTable({
   );
 }
 
-// Plain literal colors, not CSS vars -- dashboard.tsx's Matches tab
-// referenced --pt-divider-black/--pt-text-color-muted as if they were
-// real Blueprint theme tokens, but Blueprint doesn't actually define
-// those custom properties anywhere (see node_modules/@blueprintjs/core's
-// compiled CSS), so they were always silently falling back to their
-// fallback value. That's invisible inside the app's own page chrome, but
-// this overlay is a bare, unwrapped route -- so the values here are the
-// literal fallback dashboard.tsx's own thStyle/tdStyle already resolve
-// to, copied exactly for a pixel match, rather than the non-functional
-// var() wrapper. The one exception is the header chip's background,
-// which now really is dynamic (colorToCss(headerColor) above) instead of
-// a fallback-only var.
+// Dark COLORS tokens now, not literal light-mode hex values -- explicit
+// user request to match gauntlet-pools.tsx/schedule.tsx's palette
+// instead of the Matches tab's own light Blueprint-table look this used
+// to mirror pixel-for-pixel. `fontSynthesis: "none"` for the same reason
+// gauntlet-pools.tsx/schedule.tsx both set it: the custom @font-face
+// (local-fonts.ts) only ever registers ONE weight (400) per font, so any
+// element here asking for a different weight would otherwise get a
+// faked, blurry-looking synthetic bold instead of the font's own true
+// glyphs -- see gauntlet-pools.tsx's cardStyle for the fuller writeup.
 //
-// Fills the OBS browser source's canvas (whatever width/height it was
-// configured with in OBS) instead of a fixed minWidth -- previously this
-// was `display: inline-block; minWidth: 480`, sized only to its own
-// content, so it could sit tiny and unscaled inside a much larger source
-// or get clipped inside a smaller one.
+// Still fills the OBS browser source's canvas (whatever width/height it
+// was configured with in OBS) instead of a fixed minWidth -- unrelated
+// to the color change, this behavior is unchanged from before.
 const cardStyle: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
-  border: "1px solid #d8d8d8",
-  borderRadius: "6px",
+  fontFamily: BODY_FONT_FAMILY,
+  fontSynthesis: "none",
+  // Explicit base, not left to inherit the browser default -- same real
+  // bug, same fix as gauntlet-pools.tsx's own cardStyle (see its fuller
+  // writeup): every size below is an `em` value relative to whatever
+  // this cascades down as, which measured genuinely too small (table
+  // headers at ~10px) once checked against a true 1920x1080 viewport
+  // instead of the small preview used for most of this file's own
+  // visual verification.
+  fontSize: 28,
+  color: COLORS.text,
+  background: COLORS.panel,
+  border: `1px solid ${COLORS.border}`,
+  borderRadius: 14,
   overflow: "hidden",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
-};
-
-// Keeps the player name and the advance-arrow Tag on the same line no
-// matter how narrow the Player column ends up -- flex items in a row
-// never wrap onto separate lines against each other (only flex-wrap does
-// that, which this doesn't set), unlike the plain inline text + Tag this
-// replaced, which could break between them when the table's other
-// columns squeezed this one narrow.
-const playerCellStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
 };
 
 // Truncates a long player name with an ellipsis instead of overflowing
-// its now-fixed-width column (see the colgroup comment above). minWidth:
-// 0 overrides a flex item's default min-width: auto, which otherwise
-// stops it shrinking below its own content size and silently defeats
-// text-overflow: ellipsis inside a flex container.
+// its fixed-width column (see the colgroup comment above).
 const playerNameStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  minWidth: 0,
 };
 
 const headerBarStyle: React.CSSProperties = {
-  padding: "8px 14px",
-  color: "black",
-  borderBottom: "1px solid #d8d8d8",
-  fontWeight: 600,
-  fontSize: "1.05em",
+  padding: "14px 24px",
+  color: COLORS.text,
+  borderBottom: `1px solid ${COLORS.border}`,
+  fontFamily: TITLE_FONT_FAMILY,
+  fontWeight: 400,
+  fontSize: "1.1em",
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
-  gap: "10px",
+  gap: "16px",
+};
+
+// Same solid-pill treatment as gauntlet-pools.tsx's own statusPillStyle
+// -- not Blueprint's Tag `intent`/`round`, whose barely-tinted look
+// washes out over an arbitrary sheet-set header color the same way it
+// did there. See this overlay's own two call-site colors (COLORS.muted
+// for Final, COLORS.red for Live) in PoolTable above.
+const statusPillStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "5px 16px",
+  borderRadius: 999,
+  fontFamily: BODY_FONT_FAMILY,
+  fontSize: "0.75em",
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: "0.03em",
+  color: COLORS.panel,
+  whiteSpace: "nowrap",
 };
 
 const thStyle: React.CSSProperties = {
   textAlign: "left",
-  padding: "8px 12px",
+  padding: "14px 18px",
   fontSize: "0.8em",
+  fontFamily: BODY_FONT_FAMILY,
   textTransform: "uppercase",
   letterSpacing: "0.03em",
-  color: "#5c7080",
-  borderBottom: "1px solid #d8d8d8",
-  borderRight: "1px solid #e8e8e8",
+  color: COLORS.muted,
+  borderBottom: `1px solid ${COLORS.border}`,
+  borderRight: `1px solid ${COLORS.border}`,
 };
 
 const tdStyle: React.CSSProperties = {
-  padding: "4px 8px",
-  borderRight: "1px solid #eee",
-  borderBottom: "1px solid #f2f2f2",
+  padding: "8px 12px",
+  fontFamily: BODY_FONT_FAMILY,
+  borderRight: `1px solid ${COLORS.border}`,
+  borderBottom: `1px solid ${COLORS.border}`,
 };

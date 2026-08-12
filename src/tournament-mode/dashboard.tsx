@@ -62,17 +62,14 @@ import {
   colIndexToLetter,
   sumScores,
   topScoreRanks,
+  finalRankingStatusByName,
+  formatSongScore,
 } from "../sheets/parse-pools";
 import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
-import {
-  fetchPublicSheetValues,
-  PublicSheetReadError,
-} from "../sheets/sheets-public-read";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
 import {
   DEFAULT_SCHEDULE_STATUS,
   eventSlice,
-  type GauntletPoolMappingEdge,
   type ScheduleDay,
   type ScheduleItem,
   type ScheduleStatusState,
@@ -89,7 +86,6 @@ import {
 } from "./copy-obs-source";
 import styles from "./dashboard.css";
 import { iconLabel, localIcons } from "../obs-sources/local-icons";
-import { LOSER_POOL_TITLE } from "../obs-sources/gauntlet-pools";
 
 // Score Scope (the Python CV score reader) runs a small local HTTP
 // server so this button can trigger a fresh capture before importing,
@@ -206,24 +202,50 @@ function MatchesImportPanel() {
   // Same room-synced settings the pool-results OBS overlay uses (see
   // event.slice.ts) -- applied here too so this table and the overlay are
   // a 1:1 match rather than two designs that can drift apart.
-  const advanceCount = useAppState((s) => s.event.overlayAdvanceCount);
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
   const selectedPool = useAppState((s) => s.event.selectedPool);
+  // Which pools currently show "Upcoming" on the gauntlet-pools overlay
+  // -- see event.slice.ts's own doc on gauntletPoolsUpcoming for why
+  // this is opt-in now rather than that overlay's own automatic default.
+  const upcomingPools = useAppState((s) => s.event.gauntletPoolsUpcoming);
   const [sheet, setSheet] = useState<ParsedSheet>({ pools: [] });
   const [colors, setColors] = useState<(CellColor | null)[]>([]);
+  // Final Ranking column's own cell colors -- same automatic,
+  // color-driven advancement gauntlet-pools.tsx uses (see
+  // finalRankingStatusByName), rather than a manually configured count.
+  const [rankingColors, setRankingColors] = useState<(CellColor | null)[]>(
+    [],
+  );
   const [status, setStatus] = useState<ExportStatus | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [importingPool, setImportingPool] = useState<string | null>(null);
-  const [finishedSaving, setFinishedSaving] = useState<string | null>(null);
 
   const loadPools = useCallback(async () => {
     if (!token || !spreadsheetId) return;
     try {
       const rows = await readSheetValues(token, spreadsheetId);
-      setSheet(parsePoolsFromRows(rows));
+      const parsed = parsePoolsFromRows(rows);
+      setSheet(parsed);
       const cellColors = await readColumnBColors(token, spreadsheetId);
       setColors(cellColors);
+      // Same two-stage fetch as gauntlet-pools.tsx/pool-results.tsx -- the
+      // Final Ranking column's letter isn't known until after parsing.
+      // Wrapped in its own catch (unlike the header-color read above) so a
+      // color-fetch hiccup degrades to "advancement unknown" rather than
+      // failing this whole load.
+      const finalRankingCol = parsed.pools.find(
+        (p) => p.finalRankingCol !== null,
+      )?.finalRankingCol;
+      const rankColors =
+        finalRankingCol != null
+          ? await readColumnBColors(
+              token,
+              spreadsheetId,
+              `Pools!${colIndexToLetter(finalRankingCol)}:${colIndexToLetter(finalRankingCol)}`,
+            ).catch(() => [] as (CellColor | null)[])
+          : [];
+      setRankingColors(rankColors);
       setStatus(null);
     } catch (err) {
       if (err instanceof SheetsAuthError) {
@@ -321,7 +343,28 @@ function MatchesImportPanel() {
         const range = `Pools!${colIndexToLetter(firstCol)}${row.rowIndex + 1}:${colIndexToLetter(lastCol)}${row.rowIndex + 1}`;
         return { range, values: [[...row.songs]] };
       });
+      // Exporting IS the operator's own "this pool is done" signal now --
+      // explicit user request: no separate manual Finished toggle, no
+      // completeness check, just TRUE every time Export runs (same sheet
+      // cell/mechanism the old manual checkbox used to write to -- see
+      // the Checkbox's own comment below for why it's a read-only
+      // indicator now). Folded into the same batchUpdateValues call as
+      // the scores themselves rather than a second request -- one write,
+      // not two round trips to Sheets. Only writable if this sheet
+      // actually has a Finished column and the pool has a first row to
+      // anchor it to, same guard the old toggleFinished had.
+      if (pool.finishedCol !== null && pool.rows.length) {
+        data.push({
+          range: `Pools!${colIndexToLetter(pool.finishedCol)}${pool.rows[0].rowIndex + 1}`,
+          values: [["TRUE"]],
+        });
+      }
       await batchUpdateValues(token, spreadsheetId, data);
+      setSheet((prev) => ({
+        pools: prev.pools.map((p) =>
+          p.title === pool.title ? { ...p, finished: true } : p,
+        ),
+      }));
       setStatus({ type: "success", message: `${pool.title} exported.` });
       // The overlay polls Sheets on a long fallback interval (see
       // pool-results.tsx) -- this makes it refetch immediately instead of
@@ -339,48 +382,6 @@ function MatchesImportPanel() {
       }
     } finally {
       setExporting(null);
-    }
-  };
-
-  const toggleFinished = async (
-    poolIdx: number,
-    pool: ParsedSheet["pools"][number],
-  ) => {
-    if (!token || !spreadsheetId) return;
-    // The sheet only carries this flag on the pool's first player row.
-    if (pool.finishedCol === null || !pool.rows.length) return;
-
-    const newValue = !pool.finished;
-    const setFinished = (value: boolean) =>
-      setSheet((prev) => ({
-        pools: prev.pools.map((p, pi) =>
-          pi === poolIdx ? { ...p, finished: value } : p,
-        ),
-      }));
-
-    setFinished(newValue);
-    setFinishedSaving(pool.title);
-    try {
-      const range = `Pools!${colIndexToLetter(pool.finishedCol)}${pool.rows[0].rowIndex + 1}`;
-      await batchUpdateValues(token, spreadsheetId, [
-        { range, values: [[newValue ? "TRUE" : "FALSE"]] },
-      ]);
-      await loadPools();
-    } catch (err) {
-      setFinished(!newValue); // revert on failure
-      if (err instanceof SheetsAuthError) {
-        setStatus({ type: "danger", message: "Session expired." });
-      } else {
-        setStatus({
-          type: "danger",
-          message:
-            err instanceof Error
-              ? err.message
-              : "Failed to update Finished status.",
-        });
-      }
-    } finally {
-      setFinishedSaving(null);
     }
   };
 
@@ -433,22 +434,47 @@ function MatchesImportPanel() {
                   style={{ display: "flex", alignItems: "center", gap: "10px" }}
                 >
                   {pool.title}
+                  {/* A plain Tag now, not a Checkbox -- explicit user
+                      request to remove EVERY interactive affordance, not
+                      just the click handler. A disabled Checkbox still
+                      renders as a form control (hover/focus states,
+                      checkbox-shaped indicator) even with nothing wired
+                      to it; a Tag has no interactive semantics at all
+                      unless one is explicitly added, so there's nothing
+                      left to remove. Same intent-color meaning the old
+                      custom checkbox CSS gave it (red = not finished,
+                      green = finished), and the same "Final"/"Live"-style
+                      Tag pool-results.tsx's own overlay already uses for
+                      this exact status, just labeled for the editing
+                      context here ("In - Progress," not "Live"). */}
+                  <Tag round intent={pool.finished ? "success" : "danger"}>
+                    {pool.finished ? "Finished" : "In - Progress"}
+                  </Tag>
+                  {/* Explicit user request: the gauntlet-pools overlay's
+                      "Upcoming" pill used to be that overlay's own
+                      automatic default for every not-finished,
+                      not-currently-selected pool, which meant literally
+                      every pool nobody's watching yet showed it -- not
+                      useful signal. Now it's opt-in per pool, this
+                      checkbox being the opt-in. Disabled once Finished
+                      or already Live (Show on Overlay) -- poolStatus
+                      checks those first, so this checkbox genuinely has
+                      no effect in either case; disabling it says so
+                      instead of letting it look like a live control. */}
                   <Checkbox
-                    className={styles.finishedCheckbox}
-                    checked={pool.finished}
-                    label={pool.finished ? "Finished" : "In - Progress"}
-                    disabled={
-                      pool.finishedCol === null ||
-                      !pool.rows.length ||
-                      finishedSaving === pool.title
+                    inline
+                    style={{ margin: 0 }}
+                    label="Upcoming"
+                    checked={!!upcomingPools[pool.title]}
+                    disabled={pool.finished || selectedPool === pool.title}
+                    onChange={(e) =>
+                      dispatch(
+                        eventSlice.actions.setPoolUpcoming({
+                          title: pool.title,
+                          upcoming: e.currentTarget.checked,
+                        }),
+                      )
                     }
-                    onChange={() => toggleFinished(poolIdx, pool)}
-                    style={{
-                      color: "black",
-                      margin: 0,
-                      fontWeight: 400,
-                      fontSize: "0.85em",
-                    }}
                   />
                 </div>
                 <ButtonGroup>
@@ -472,9 +498,23 @@ function MatchesImportPanel() {
                     small
                     icon={selectedPool === pool.title ? <EyeOn /> : <EyeOff />}
                     intent={selectedPool === pool.title ? "success" : undefined}
-                    title="Show this pool on the OBS overlay"
+                    title={
+                      selectedPool === pool.title
+                        ? "Stop showing this pool on the OBS overlay"
+                        : "Show this pool on the OBS overlay"
+                    }
+                    // A real toggle now -- explicit user request: clicking
+                    // this while it's already the active pool turns it
+                    // OFF (null) instead of just re-setting the same
+                    // value. Previously one-directional (always set to
+                    // THIS pool, no way to clear it from here at all
+                    // short of picking a different pool).
                     onClick={() =>
-                      dispatch(eventSlice.actions.setSelectedPool(pool.title))
+                      dispatch(
+                        eventSlice.actions.setSelectedPool(
+                          selectedPool === pool.title ? null : pool.title,
+                        ),
+                      )
                     }
                   >
                     {selectedPool === pool.title
@@ -531,6 +571,15 @@ function MatchesImportPanel() {
                     const topRanks = pool.finished
                       ? topScoreRanks(pool)
                       : new Map<number, number>();
+                    // Same name-keyed lookup gauntlet-pools.tsx/
+                    // pool-results.tsx use, same finished gate (see
+                    // finalRankingStatusByName's own doc) -- automatic,
+                    // color-driven advancement instead of a manually
+                    // configured count, so this table stays a true 1:1
+                    // match with the overlay.
+                    const statusByName = pool.finished
+                      ? finalRankingStatusByName(pool, rankingColors)
+                      : new Map<string, "advancing" | "eliminated">();
                     return pool.rows.map((row, rowIdx) => {
                       const rank = topRanks.get(rowIdx);
                       const tierColor = rowColors
@@ -542,7 +591,8 @@ function MatchesImportPanel() {
                           ? "transparent"
                           : "rgba(143,153,168,0.08)");
                       const advances =
-                        rank !== undefined && rank <= advanceCount;
+                        statusByName.get(row.player.trim().toLowerCase()) ===
+                        "advancing";
                       return (
                         <tr key={rowIdx} style={{ backgroundColor }}>
                           <td style={{ ...tdStyle, fontWeight: 500 }}>
@@ -559,10 +609,30 @@ function MatchesImportPanel() {
                           </td>
                           {row.songs.map((s, j) => (
                             <td key={j} style={tdStyle}>
+                              {/* onChange keeps the raw typed text --
+                                  reformatting on every keystroke would
+                                  fight anyone actually typing a value
+                                  (an early "9" instantly becoming
+                                  "9.0000%" mid-keystroke). onBlur is
+                                  where this "reflects the number format"
+                                  -- snaps to the same 0.0000% shape
+                                  pool-results.tsx displays once the cell
+                                  isn't actively being edited, and updates
+                                  the real underlying value (not just what's
+                                  shown), so exportPool below writes the
+                                  normalized form back to the sheet too. */}
                               <input
                                 value={s}
                                 onChange={(e) =>
                                   updateCell(poolIdx, rowIdx, j, e.target.value)
+                                }
+                                onBlur={(e) =>
+                                  updateCell(
+                                    poolIdx,
+                                    rowIdx,
+                                    j,
+                                    formatSongScore(e.target.value),
+                                  )
                                 }
                                 style={inputStyle}
                               />
@@ -597,11 +667,13 @@ function MatchesImportPanel() {
  * are event-wide preferences, not tied to any one pool, connecting to
  * Sheets, or the Matches tab's own table (which always shows every
  * row/rank as-is regardless of these settings). Room-synced (event.
- * overlayAdvanceCount/overlayRowColors, see event.slice.ts) rather than
- * device-local, and rather than baked into a URL -- changing them here
- * updates every connected overlay live, with nothing to re-copy. */
+ * overlayRowColors, see event.slice.ts) rather than device-local, and
+ * rather than baked into a URL -- changing them here updates every
+ * connected overlay live, with nothing to re-copy. Advancement itself
+ * (who gets the arrow tag) isn't a setting here anymore -- it reads
+ * straight from the sheet's own Final Ranking color, same automatic
+ * logic gauntlet-pools.tsx uses, so there's no count to configure. */
 function MatchesSettingsPanel() {
-  const advanceCount = useAppState((s) => s.event.overlayAdvanceCount);
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
   const dispatch = useAppDispatch();
@@ -627,22 +699,6 @@ function MatchesSettingsPanel() {
           Pool Results Overlay
           <CopyOverlayUrlButton />
         </h3>
-        <FormGroup label="Advancements" inline>
-          <NumericInput
-            value={advanceCount}
-            min={1}
-            max={4}
-            clampValueOnBlur
-            onValueChange={(n) => {
-              if (Number.isFinite(n)) {
-                dispatch(
-                  eventSlice.actions.setOverlayAdvanceCount(Math.round(n)),
-                );
-              }
-            }}
-            style={{ width: "60px" }}
-          />
-        </FormGroup>
         <Checkbox
           checked={rowColors}
           label="Colored Placements upon Finalization"
@@ -688,12 +744,59 @@ function MatchesSettingsPanel() {
 
 /** Controls for the Gauntlet Pools diagram OBS overlay (see
  * obs-sources/gauntlet-pools.tsx) -- reads the same "Pools" sheet tab
- * Pool Results does, so it needs the same Sheets credentials, but
- * nothing else: unlike the other three sections, there's no
- * room-synced selector here at all (which pool to show, which day,
- * which phase) because this overlay always renders every pool in the
- * sheet at once, not one thing at a time. */
+ * Pool Results does, so it needs the same Sheets credentials. Unlike
+ * the other three sections, there's no room-synced SELECTOR here
+ * (which pool to show, which day, which phase) because this overlay
+ * always renders every pool in the sheet at once, not one thing at a
+ * time -- but it does have its own title/icon, same idea as Schedule's
+ * own header (see ScheduleSettingsSection), reusing the exact same
+ * bundled-icon-or-custom-upload picker rather than a second one-off. */
 function GauntletPoolsSettingsSection() {
+  const dispatch = useAppDispatch();
+
+  // Same bundled-icon-dropdown-with-a-Custom-upload-option pattern as
+  // ScheduleSettingsSection's own icon picker -- see its comments for
+  // why each piece here works the way it does (the generic
+  // ICON_CUSTOM_VALUE/readIconFile helpers above are shared by both).
+  const gauntletPoolsIcon = useAppState((s) => s.event.gauntletPoolsIcon);
+  const iconFileInputRef = useRef<HTMLInputElement>(null);
+  const selectedIconValue = !gauntletPoolsIcon
+    ? ""
+    : (localIcons.find((icon) => icon.url === gauntletPoolsIcon)?.url ??
+      ICON_CUSTOM_VALUE);
+  async function handleIconFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const dataUrl = await readIconFile(file);
+      dispatch(eventSlice.actions.setGauntletPoolsIcon(dataUrl));
+    } catch {
+      // A corrupt/unreadable file just means no icon change goes out.
+    }
+  }
+  function handleIconSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
+    const value = e.target.value;
+    if (value === ICON_CUSTOM_VALUE) {
+      iconFileInputRef.current?.click();
+      return;
+    }
+    dispatch(eventSlice.actions.setGauntletPoolsIcon(value || null));
+  }
+
+  // Same buffer-locally-then-Save pattern as ScheduleSettingsSection's
+  // own subtitle field -- see its comment for why `dirty` is an
+  // explicit flag rather than a derived `title !== savedTitle` check.
+  const savedTitle = useAppState((s) => s.event.gauntletPoolsTitle);
+  const [title, setTitle] = useState(savedTitle);
+  const [titleDirty, setTitleDirty] = useState(false);
+  useEffect(() => {
+    if (!titleDirty) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setTitle(savedTitle);
+    }
+  }, [savedTitle, titleDirty]);
+
   return (
     <Card elevation={1} className={styles.settingsSection}>
       {/* Same minimal-icon-in-the-heading treatment as the other three
@@ -703,235 +806,76 @@ function GauntletPoolsSettingsSection() {
         Gauntlet Pools Overlay
         <CopyGauntletPoolsUrlButton />
       </h3>
-      <p className="bp6-text-muted" style={{ margin: 0 }}>
-        Shows every pool in the "Pools" sheet at once, laid out as the
-        Gauntlet Pools diagram. Add this URL as a Browser Source and it
-        stays in sync with the sheet automatically. Bottom-N routing is
-        read automatically from the Final Ranking column when an
-        eliminated player's cell names a destination pool -- use the
-        table below to add or override routes the sheet doesn't already
-        say.
-      </p>
-      <Divider style={{ margin: "0.75rem 0" }} />
-      <GauntletPoolMappingEditor />
+      {/* Same "immediately live" tint as ScheduleSettingsSection's own
+          liveControls group -- a title/icon change here goes straight
+          to the overlay's header bar the moment it's saved/picked,
+          same as that group's own fields do. */}
+      <div className={styles.liveControls}>
+        <FormGroup label="Overlay title">
+          <InputGroup
+            value={title}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              setTitleDirty(true);
+            }}
+            placeholder="Gauntlet Pools"
+            rightElement={
+              <Button
+                disabled={!titleDirty}
+                intent={titleDirty ? "primary" : undefined}
+                onClick={() => {
+                  dispatch(eventSlice.actions.setGauntletPoolsTitle(title));
+                  setTitleDirty(false);
+                }}
+              >
+                Save
+              </Button>
+            }
+          />
+        </FormGroup>
+        <FormGroup label="Icon">
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            {gauntletPoolsIcon && (
+              <img
+                src={gauntletPoolsIcon}
+                alt=""
+                style={{
+                  width: 32,
+                  height: 32,
+                  objectFit: "contain",
+                  borderRadius: 4,
+                  background: "rgba(255, 255, 255, 0.06)",
+                }}
+              />
+            )}
+            <HTMLSelect
+              value={selectedIconValue}
+              onChange={handleIconSelectChange}
+            >
+              <option value="">None</option>
+              {localIcons.map((icon) => (
+                <option key={icon.url} value={icon.url}>
+                  {iconLabel(icon)}
+                </option>
+              ))}
+              <option value={ICON_CUSTOM_VALUE}>Custom…</option>
+            </HTMLSelect>
+            <input
+              ref={iconFileInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                void handleIconFileChange(e);
+              }}
+            />
+          </div>
+        </FormGroup>
+      </div>
     </Card>
   );
 }
 
-/** Fetches the current pool titles from the "Pools" sheet, split into
- * winner/loser lists by the same LOSER_POOL_TITLE rule
- * gauntlet-pools.tsx itself uses -- so this editor's dropdown options
- * and the overlay's own edge-resolution always classify pools
- * identically. Uses the same public-key read (sheetsApiKeyAtom/
- * spreadsheetIdAtom) CopyGauntletPoolsUrlButton already reads, not the
- * OAuth-authenticated readSheetValues path used elsewhere in this file
- * -- anyone who can use the Gauntlet Pools overlay at all already has
- * those two atoms set (it's a hard precondition for that overlay's URL
- * to resolve), and this is read-only, so there's no reason to require
- * the interactive OAuth popup for it. */
-function useGauntletPoolTitles() {
-  const apiKey = useAtomValue(sheetsApiKeyAtom);
-  const spreadsheetId = useAtomValue(spreadsheetIdAtom);
-  // Same "sheet changed, refetch now" signal the overlay itself listens
-  // to -- an operator who just exported a new pool shouldn't have to
-  // wait out either overlay's own 60s fallback poll before this
-  // dropdown offers it.
-  const poolsRefreshedAt = useAppState((s) => s.event.poolsRefreshedAt);
-  const [state, setState] = useState<{
-    winnerTitles: string[];
-    loserTitles: string[];
-    error: string | null;
-  }>({ winnerTitles: [], loserTitles: [], error: null });
-
-  useEffect(() => {
-    if (!apiKey || !spreadsheetId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const rows = await fetchPublicSheetValues(
-          apiKey,
-          spreadsheetId,
-          "Pools",
-        );
-        if (cancelled) return;
-        const { pools } = parsePoolsFromRows(rows);
-        setState({
-          winnerTitles: pools
-            .filter((p) => !LOSER_POOL_TITLE.test(p.title))
-            .map((p) => p.title),
-          loserTitles: pools
-            .filter((p) => LOSER_POOL_TITLE.test(p.title))
-            .map((p) => p.title),
-          error: null,
-        });
-      } catch (err) {
-        if (cancelled) return;
-        setState((prev) => ({
-          ...prev,
-          error:
-            err instanceof PublicSheetReadError || err instanceof Error
-              ? err.message
-              : "Couldn't read the sheet.",
-        }));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [apiKey, spreadsheetId, poolsRefreshedAt]);
-
-  return { ...state, ready: !!apiKey && !!spreadsheetId };
-}
-
-function emptyMappingEdge(): GauntletPoolMappingEdge {
-  return { winnerPool: "", loserPool: "" };
-}
-
-/** Keeps a saved-but-currently-unavailable title visible/selectable in
- * its dropdown, rather than it silently vanishing (or the select
- * mismatching its own value) when the live sheet fetch is stale, still
- * loading, or failing. */
-function optionsFor(liveTitles: string[], currentValue: string): string[] {
-  return currentValue && !liveTitles.includes(currentValue)
-    ? [...liveTitles, currentValue]
-    : liveTitles;
-}
-
-/** Editor for event.gauntletPoolMapping -- modeled directly on
- * ScheduleDayEditor below (local buffer, an explicit `dirty` boolean
- * rather than a derived comparison -- see that component's own comment
- * on why that distinction matters -- a resync-while-not-dirty effect,
- * per-row helpers, and a Submit button that dispatches the whole array
- * at once). The two differences from that pattern: no per-day
- * parameter (this is one flat list), and its two dropdowns need their
- * own read-only fetch of current pool titles (useGauntletPoolTitles)
- * since, unlike free-text schedule fields, an unrecognized pool title
- * here would just silently fail to draw a connector with no feedback. */
-function GauntletPoolMappingEditor() {
-  const dispatch = useAppDispatch();
-  const savedMapping = useAppState((s) => s.event.gauntletPoolMapping);
-  const [mapping, setMapping] = useState<GauntletPoolMappingEdge[]>(
-    savedMapping,
-  );
-  const [dirty, setDirty] = useState(false);
-  const {
-    winnerTitles,
-    loserTitles,
-    error: titlesError,
-    ready,
-  } = useGauntletPoolTitles();
-
-  useEffect(() => {
-    if (!dirty) {
-      // eslint-disable-next-line react-hooks-js/set-state-in-effect
-      setMapping(savedMapping);
-    }
-  }, [savedMapping, dirty]);
-
-  function updateRow(index: number, patch: Partial<GauntletPoolMappingEdge>) {
-    setMapping((prev) =>
-      prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-    );
-    setDirty(true);
-  }
-
-  function addRow() {
-    setMapping((prev) => [...prev, emptyMappingEdge()]);
-    setDirty(true);
-  }
-
-  function removeRow(index: number) {
-    setMapping((prev) => prev.filter((_, i) => i !== index));
-    setDirty(true);
-  }
-
-  function submit() {
-    dispatch(eventSlice.actions.setGauntletPoolMapping(mapping));
-    setDirty(false);
-  }
-
-  return (
-    <>
-      <div className={styles.scheduleEditorLabel}>
-        Bottom-N routing (winner pool droppers to loser pool)
-      </div>
-      {!ready && (
-        <Callout intent="primary" style={{ marginBottom: "0.5rem" }}>
-          Save a Sheets API key and spreadsheet ID first (see the Sheets
-          connection panel) to populate these dropdowns.
-        </Callout>
-      )}
-      {titlesError && (
-        <Callout intent="warning" style={{ marginBottom: "0.5rem" }}>
-          Couldn't load current pool titles from the sheet: {titlesError}.
-          Existing rows below can still be edited or removed.
-        </Callout>
-      )}
-      <div style={{ overflowX: "auto" }}>
-        <table className={styles.scheduleTable}>
-          <thead>
-            <tr>
-              <th>Winner pool</th>
-              <th>Loser pool</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {mapping.map((row, i) => (
-              <tr key={i}>
-                <td>
-                  <HTMLSelect
-                    value={row.winnerPool}
-                    onChange={(e) =>
-                      updateRow(i, { winnerPool: e.currentTarget.value })
-                    }
-                  >
-                    <option value="">Choose a pool...</option>
-                    {optionsFor(winnerTitles, row.winnerPool).map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </HTMLSelect>
-                </td>
-                <td>
-                  <HTMLSelect
-                    value={row.loserPool}
-                    onChange={(e) =>
-                      updateRow(i, { loserPool: e.currentTarget.value })
-                    }
-                  >
-                    <option value="">Choose a pool...</option>
-                    {optionsFor(loserTitles, row.loserPool).map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </HTMLSelect>
-                </td>
-                <td>
-                  <Button icon={<Trash />} onClick={() => removeRow(i)} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <ButtonGroup className={styles.scheduleAddRow}>
-        <Button icon={<Add />} onClick={addRow}>
-          Add row
-        </Button>
-        <Button
-          disabled={!dirty}
-          intent={dirty ? "primary" : undefined}
-          onClick={submit}
-        >
-          Submit
-        </Button>
-      </ButtonGroup>
-    </>
-  );
-}
 
 /** Same URL-embedded-Sheets-credentials pattern as Pool Results' own
  * CopyOverlayUrlButton above (see its comment) -- this overlay reads
@@ -1063,18 +1007,23 @@ const SCHEDULE_DAYS: { id: ScheduleDay; label: string }[] = [
 // The dropdown's last option -- distinct from every real icon's own URL
 // value, used both as that option's <option value> and as the signal
 // (in the select's onChange) to open the file picker instead of
-// dispatching directly.
-const SCHEDULE_ICON_CUSTOM_VALUE = "__custom__";
-const SCHEDULE_ICON_MAX_SIZE = 160;
+// dispatching directly. Shared by every overlay's own icon picker
+// (Schedule, Gauntlet Pools) -- not schedule-specific despite the name
+// this used to have, same as the rest of the icon-picking machinery
+// below it.
+const ICON_CUSTOM_VALUE = "__custom__";
+const ICON_MAX_SIZE = 160;
 
 /** Reads a user-picked image file, downscaling it (never upscaling) to
- * SCHEDULE_ICON_MAX_SIZE on its longer edge. This is going to be stored
- * as a data URL directly in room-synced Redux state and re-sent over the
- * party socket to every connected client on every change -- there's no
+ * ICON_MAX_SIZE on its longer edge. This is going to be stored as a data
+ * URL directly in room-synced Redux state and re-sent over the party
+ * socket to every connected client on every change -- there's no
  * server-side upload/asset host for this app to save an actual file to
  * -- so an un-resized multi-MB phone photo would be a real, repeated
- * cost rather than a one-time one. */
-function readScheduleIconFile(file: File): Promise<string> {
+ * cost rather than a one-time one. Shared by every overlay's own icon
+ * picker, not schedule-specific -- nothing about this depends on
+ * schedule's own data shape. */
+function readIconFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error);
@@ -1084,7 +1033,7 @@ function readScheduleIconFile(file: File): Promise<string> {
       img.onload = () => {
         const scale = Math.min(
           1,
-          SCHEDULE_ICON_MAX_SIZE / Math.max(img.width, img.height),
+          ICON_MAX_SIZE / Math.max(img.width, img.height),
         );
         const width = Math.round(img.width * scale);
         const height = Math.round(img.height * scale);
@@ -1132,7 +1081,7 @@ function ScheduleSettingsSection() {
   const selectedIconValue = !scheduleIcon
     ? ""
     : (localIcons.find((icon) => icon.url === scheduleIcon)?.url ??
-      SCHEDULE_ICON_CUSTOM_VALUE);
+      ICON_CUSTOM_VALUE);
   async function handleIconFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     // Reset so choosing the SAME file again later still fires onChange
@@ -1141,7 +1090,7 @@ function ScheduleSettingsSection() {
     e.target.value = "";
     if (!file) return;
     try {
-      const dataUrl = await readScheduleIconFile(file);
+      const dataUrl = await readIconFile(file);
       dispatch(eventSlice.actions.setScheduleIcon(dataUrl));
     } catch {
       // A corrupt/unreadable file just means no icon change goes out --
@@ -1150,7 +1099,7 @@ function ScheduleSettingsSection() {
   }
   function handleIconSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const value = e.target.value;
-    if (value === SCHEDULE_ICON_CUSTOM_VALUE) {
+    if (value === ICON_CUSTOM_VALUE) {
       // Don't dispatch anything yet -- if the operator cancels the file
       // dialog, scheduleIcon (and so this select's own controlled value)
       // just stays whatever it already was, snapping the dropdown back
@@ -1266,7 +1215,7 @@ function ScheduleSettingsSection() {
                   {iconLabel(icon)}
                 </option>
               ))}
-              <option value={SCHEDULE_ICON_CUSTOM_VALUE}>Custom…</option>
+              <option value={ICON_CUSTOM_VALUE}>Custom…</option>
             </HTMLSelect>
             {/* Hidden -- only ever opened programmatically, by picking
                 "Custom..." above (handleIconSelectChange). */}

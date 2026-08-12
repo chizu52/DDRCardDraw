@@ -56,24 +56,6 @@ export const DEFAULT_SCHEDULE_STATUS: {
   minutes: number;
 } = { state: "onTime", minutes: 0 };
 
-/** One manually-entered Bottom-N routing edge for the Gauntlet Pools OBS
- * overlay (obs-sources/gauntlet-pools.tsx) -- which loser pool a winner
- * pool's droppers actually feed. Referenced by pool TITLE, not index or
- * column position, so an edge survives pools being reordered in the
- * sheet and naturally goes stale (silently dropped, not shown/crashed
- * on -- see gauntlet-pools.tsx's own edge filtering) if a pool is later
- * renamed or removed. A flat list of edges, not a 1:1 array/Record --
- * one winner pool's droppers can feed more than one loser pool, and one
- * loser pool can receive from more than one winner pool. Nothing in the
- * "Pools" sheet records this relationship (unlike who advances within a
- * pool, which is read from Final Ranking's color -- see
- * classifyRankingColor), so it's entered manually here rather than
- * derived. */
-export interface GauntletPoolMappingEdge {
-  winnerPool: string;
-  loserPool: string;
-}
-
 interface EventState {
   eventName: string;
   cabs: Record<string, CabInfo>;
@@ -87,15 +69,14 @@ interface EventState {
    * pool-results overlay to refetch from Sheets immediately, instead of
    * waiting for its own poll interval -- see dashboard.tsx's exportPool. */
   poolsRefreshedAt: number;
-  /** Operator-entered Bottom-N routing for the Gauntlet Pools overlay --
-   * see GauntletPoolMappingEdge. Edited from dashboard.tsx's
-   * GauntletPoolMappingEditor. */
-  gauntletPoolMapping: GauntletPoolMappingEdge[];
-  /** Same settings as sheets-creds-manager.tsx's other Sheets config, but
-   * room-synced (not device-local) since they affect what the overlay
+  /** Same setting as sheets-creds-manager.tsx's other Sheets config, but
+   * room-synced (not device-local) since it affects what the overlay
    * displays for everyone, not just this device -- see
-   * tournament-mode/dashboard.tsx's MatchesSettingsPanel. */
-  overlayAdvanceCount: number;
+   * tournament-mode/dashboard.tsx's MatchesSettingsPanel. Advancement
+   * itself (who gets the arrow tag) isn't a setting -- it reads straight
+   * from the sheet's own Final Ranking color (see parse-pools.ts's
+   * finalRankingStatusByName), same automatic logic gauntlet-pools.tsx
+   * uses, so there's no separate count to store here anymore. */
   overlayRowColors: boolean;
   /** Which placement tiers get colored when overlayRowColors is on --
    * lets the user pick e.g. gold+silver only (the original behavior) vs.
@@ -155,6 +136,28 @@ interface EventState {
   scheduleStatus: Partial<
     Record<ScheduleDay, { state: ScheduleStatusState; minutes: number }>
   >;
+  /** A free-text title shown on the gauntlet-pools overlay's own header
+   * bar -- same "global caption, empty renders the generic fallback"
+   * idea as scheduleSubtitle (falls back to "Gauntlet Pools" in the
+   * overlay itself, not stored here). */
+  gauntletPoolsTitle: string;
+  /** A small logo/icon shown to the left of the gauntlet-pools overlay's
+   * header title, picked the same way as scheduleIcon (dashboard.tsx's
+   * GauntletPoolsSettingsSection, same bundled-icon-or-custom-upload
+   * picker) -- stored as a data URL directly in room-synced state, for
+   * the same reason scheduleIcon is. null renders nothing. */
+  gauntletPoolsIcon: string | null;
+  /** Which pools the operator has manually flagged to show "Upcoming" on
+   * the gauntlet-pools overlay, keyed by pool title -- explicit user
+   * request. "Upcoming" used to be that overlay's own automatic default
+   * for every not-finished, not-currently-selected pool (poolStatus,
+   * gauntlet-pools.tsx), which meant literally every pool nobody was
+   * watching yet showed it -- not useful signal once every pool has it.
+   * Now nothing shows unless a pool's title is explicitly opted in here
+   * (dashboard.tsx's Matches tab, one checkbox per pool) -- only ever
+   * holds `true` entries, a pool is removed from this map entirely
+   * rather than set to `false` when unchecked. */
+  gauntletPoolsUpcoming: Record<string, boolean>;
 }
 
 const initialState: EventState = {
@@ -172,8 +175,6 @@ const initialState: EventState = {
 }`,
   selectedPool: null,
   poolsRefreshedAt: 0,
-  gauntletPoolMapping: [],
-  overlayAdvanceCount: 1,
   overlayRowColors: true,
   overlayRowColorTiers: DEFAULT_ROW_COLOR_TIERS,
   selectedBracketPhase: null,
@@ -184,6 +185,9 @@ const initialState: EventState = {
   scheduleSubtitle: "",
   scheduleIcon: null,
   scheduleStatus: {},
+  gauntletPoolsTitle: "",
+  gauntletPoolsIcon: null,
+  gauntletPoolsUpcoming: {},
 };
 
 export const eventSlice = createSlice({
@@ -259,21 +263,6 @@ export const eventSlice = createSlice({
       reducer(state, action: PayloadAction<number>) {
         state.poolsRefreshedAt = action.payload;
       },
-    },
-    // Replaces the whole mapping list at once -- the editor
-    // (dashboard.tsx's GauntletPoolMappingEditor) buffers edits locally
-    // and only dispatches this on explicit "Submit," same pattern as
-    // setDaySchedule. No prepare()/timestamp companion (unlike
-    // setDaySchedule's updatedAt) -- this overlay has no entrance
-    // animation that needs re-keying on every edit.
-    setGauntletPoolMapping(
-      state,
-      action: PayloadAction<GauntletPoolMappingEdge[]>,
-    ) {
-      state.gauntletPoolMapping = action.payload;
-    },
-    setOverlayAdvanceCount(state, action: PayloadAction<number>) {
-      state.overlayAdvanceCount = action.payload;
     },
     setOverlayRowColors(state, action: PayloadAction<boolean>) {
       state.overlayRowColors = action.payload;
@@ -351,6 +340,32 @@ export const eventSlice = createSlice({
         state.scheduleUpdatedAt = action.payload.updatedAt;
       },
     },
+    // Same "just this one field" pattern as setSelectedPool -- unlike
+    // setScheduleSubtitle/setScheduleIcon, there's no separate
+    // "updatedAt" companion field to also bump here: nothing on the
+    // gauntlet-pools overlay replays an entrance animation keyed on a
+    // title/icon change the way schedule.tsx's day panel does, so a
+    // plain single-field reducer is all this needs.
+    setGauntletPoolsTitle(state, action: PayloadAction<string>) {
+      state.gauntletPoolsTitle = action.payload;
+    },
+    setGauntletPoolsIcon(state, action: PayloadAction<string | null>) {
+      state.gauntletPoolsIcon = action.payload;
+    },
+    // Removes the title entirely when unchecked rather than storing
+    // `false` -- see gauntletPoolsUpcoming's own doc for why (keeps the
+    // map holding only real opt-ins, nothing to distinguish "opted out"
+    // from "never touched").
+    setPoolUpcoming(
+      state,
+      action: PayloadAction<{ title: string; upcoming: boolean }>,
+    ) {
+      if (action.payload.upcoming) {
+        state.gauntletPoolsUpcoming[action.payload.title] = true;
+      } else {
+        delete state.gauntletPoolsUpcoming[action.payload.title];
+      }
+    },
     // Per-day (see scheduleStatus's own doc) -- staged alongside that
     // day's own rows in dashboard.tsx's ScheduleDayEditor and sent by
     // the same Submit click, not dispatched live the instant the
@@ -417,12 +432,6 @@ export function addOverlaySettings(state: EventState) {
   if (state.poolsRefreshedAt === undefined) {
     state.poolsRefreshedAt = 0;
   }
-  if (!state.gauntletPoolMapping) {
-    state.gauntletPoolMapping = [];
-  }
-  if (state.overlayAdvanceCount === undefined) {
-    state.overlayAdvanceCount = 1;
-  }
   if (state.overlayRowColors === undefined) {
     state.overlayRowColors = true;
   }
@@ -460,5 +469,14 @@ export function addOverlaySettings(state: EventState) {
     typeof (state.scheduleStatus as { state?: unknown }).state === "string"
   ) {
     state.scheduleStatus = {};
+  }
+  if (state.gauntletPoolsTitle === undefined) {
+    state.gauntletPoolsTitle = "";
+  }
+  if (state.gauntletPoolsIcon === undefined) {
+    state.gauntletPoolsIcon = null;
+  }
+  if (!state.gauntletPoolsUpcoming) {
+    state.gauntletPoolsUpcoming = {};
   }
 }

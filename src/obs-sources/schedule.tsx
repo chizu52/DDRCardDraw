@@ -10,8 +10,11 @@ import { useAppState } from "../state/store";
 // see webpack.config.js) emits this as its own static file rather than
 // inlining it into the JS bundle -- important at this file's size (~14MB,
 // a high-res 6308x2143 banner), which would otherwise massively bloat
-// the bundle if base64-embedded instead.
-import Banner from "../other-assets/schedule/bg.png";
+// the bundle if base64-embedded instead. Lives in other-assets/backgrounds/,
+// not nested under a schedule-specific folder -- gauntlet-pools.tsx
+// reuses this exact same image for its own backdrop now, see its own
+// comment on why.
+import Banner from "../other-assets/backgrounds/bg.png";
 import { bodyFont, titleFont } from "./local-fonts";
 
 // Dark broadcast base (panel/border/text/muted) still matches
@@ -903,6 +906,21 @@ export function Schedule() {
           // clock, schedule-day line) is body content. The title
           // overrides to TITLE_FONT_FAMILY individually, below.
           fontFamily: BODY_FONT_FAMILY,
+          // The @font-face for both custom fonts (see local-fonts.ts's
+          // LOCAL_FONT_FACE_CSS) only ever registers ONE weight (400,
+          // hardcoded) per font, regardless of what the actual supplied
+          // file's own native weight is. Any element asking for a
+          // DIFFERENT weight than that (bold text, etc.) has no real
+          // heavier face to fall back to, so the browser synthesizes a
+          // fake bold by algorithmically thickening the 400-weight
+          // glyphs -- this is what actually causes a custom display font
+          // to look blurry/smeared rather than crisp. `font-synthesis` is
+          // inherited, so setting `none` once here (this overlay's own
+          // font-weight usage is already all 400/normal, so nothing
+          // visually changes today) blocks that synthesis for every
+          // descendant, present or future, instead of needing to audit
+          // every individual fontWeight value by hand.
+          fontSynthesis: "none",
           // No border/gradient frame anymore -- just the solid
           // fallback fill (still needed as a base under the blurred
           // banner layer below).

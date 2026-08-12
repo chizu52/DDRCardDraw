@@ -264,9 +264,30 @@ export function PartySocketManager(props: {
   // frozen or the TCP link is half-open, in which case nothing surfaces the
   // dead connection until an ack times out. Ping periodically and force a
   // reconnect once too many pongs go unanswered.
+  //
+  // The actual tick comes from a Web Worker (heartbeat-worker.ts), not a
+  // plain setInterval here -- confirmed as the real cause of a real bug:
+  // a backgrounded/minimized dashboard tab gets its own timers throttled
+  // by the browser (Chrome clamps to ~once/minute after ~5 minutes;
+  // Firefox throttles inactive tabs too), which silently stopped this
+  // heartbeat from doing its job and led to a manual reconnect being
+  // needed after a tab sat idle for 15-20 minutes during a live event.
+  // OBS Browser Sources never showed this -- they're actively composited
+  // on a live scene the whole time, never truly "backgrounded" the way a
+  // normal tab is. A Worker's own timers run on a separate thread, wholly
+  // outside the page's visibility state, so they aren't subject to this
+  // throttling regardless of which browser or how the tab is minimized.
+  // The worker only ticks -- it has no access to `socket` (a Worker can't
+  // share an object created on the main thread), so everything below
+  // (sending the ping, counting misses, deciding to reconnect) still runs
+  // here exactly as before.
   useEffect(() => {
     missedPongsRef.current = 0;
-    const interval = setInterval(() => {
+    const worker = new Worker(
+      new URL("./heartbeat-worker.ts", import.meta.url),
+    );
+    worker.postMessage({ intervalMs: HEARTBEAT_INTERVAL_MS });
+    worker.onmessage = () => {
       if (socket.readyState !== WebSocket.OPEN) return;
       if (missedPongsRef.current >= MAX_MISSED_PONGS) {
         missedPongsRef.current = 0;
@@ -279,8 +300,8 @@ export function PartySocketManager(props: {
       }
       missedPongsRef.current += 1;
       socket.send(JSON.stringify({ type: "ping" }));
-    }, HEARTBEAT_INTERVAL_MS);
-    return () => clearInterval(interval);
+    };
+    return () => worker.terminate();
   }, [socket]);
 
   if (!ready) {

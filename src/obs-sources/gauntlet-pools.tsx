@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Callout, Tag } from "@blueprintjs/core";
+import { Callout } from "@blueprintjs/core";
 import {
   parsePoolsFromRows,
   topScoreRanks,
   colIndexToLetter,
+  classifyRankingColor,
+  finalRankingStatusByName,
   ParsedPool,
   PoolPlayerRow,
 } from "../sheets/parse-pools";
@@ -13,14 +15,20 @@ import {
   fetchPublicColumnBColors,
   PublicSheetReadError,
 } from "../sheets/sheets-public-read";
+import { decodeSheetsConnection } from "../sheets/sheets-connection-param";
 import { CellColor, colorToCss } from "../sheets/sheets-export";
 import { useAppState } from "../state/store";
-import { GauntletPoolMappingEdge } from "../state/event.slice";
 import {
   BODY_FONT_FAMILY,
   LOCAL_FONT_FACE_CSS,
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
+// Same image, same webpack asset/resource handling, as schedule.tsx's
+// own Banner import -- see its comment. Explicit user request to reuse
+// it here too (rather than a second, separately-uploaded image) as
+// part of making this overlay match Schedule's broadcast package, not
+// just its color/font tokens.
+import Banner from "../other-assets/backgrounds/bg.png";
 
 // Same fallback-poll idea as pool-results.tsx -- covers this overlay
 // being left running with nobody around to trigger
@@ -40,17 +48,8 @@ const COLORS = {
   mint: "#22c55e",
   gold: "#efc75e",
   coral: "#f0a868",
+  red: "#ef4444",
 };
-
-// Winners/Losers side identity, reusing colors this file already gives
-// meaning to elsewhere (mint = advancing, coral = eliminated/OUT)
-// rather than introducing unrelated new hues -- a translucent tint of
-// each, not the full-strength color, so a pool box's own border reads
-// as "which side this is" at a glance without competing with the
-// solid-gold destination boxes (still the strongest accent on the
-// page) or the mint/coral/muted text colors inside each box.
-const WINNER_POOL_BORDER = "rgba(34, 197, 94, 0.45)";
-const LOSER_POOL_BORDER = "rgba(240, 168, 104, 0.45)";
 
 // Which pools are the loser's side of the gauntlet -- a "Pool L..."
 // title (Pool L1, Pool L2, ...), same as the reference diagram. Every
@@ -61,59 +60,75 @@ const LOSER_POOL_BORDER = "rgba(240, 168, 104, 0.45)";
 // pool whose name or count didn't match the hardcoded 5 exactly,
 // which is exactly the "wrong number of pools" bug this replaced.
 // Locating pools this generically, off whatever's actually in the
-// sheet, is the same principle Pool Results already uses. Exported so
-// dashboard.tsx's GauntletPoolMappingEditor can classify fetched pool
-// titles into its two dropdowns using this exact same rule.
-export const LOSER_POOL_TITLE = /^pool\s*l/i;
+// sheet, is the same principle Pool Results already uses. No longer
+// exported -- used to also drive dashboard.tsx's manual pool-routing
+// editor, which was removed once the Progression column made it
+// unnecessary (see this file's own history).
+const LOSER_POOL_TITLE = /^pool\s*l/i;
 
-/** Natural/numeric sort key from a pool title's own trailing number,
- * plus an optional trailing letter for a lettered sub-set (e.g.
- * "Pool 2" -> 200, "Pool L10" -> 1000, "Pool 1A" -> 101, "Pool L2B" ->
- * 202) -- used to order each row's pools by their own numbering rather
- * than by raw sheet scan order (see winnerPools/loserPools below for
- * why that was a real bug). The letter is a SECONDARY sort key nested
- * under the number (multiplying the number by 100 leaves room for
- * A-Z's offset of 1-26 without colliding with the next number), so
- * "Pool 1A"/"Pool 1B" both sort right after "Pool 1" and before
- * "Pool 2" -- an unlettered pool (offset 0) sorts before its own
- * lettered variants, same relative order as the numbers themselves. A
- * title with no trailing number at all sorts after every numbered one
- * (Number.MAX_SAFE_INTEGER), keeping its relative scan-order position
- * among other unnumbered titles rather than colliding with them all at
- * some other arbitrary shared rank -- Array.prototype.sort is a stable
- * sort (guaranteed since ES2019), so ties preserve original order. */
-function poolSortKey(title: string): number {
+/** Parses a pool title's own trailing "set number + optional letter"
+ * suffix once -- e.g. "Pool 2" -> {setNumber: 2, subsetLetter: ""},
+ * "Pool L2B" -> {setNumber: 2, subsetLetter: "B"} -- shared by
+ * poolSortKey/poolSetNumber/poolSubsetLetter below, which each used to
+ * run their own near-identical regex over the same title. null if the
+ * title has no trailing number at all. */
+function parsePoolTitleSuffix(
+  title: string,
+): { setNumber: number; subsetLetter: string } | null {
   const match = title.match(/(\d+)\s*([A-Za-z]?)\s*$/);
-  if (!match) return Number.MAX_SAFE_INTEGER;
-  const num = parseInt(match[1], 10);
-  const letterOffset = match[2]
-    ? match[2].toUpperCase().charCodeAt(0) - "A".charCodeAt(0) + 1
+  if (!match) return null;
+  return {
+    setNumber: parseInt(match[1], 10),
+    subsetLetter: match[2].toUpperCase(),
+  };
+}
+
+/** Natural/numeric sort key from a pool title's own trailing set number,
+ * plus its optional lettered sub-set (e.g. "Pool 2" -> 200, "Pool L10"
+ * -> 1000, "Pool 1A" -> 101, "Pool L2B" -> 202) -- used to order each
+ * row's pools by their own numbering rather than by raw sheet scan
+ * order (see winnerPools/loserPools below for why that was a real
+ * bug). The letter is a SECONDARY sort key nested under the number
+ * (multiplying the number by 100 leaves room for A-Z's offset of 1-26
+ * without colliding with the next number), so "Pool 1A"/"Pool 1B" both
+ * sort right after "Pool 1" and before "Pool 2" -- an unlettered pool
+ * (offset 0) sorts before its own lettered variants, same relative
+ * order as the numbers themselves. A title with no trailing number at
+ * all sorts after every numbered one (Number.MAX_SAFE_INTEGER),
+ * keeping its relative scan-order position among other unnumbered
+ * titles rather than colliding with them all at some other arbitrary
+ * shared rank -- Array.prototype.sort is a stable sort (guaranteed
+ * since ES2019), so ties preserve original order. */
+function poolSortKey(title: string): number {
+  const parsed = parsePoolTitleSuffix(title);
+  if (!parsed) return Number.MAX_SAFE_INTEGER;
+  const letterOffset = parsed.subsetLetter
+    ? parsed.subsetLetter.charCodeAt(0) - "A".charCodeAt(0) + 1
     : 0;
-  return num * 100 + letterOffset;
+  return parsed.setNumber * 100 + letterOffset;
 }
 
 /** Just the trailing letter of a lettered sub-set (e.g. "Pool 2B" ->
  * "B", "Pool 3" -> "") -- used to group pools into one row per letter,
  * so every "A" pool across every numbered set sits together on one
  * row, every "B" pool sits together on the next, and so on. */
-function poolLetter(title: string): string {
-  const match = title.match(/(\d+)\s*([A-Za-z]?)\s*$/);
-  return match && match[2] ? match[2].toUpperCase() : "";
+function poolSubsetLetter(title: string): string {
+  return parsePoolTitleSuffix(title)?.subsetLetter ?? "";
 }
 
-/** Just the trailing number (e.g. "Pool 2B" -> 2) -- this pool's column
- * position. Shared across every letter-row AND across the winner/loser
- * sides (see winnerGroups/loserGroups/allNumbers below), so the same
- * set number lines up in the same column everywhere, not just within
- * one row. A title with no trailing number at all sorts into its own
- * trailing column, after every numbered one -- same fallback
- * (Number.MAX_SAFE_INTEGER) and reasoning as poolSortKey above. */
-function poolNumber(title: string): number {
-  const match = title.match(/(\d+)\s*[A-Za-z]?\s*$/);
-  return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+/** Just the trailing set number (e.g. "Pool 2B" -> 2) -- this pool's
+ * column position. Shared across every letter-row AND across the
+ * winner/loser sides (see winnerGroups/loserGroups/allNumbers below),
+ * so the same set number lines up in the same column everywhere, not
+ * just within one row. A title with no trailing number at all sorts
+ * into its own trailing column, after every numbered one -- same
+ * fallback (Number.MAX_SAFE_INTEGER) and reasoning as poolSortKey
+ * above. */
+function poolSetNumber(title: string): number {
+  return parsePoolTitleSuffix(title)?.setNumber ?? Number.MAX_SAFE_INTEGER;
 }
 
-/** Groups pools into one row per distinct letter (see poolLetter), each
+/** Groups pools into one row per distinct letter (see poolSubsetLetter), each
  * row's own pools sorted by number. Unlettered pools (the ordinary
  * "Pool 1/2/3..." case, no A/B sub-sets) all share the single ""
  * group, so a sheet with no lettered sub-sets renders exactly one row
@@ -125,7 +140,7 @@ function groupByLetter(
 ): { letter: string; pools: ParsedPool[] }[] {
   const groups = new Map<string, ParsedPool[]>();
   for (const pool of pools) {
-    const letter = poolLetter(pool.title);
+    const letter = poolSubsetLetter(pool.title);
     const group = groups.get(letter);
     if (group) group.push(pool);
     else groups.set(letter, [pool]);
@@ -135,7 +150,7 @@ function groupByLetter(
     .map(([letter, groupPools]) => ({
       letter,
       pools: [...groupPools].sort(
-        (a, b) => poolNumber(a.title) - poolNumber(b.title),
+        (a, b) => poolSetNumber(a.title) - poolSetNumber(b.title),
       ),
     }));
 }
@@ -168,22 +183,40 @@ const EMPTY_HEADER_COLORS: (CellColor | null)[] = [];
 
 export function GauntletPoolsOverlay() {
   const [params] = useSearchParams();
-  const apiKey = params.get("apiKey");
-  const spreadsheetId = params.get("spreadsheetId");
-  const sheetName = params.get("sheet") || "Pools";
+  // Credentials now travel as one opaque `src` param (see
+  // sheets-connection-param.ts) rather than plain readable
+  // `apiKey`/`spreadsheetId` params -- explicit user request. Falls back
+  // to those old params directly when `src` isn't present so an OBS
+  // source already configured with the old-style URL (copied before this
+  // change) keeps working without needing to be re-copied/re-pasted.
+  const decoded = decodeSheetsConnection(params.get("src"));
+  const apiKey = decoded.apiKey ?? params.get("apiKey");
+  const spreadsheetId = decoded.spreadsheetId ?? params.get("spreadsheetId");
+  const sheetName = decoded.sheet ?? params.get("sheet") ?? "Pools";
 
-  // No room-synced "which pool" selector here -- unlike pool-results.tsx,
-  // this overlay always shows every pool at once. poolsRefreshedAt is
+  // Unlike pool-results.tsx, this overlay always shows every pool at
+  // once -- selectedPool isn't used to filter which pools render here,
+  // only to know WHICH one the operator has actually put on Pool
+  // Results right now (dashboard.tsx's "Show on Overlay" button), so
+  // that same pool's own status pill can read "Live" here too instead
+  // of guessing from score data (see poolStatus). poolsRefreshedAt is
   // still the right signal to re-fetch on: it's the same "something in
   // the Pools sheet changed" bump the Matches tab already sends after
   // every Export, regardless of which specific pool changed.
   const poolsRefreshedAt = useAppState((s) => s.event.poolsRefreshedAt);
-  // Operator-entered Bottom-N routing -- see event.slice.ts's
-  // GauntletPoolMappingEdge. Color (see classifyRankingColor below) can
-  // tell us how many players drop out of a pool, never which specific
-  // loser pool receives them -- that's nowhere in the sheet, so it's a
-  // manual, room-synced setting instead.
-  const mapping = useAppState((s) => s.event.gauntletPoolMapping);
+  const selectedPool = useAppState((s) => s.event.selectedPool);
+  // Which pools the operator has manually opted into showing "Upcoming"
+  // -- see poolStatus's own comment on why this is opt-in now, not the
+  // automatic default it used to be.
+  const upcomingPools = useAppState((s) => s.event.gauntletPoolsUpcoming);
+  // This overlay's own header title/icon -- same room-synced,
+  // dashboard-editable pattern as schedule.tsx's subtitle/icon (see
+  // dashboard.tsx's GauntletPoolsSettingsSection), rendered in the new
+  // header bar below. Empty/null render the generic fallback/nothing,
+  // same "absent means don't show it" idea scheduleSubtitle/scheduleIcon
+  // already use.
+  const title = useAppState((s) => s.event.gauntletPoolsTitle);
+  const icon = useAppState((s) => s.event.gauntletPoolsIcon);
 
   const [state, setState] = useState<LoadState>({ status: "loading" });
 
@@ -298,21 +331,6 @@ export function GauntletPoolsOverlay() {
     );
   }
 
-  // Prefer routing the sheet itself already encodes (see
-  // deriveRoutingEdges) over the operator-entered fallback -- the
-  // manual mapping only fills in whatever the sheet doesn't already
-  // say, rather than being the only source of truth. Drops any
-  // operator-entered edge whose pool title isn't in the currently-
-  // loaded sheet (renamed/removed pool, or a stale leftover editor
-  // row) -- same "no data, no arrow, no guessing" principle the old
-  // index-paired loop had, just checked by title now instead of array
-  // bounds. Sheet-derived edges need no such filtering -- they're only
-  // ever built from titles that are already in winnerPools/loserPools.
-  const resolvedEdges = mergeMappingEdges(
-    deriveRoutingEdges(winnerPools, loserPools, colors),
-    resolveMappingEdges(mapping, winnerPools, loserPools),
-  );
-
   // One row per distinct letter (see groupByLetter) instead of one row
   // per side -- a sheet using "Pool 1A"/"Pool 1B"-style lettered
   // sub-sets previously packed every pool into a single wide row
@@ -358,12 +376,12 @@ export function GauntletPoolsOverlay() {
   // rows, and a row missing a particular number (e.g. no "Pool L1B")
   // just leaves that column blank on its own row rather than
   // compressing everything else leftward.
-  const allNumbers = [...new Set(pools.map((p) => poolNumber(p.title)))].sort(
+  const allNumbers = [...new Set(pools.map((p) => poolSetNumber(p.title)))].sort(
     (a, b) => a - b,
   );
   const columnIndexForNumber = new Map(allNumbers.map((n, i) => [n, i]));
   const columnFor = (pool: ParsedPool) =>
-    1 + columnIndexForNumber.get(poolNumber(pool.title))! * 2;
+    1 + columnIndexForNumber.get(poolSetNumber(pool.title))! * 2;
   const destCol = 1 + allNumbers.length * 2;
   const losersLabelRow = 2 + winnerGroups.length;
   const loserFirstRow = losersLabelRow + 1;
@@ -374,183 +392,171 @@ export function GauntletPoolsOverlay() {
       {/* A plain `style` prop can't express @font-face -- see
           local-fonts.ts's own comment on this. */}
       <style>{LOCAL_FONT_FACE_CSS}</style>
-      <div style={gridStyle(allNumbers.length, totalRows)}>
-        {/* Explicit Winners/Losers section labels -- same idea as
-            start.gg's own bracket page, and this app's own
-            bracket-tree.tsx overlay, which already renders a label
-            above each side's own <svg> for the exact same reason: rows
-            of pools with no heading reads as one ambiguous block to
-            anyone who doesn't already know which side is which. */}
-        <div
-          style={{
-            ...sectionLabelStyle,
-            color: COLORS.mint,
-            gridColumn: "1 / -1",
-            gridRow: 1,
-          }}
-        >
-          Winners
+      {/* The banner art as a soft out-of-focus backdrop, same treatment
+          (and the same actual image) as schedule.tsx's own Banner
+          layer -- isolated on its own absolutely-positioned layer since
+          inline styles can't express ::before, `inset: -20px` so the
+          blur has room to bleed past the card's own edges without
+          visibly softening right at the border. See cardStyle's own
+          comment for why the card needs `overflow: hidden` + `position:
+          relative` for this to clip and anchor correctly. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: -20,
+          background: `url(${Banner}) center/cover no-repeat`,
+          filter: "blur(3px) brightness(0.55)",
+        }}
+      />
+      <div style={cardContentStyle}>
+        {/* Same header-bar treatment as schedule.tsx's own title panel
+            (solid COLORS.panel fill, 3px white border, TITLE_FONT_FAMILY
+            at the same 44px size) -- this overlay had no title/header of
+            its own before, just the "Winners"/"Losers" section labels
+            straight into the grid, the biggest remaining visible gap
+            against Schedule's "one branded panel" look when both sit on
+            stream together. */}
+        <div style={titleBarStyle}>
+          {/* Optional, same "no icon means don't show one" idea as an
+              empty title -- see schedule.tsx's own icon rendering. */}
+          {icon && (
+            <img
+              src={icon}
+              alt=""
+              style={{
+                height: 100,
+                width: "auto",
+                maxWidth: 200,
+                objectFit: "contain",
+                borderRadius: 10,
+                flexShrink: 0,
+              }}
+            />
+          )}
+          {/* 56px, up from 36 -- see cardStyle's own comment on why this
+              file's sizes were rechecked against a true 1920x1080
+              viewport instead of the small preview used most of this
+              file's development. */}
+          <div style={{ fontFamily: TITLE_FONT_FAMILY, fontSize: 56 }}>
+            {title || "Gauntlet Pools"}
+          </div>
         </div>
-        {winnerGroups.flatMap((group, gi) =>
-          group.pools.map((pool) => (
-            <PoolBox
-              key={pool.title}
-              title={pool.title}
-              pool={pool}
-              col={columnFor(pool)}
-              row={2 + gi}
-              colors={colors}
-              headerColors={headerColors}
-              resolvedEdges={resolvedEdges}
-              winnerPools={winnerPools}
+        <div style={gridStyle(allNumbers.length, totalRows)}>
+          {/* Explicit Winners/Losers section labels -- same idea as
+              start.gg's own bracket page, and this app's own
+              bracket-tree.tsx overlay, which already renders a label
+              above each side's own <svg> for the exact same reason: rows
+              of pools with no heading reads as one ambiguous block to
+              anyone who doesn't already know which side is which. */}
+          <div
+            style={{
+              ...sectionLabelStyle,
+              color: COLORS.mint,
+              gridColumn: "1 / -1",
+              gridRow: 1,
+            }}
+          >
+            Winners Side Bracket
+          </div>
+          {winnerGroups.flatMap((group, gi) =>
+            group.pools.map((pool) => (
+              <PoolBox
+                key={pool.title}
+                title={pool.title}
+                pool={pool}
+                col={columnFor(pool)}
+                row={2 + gi}
+                colors={colors}
+                headerColors={headerColors}
+                allPools={pools}
+                selectedPool={selectedPool}
+                upcomingPools={upcomingPools}
+              />
+            )),
+          )}
+          {winnerGroups.flatMap((group, gi) =>
+            group.pools.map((pool) => (
+              <ArrowCell
+                key={`arrow-${pool.title}`}
+                col={columnFor(pool) + 1}
+                row={2 + gi}
+                count={advancingCount(pool, colors)}
+              />
+            )),
+          )}
+          {winnerPools.length > 0 && (
+            <DestinationBox
+              title={
+                bracketPlayTotal != null
+                  ? `Top ${bracketPlayTotal} Winner's Side`
+                  : "Winner's Side"
+              }
+              col={destCol}
+              row={`2 / span ${winnerGroups.length}`}
+              advancing={winnerFinalAdvancing}
             />
-          )),
-        )}
-        {winnerGroups.flatMap((group, gi) =>
-          group.pools.map((pool) => (
-            <ArrowCell
-              key={`arrow-${pool.title}`}
-              col={columnFor(pool) + 1}
-              row={2 + gi}
-              count={advancingCount(pool, colors)}
-            />
-          )),
-        )}
-        {winnerPools.length > 0 && (
-          <DestinationBox
-            title={
-              bracketPlayTotal != null
-                ? `Top ${bracketPlayTotal} Winner's Side`
-                : "Winner's Side"
-            }
-            col={destCol}
-            row={`2 / span ${winnerGroups.length}`}
-            advancing={winnerFinalAdvancing}
-          />
-        )}
+          )}
 
-        <div
-          style={{
-            ...sectionLabelStyle,
-            color: COLORS.coral,
-            gridColumn: "1 / -1",
-            gridRow: losersLabelRow,
-          }}
-        >
-          Losers
+          <div
+            style={{
+              ...sectionLabelStyle,
+              color: COLORS.coral,
+              gridColumn: "1 / -1",
+              gridRow: losersLabelRow,
+              // Explicit user request for more breathing room between
+              // the Winners and Losers sections -- gridStyle's own
+              // rowGap applies uniformly to every row gap in the grid
+              // (between pool rows within a side too), so it can't be
+              // bumped just for this one transition without affecting
+              // everything else. A top margin on this specific label
+              // adds extra space only here, on top of the existing gap.
+              marginTop: 128,
+            }}
+          >
+            Losers Side Bracket
+          </div>
+          {loserGroups.flatMap((group, gi) =>
+            group.pools.map((pool) => (
+              <PoolBox
+                key={pool.title}
+                title={pool.title}
+                pool={pool}
+                col={columnFor(pool)}
+                row={loserFirstRow + gi}
+                colors={colors}
+                headerColors={headerColors}
+                allPools={pools}
+                selectedPool={selectedPool}
+                upcomingPools={upcomingPools}
+              />
+            )),
+          )}
+          {loserGroups.flatMap((group, gi) =>
+            group.pools.map((pool) => (
+              <ArrowCell
+                key={`arrow-${pool.title}`}
+                col={columnFor(pool) + 1}
+                row={loserFirstRow + gi}
+                count={advancingCount(pool, colors)}
+              />
+            )),
+          )}
+          {loserPools.length > 0 && (
+            <DestinationBox
+              title={
+                bracketPlayTotal != null
+                  ? `Top ${bracketPlayTotal} Loser's Side`
+                  : "Loser's Side"
+              }
+              col={destCol}
+              row={`${loserFirstRow} / span ${loserGroups.length}`}
+              advancing={loserFinalAdvancing}
+            />
+          )}
         </div>
-        {loserGroups.flatMap((group, gi) =>
-          group.pools.map((pool) => (
-            <PoolBox
-              key={pool.title}
-              title={pool.title}
-              pool={pool}
-              col={columnFor(pool)}
-              row={loserFirstRow + gi}
-              colors={colors}
-              headerColors={headerColors}
-              resolvedEdges={resolvedEdges}
-              winnerPools={winnerPools}
-            />
-          )),
-        )}
-        {loserGroups.flatMap((group, gi) =>
-          group.pools.map((pool) => (
-            <ArrowCell
-              key={`arrow-${pool.title}`}
-              col={columnFor(pool) + 1}
-              row={loserFirstRow + gi}
-              count={advancingCount(pool, colors)}
-            />
-          )),
-        )}
-        {loserPools.length > 0 && (
-          <DestinationBox
-            title={
-              bracketPlayTotal != null
-                ? `Top ${bracketPlayTotal} Loser's Side`
-                : "Loser's Side"
-            }
-            col={destCol}
-            row={`${loserFirstRow} / span ${loserGroups.length}`}
-            advancing={loserFinalAdvancing}
-          />
-        )}
       </div>
     </div>
   );
-}
-
-/** Classifies a Final Ranking cell's background color as "advancing"
- * (green) or "eliminated" (red) by HUE, not raw channel dominance --
- * confirmed as a real bug this session: a channel-dominance check (is
- * green clearly bigger than red and blue by some margin) fails on
- * Google Sheets' own default PASTEL green/red fill presets (e.g. their
- * "light green 3" swatch, ~rgb(217,234,211) -- green is barely bigger
- * than red there, nowhere near a fixed dominance margin), since a pale
- * and a saturated shade of the same color share roughly the same hue
- * but very different channel gaps. Hue is robust to exactly that kind
- * of lightness/saturation variation, so this reads correctly whether
- * the sheet uses a bold or a pastel swatch. Near-gray/white/unset
- * cells (very low saturation -- every channel close together) are
- * excluded up front so a faint zebra-stripe tint or a blank cell never
- * misclassifies. */
-function classifyRankingColor(
-  c: CellColor | null | undefined,
-): "advancing" | "eliminated" | null {
-  if (!c) return null;
-  const { r, g, b } = c;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const delta = max - min;
-  if (delta < 0.06) return null; // too gray/pale/white to have a real hue
-  let hue: number;
-  if (max === r) hue = (((g - b) / delta) % 6 + 6) % 6;
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-  hue *= 60;
-  if (hue >= 70 && hue <= 170) return "advancing"; // green range
-  if (hue <= 20 || hue >= 340) return "eliminated"; // red range, wraps past 360
-  return null;
-}
-
-/** Winner/loser status for a finished pool, keyed by player NAME rather
- * than row position -- confirmed against real sheet data that Final
- * Ranking is a rank-summary list (row 1's cell names whoever placed 1st
- * by score in this pool, row 2's names 2nd, and so on), not "this row's
- * own result." A pool's rows stay in their original seed/entry order
- * rather than being re-sorted by score, so a row's Final Ranking TEXT
- * very often names a completely different player than whoever's
- * printed in that same row's own player-name column -- real example:
- * row 1 is "DaUTF" (own score is 2nd-highest in the pool), but row 1's
- * Final Ranking cell reads "Tibby," the pool's actual highest scorer.
- * The COLOR (bright green = a winning rank, bright red = a losing rank)
- * lives on that same cell and still means exactly what it always
- * meant -- but it describes the RANK SLOT that row represents, not
- * whichever player happens to share that row, so the player it
- * actually applies to is whoever's name is written there as text.
- * Confirmed live against the real sheet: coloring by row position
- * instead of by this text was attributing wins/losses to the wrong
- * players entirely (a pool's actual top scorer showing eliminated,
- * its actual bottom scorer showing advancing) once rows weren't
- * already in score order. */
-function finalRankingStatusByName(
-  pool: ParsedPool,
-  colors: (CellColor | null)[],
-): Map<string, "advancing" | "eliminated"> {
-  const byName = new Map<string, "advancing" | "eliminated">();
-  for (const row of pool.rows) {
-    const status = classifyRankingColor(colors[row.rowIndex]);
-    // Case-insensitive key -- confirmed against real data that the
-    // same player's name isn't always typed with matching
-    // capitalization in both places (real example: roster column has
-    // "jabronski," that same pool's Final Ranking column names them
-    // "Jabronski"). Same normalization deriveRoutingEdges already uses
-    // for its own pool-title matching, for the same reason.
-    const name = row.finalRanking.trim().toLowerCase();
-    if (status && name) byName.set(name, status);
-  }
-  return byName;
 }
 
 /** Pairs each of a pool's ROSTER rows with its Final Ranking status, via
@@ -634,11 +640,11 @@ function advancingCount(
  * "Pool 7B" both sharing the highest set number -- can legitimately be
  * more than one). Ignores any pool whose own count isn't known yet
  * rather than letting one undetermined pool blank out the whole sum;
- * only returns null if NONE of them are known. Used for both a
- * destination box's own title (see its "Total Value" rename) and the
- * combined Bracket Play total below -- same finished-independent,
- * template-driven count as advancingCount itself, never gated on
- * pool.finished or on a name being present. */
+ * only returns null if NONE of them are known. Feeds bracketPlayTotal
+ * below (each side's own final-round count, then summed into one
+ * combined "Top N" both destination boxes title themselves with) --
+ * same finished-independent, template-driven count as advancingCount
+ * itself, never gated on pool.finished or on a name being present. */
 function totalAdvancingCount(
   pools: ParsedPool[],
   colors: (CellColor | null)[],
@@ -669,7 +675,7 @@ function aggregateAdvancing(
  * winner's side numbers its pools 1 through 7, this returns just "Pool
  * 7" (or both "Pool 7A" and "Pool 7B" together, if the final round is
  * still split into lettered sub-sets sharing that same number -- see
- * poolNumber, which strips the letter). This is deliberately NOT every
+ * poolSetNumber, which strips the letter). This is deliberately NOT every
  * pool on the side: the destination box represents that final round's
  * own actual result (who really finishes 1st-Nth overall), not a
  * running tally of every pool that has ever fed players forward. Used
@@ -685,83 +691,48 @@ function aggregateAdvancing(
  * settings dropdown to say "N" up front. */
 function finalPools(pools: ParsedPool[]): ParsedPool[] {
   if (pools.length === 0) return [];
-  const maxNumber = Math.max(...pools.map((p) => poolNumber(p.title)));
-  return pools.filter((p) => poolNumber(p.title) === maxNumber);
+  const maxNumber = Math.max(...pools.map((p) => poolSetNumber(p.title)));
+  return pools.filter((p) => poolSetNumber(p.title) === maxNumber);
 }
 
-/** Drops any mapping edge referencing a pool title not currently in the
- * loaded sheet -- same "no data, no arrow, no guessing" principle the
- * old index-paired connector loop had, just checked against titles now
- * instead of array bounds. Also naturally handles an in-progress,
- * not-yet-fully-filled-in editor row (an empty "" title can never match
- * a real pool title). */
-function resolveMappingEdges(
-  mapping: GauntletPoolMappingEdge[],
-  winnerPools: ParsedPool[],
-  loserPools: ParsedPool[],
-): GauntletPoolMappingEdge[] {
-  const winnerTitles = new Set(winnerPools.map((p) => p.title));
-  const loserTitles = new Set(loserPools.map((p) => p.title));
-  return mapping.filter(
-    (e) => winnerTitles.has(e.winnerPool) && loserTitles.has(e.loserPool),
-  );
+/** Parses a Progression cell's shorthand -- {rank}P{L?}{number}{letter?},
+ * e.g. "3PL2" = 3rd place of Pool L2, "1P1" = 1st place of Pool 1 --
+ * into its rank (1-based) and the lowercase/trimmed lookup key its
+ * SOURCE pool's title would have (e.g. "pool l2", "pool 1"). Used by
+ * resolveSlotDisplay to look up that source pool by title and, once
+ * it's finished, find whoever placed at that rank. null if the cell
+ * doesn't match this format at all (blank, or some other convention). */
+function parseProgressionCode(
+  progressionCode: string,
+): { rank: number; sourceKey: string } | null {
+  const match = progressionCode
+    .trim()
+    .match(/^(\d+)\s*p\s*(l)?\s*(\d+)\s*([a-z]?)$/i);
+  if (!match) return null;
+  const [, rankStr, loser, num, letter] = match;
+  return {
+    rank: parseInt(rankStr, 10),
+    sourceKey: `pool ${loser ? "l" : ""}${num}${letter.toLowerCase()}`.trim(),
+  };
 }
 
-/** Derives Bottom-N routing straight from the sheet: for an eliminated
- * player, Final Ranking's own cell text is sometimes the destination
- * pool's title (e.g. "Pool L2") instead of a placement -- the sheet
- * reuses the same column for both, depending on whether that player
- * advances. Matched structurally (does the text equal a real,
- * currently-loaded pool title, case/whitespace-insensitively?), not by
- * a separate format marker, since ordinal placement text ("4th") and a
- * pool title don't collide. Deliberately NOT capped at one edge per
- * winner pool -- different droppers from the same pool could
- * legitimately name different destinations (fan-out), same as multiple
- * winner pools naming the same destination is already expected
- * (fan-in, see this file's own history on why that matters). A pool
- * with no eliminated player whose text matches a real title (older
- * sheet without this formula, or one that hasn't resolved yet)
- * contributes no edges here -- resolved purely from the operator's
- * manual mapping instead, via mergeMappingEdges below. */
-function deriveRoutingEdges(
-  winnerPools: ParsedPool[],
-  loserPools: ParsedPool[],
-  colors: (CellColor | null)[],
-): GauntletPoolMappingEdge[] {
-  const loserTitleByKey = new Map(
-    loserPools.map((p) => [p.title.trim().toLowerCase(), p.title]),
-  );
-  const seen = new Set<string>();
-  const edges: GauntletPoolMappingEdge[] = [];
-  for (const pool of winnerPools) {
-    for (const { row, status } of classifiedRows(pool, colors)) {
-      if (status !== "eliminated") continue;
-      const target = loserTitleByKey.get(row.finalRanking.trim().toLowerCase());
-      if (!target) continue;
-      const key = `${pool.title}=>${target}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      edges.push({ winnerPool: pool.title, loserPool: target });
-    }
+/** "1st"/"2nd"/"3rd"/"4th"/... -- English ordinal suffix, handling the
+ * 11th/12th/13th exceptions (not "1th"/"2th"/"3th" and not "11st"/
+ * "12nd"/"13rd"). Used for a Progression slot's own fallback label (see
+ * resolveSlotDisplay) when the exact player isn't resolvable yet. */
+function ordinal(rank: number): string {
+  const mod100 = rank % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${rank}th`;
+  switch (rank % 10) {
+    case 1:
+      return `${rank}st`;
+    case 2:
+      return `${rank}nd`;
+    case 3:
+      return `${rank}rd`;
+    default:
+      return `${rank}th`;
   }
-  return edges;
-}
-
-/** Unions two edge lists, de-duplicating identical (winnerPool,
- * loserPool) pairs so an edge present in both the sheet-derived and the
- * manually-entered lists doesn't draw as two overlapping connectors. */
-function mergeMappingEdges(
-  ...edgeLists: GauntletPoolMappingEdge[][]
-): GauntletPoolMappingEdge[] {
-  const seen = new Set<string>();
-  const merged: GauntletPoolMappingEdge[] = [];
-  for (const edge of edgeLists.flat()) {
-    const key = `${edge.winnerPool}=>${edge.loserPool}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(edge);
-  }
-  return merged;
 }
 
 // Every pool always has up to this many player slots -- mirrors
@@ -772,85 +743,170 @@ function mergeMappingEdges(
 // entirely local to this file.
 const POOL_SLOT_COUNT = 4;
 
-/** One rendered slot in a PoolBox: either a real, already-in-the-sheet
- * player (`row` is exactly a ParsedPool.rows entry, untouched) or a
- * display-only placeholder standing in for a slot the sheet hasn't
- * filled in yet. */
+/** One rendered slot in a PoolBox: a real, already-in-the-sheet player
+ * (`row` is exactly a ParsedPool.rows entry, untouched); a PREDICTED
+ * player -- resolved from a Progression code naming an exact rank in
+ * an already-finished source pool (see resolveSlotDisplay), real name
+ * but not yet an official row in THIS pool's own sheet data; or a
+ * display-only placeholder standing in for a slot nothing can resolve
+ * yet. */
 type PoolSlotDisplay =
   | { kind: "real"; row: PoolPlayerRow }
+  | { kind: "predicted"; player: string; sourceTitle: string }
   | { kind: "placeholder"; label: string };
 
-/** Pads a pool's real rows up to POOL_SLOT_COUNT with placeholder
- * entries, purely for PoolBox's own rendering -- never mutates
- * `pool.rows` and never returns anything that flows back into a
- * ParsedPool. Deliberately kept local to this file rather than a
- * change to parse-pools.ts's parsePoolsFromRows/ParsedPool/
- * PoolPlayerRow: dashboard.tsx's mergePendingIntoPool merges CV-read
- * scores into pool.rows purely by array position ("1st Pending row ->
- * pool's 1st row," per its own doc comment), and both dashboard.tsx
- * and pool-results.tsx consume parsePoolsFromRows'/ParsedPool's exact
- * current shape directly -- neither needs or expects this padding, so
- * it stays a pure, render-only transform instead of touching the
- * shared parser. */
-function poolSlotDisplays(
-  pool: ParsedPool,
-  resolvedEdges: GauntletPoolMappingEdge[],
-  winnerPools: ParsedPool[],
-): PoolSlotDisplay[] {
-  const real: PoolSlotDisplay[] = pool.rows.map((row) => ({
-    kind: "real",
-    row,
-  }));
-  const missing = POOL_SLOT_COUNT - real.length;
-  if (missing <= 0) return real; // parsePoolsFromRows' own slotIndex<4 cap guarantees this; defensive only
-  const label =
-    unfinishedFeederLabel(pool.title, resolvedEdges, winnerPools) ?? "TBD";
-  const placeholders: PoolSlotDisplay[] = Array.from(
-    { length: missing },
-    () => ({ kind: "placeholder", label }),
+/** Resolves ONE empty slot's own Progression code to exactly what
+ * should render there -- explicit user request: no fallback to any
+ * other mechanism. (An earlier version derived a pool-level "Winner of
+ * {pool}" guess from Final-Ranking-text-matching, an operator-entered
+ * mapping, and a Winners-To/Losers-To column, none of which stated a
+ * specific rank the way Progression does -- removed once nothing else
+ * used it.) A slot with no code, or one that can't be resolved, says so
+ * plainly rather than guessing from some other signal:
+ *  - blank cell: "TBD" -- nothing stated yet, not an error.
+ *  - text that doesn't match the {rank}P{L?}{number}{letter?} shorthand
+ *    at all, or names a pool that isn't currently loaded (a typo, or a
+ *    renamed/removed pool): "TBD (Progression Code Error)" --
+ *    something's actually wrong here, worth distinguishing from "not
+ *    decided yet."
+ *  - names a real pool that hasn't finished yet: an ordinal placeholder
+ *    ("1st of Pool 1") -- the code itself already says this much, on
+ *    its own, no other mechanism needed.
+ *  - names a real, FINISHED pool but that rank doesn't actually exist
+ *    in it (fewer real scores than the code implies): "TBD (Progression
+ *    Code Error)" -- also a genuine anomaly, not a normal "still
+ *    waiting" state.
+ *  - names a real, finished pool with that rank resolvable: the actual
+ *    player, straight from that pool's own score-rank (topScoreRanks),
+ *    not Final Ranking's color (color only ever says
+ *    advancing/eliminated, a 2-way split, never a precise ordinal) --
+ *    real name, but not yet an official row in THIS pool's own sheet
+ *    data, so PoolBox still renders it in placeholder styling (see its
+ *    "predicted" case). */
+function resolveSlotDisplay(
+  progressionCode: string,
+  allPools: ParsedPool[],
+): PoolSlotDisplay {
+  if (!progressionCode) return { kind: "placeholder", label: "TBD" };
+  const parsed = parseProgressionCode(progressionCode);
+  if (!parsed) return { kind: "placeholder", label: "TBD (Progression Code Error)" };
+  const source = allPools.find(
+    (p) => p.title.trim().toLowerCase() === parsed.sourceKey,
   );
-  return [...real, ...placeholders];
+  if (!source) return { kind: "placeholder", label: "TBD (Progression Code Error)" };
+  if (!source.finished) {
+    return {
+      kind: "placeholder",
+      label: `${ordinal(parsed.rank)} of ${source.title}`,
+    };
+  }
+  const ranks = topScoreRanks(source);
+  const idx = [...ranks].find(([, r]) => r === parsed.rank)?.[0];
+  const player = idx !== undefined ? source.rows[idx]?.player : undefined;
+  if (!player) return { kind: "placeholder", label: "TBD (Progression Code Error)" };
+  return { kind: "predicted", player, sourceTitle: source.title };
 }
 
-/** "Awaiting {pool}" when exactly one winner pool has a resolvedEdges
- * entry routing into `loserPoolTitle` AND that specific winner pool
- * hasn't finished yet -- the one case where attribution is
- * unambiguous. Returns null (caller falls back to generic "TBD")
- * otherwise:
- *  - zero such edges: nothing has resolved a route into this pool yet,
- *    or every pool that DOES route here has already finished (nothing
- *    left to actually wait on, so naming an already-done pool would be
- *    misleading rather than helpful);
- *  - more than one distinct unfinished feeder: a genuine fan-in of two
- *    or more still-in-progress pools, where naming just one would
- *    misattribute which pool a given empty slot is actually waiting
- *    on.
- * Safe by construction, not by a special case here: deriveRoutingEdges
- * only ever builds edges `for (const pool of winnerPools)`, and
- * resolveMappingEdges filters operator-entered edges against the same
- * winnerPools-derived title set -- so resolvedEdges can never contain
- * an edge whose winnerPool is actually a loser pool's own title. A
- * winner pool's own placeholder search (called from poolSlotDisplays
- * for ANY pool, winner or loser) therefore always finds zero matches
- * here and correctly falls straight to "TBD". */
-function unfinishedFeederLabel(
-  loserPoolTitle: string,
-  resolvedEdges: GauntletPoolMappingEdge[],
-  winnerPools: ParsedPool[],
-): string | null {
-  const finishedByTitle = new Map(
-    winnerPools.map((p) => [p.title, p.finished]),
-  );
-  const unfinishedFeeders = new Set(
-    resolvedEdges
-      .filter((e) => e.loserPool === loserPoolTitle)
-      .map((e) => e.winnerPool)
-      .filter((title) => finishedByTitle.get(title) === false),
-  );
-  if (unfinishedFeeders.size !== 1) return null;
-  const [only] = unfinishedFeeders;
-  return `Awaiting ${only}`;
+/** Builds all POOL_SLOT_COUNT rows for one pool, purely for PoolBox's
+ * own rendering -- never mutates `pool.rows` and never returns anything
+ * that flows back into a ParsedPool. Deliberately kept local to this
+ * file rather than a change to parse-pools.ts's parsePoolsFromRows/
+ * ParsedPool/PoolPlayerRow: dashboard.tsx's mergePendingIntoPool merges
+ * CV-read scores into pool.rows purely by array position ("1st Pending
+ * row -> pool's 1st row," per its own doc comment), and both
+ * dashboard.tsx and pool-results.tsx consume parsePoolsFromRows'/
+ * ParsedPool's exact current shape directly -- neither needs or
+ * expects this padding, so it stays a pure, render-only transform
+ * instead of touching the shared parser.
+ *
+ * Placed by each row's own `slotIndex` (real rows) or array position
+ * (empty slots' own Progression code, `pool.progressionCodes[i]`), NOT
+ * by "every real row first, then pad the rest at the end" -- a real,
+ * fixed bug: a pool whose seeded byes sit in non-adjacent rows (e.g.
+ * slot 0 and slot 3 pre-filled, slots 1-2 still open Progression
+ * seats) used to render both real players compacted into the first two
+ * visual rows, and hand the wrong Progression codes to the wrong empty
+ * seats, once real.length no longer matched which physical rows were
+ * actually the empty ones. Explicit user request: a player stays in
+ * the same row they're assigned, not wherever this function's own
+ * padding happens to put them. */
+function poolSlotDisplays(
+  pool: ParsedPool,
+  allPools: ParsedPool[],
+): PoolSlotDisplay[] {
+  const bySlot: (PoolSlotDisplay | undefined)[] = new Array(POOL_SLOT_COUNT);
+  for (const row of pool.rows) {
+    bySlot[row.slotIndex] = { kind: "real", row };
+  }
+  for (let slot = 0; slot < POOL_SLOT_COUNT; slot++) {
+    if (bySlot[slot]) continue;
+    const progressionCode = pool.progressionCodes[slot] || "";
+    bySlot[slot] = resolveSlotDisplay(progressionCode, allPools);
+  }
+  return bySlot as PoolSlotDisplay[];
 }
+
+type PoolStatus = "final" | "live" | "upcoming";
+
+/** A pool's own broadcast-facing status pill, or null to show no pill
+ * at all. "Live" matches what the operator has actually told Pool
+ * Results to show right now (event.selectedPool, set via
+ * dashboard.tsx's "Show on Overlay" button) rather than guessing from
+ * score data -- explicit user request: a pool counts as Live exactly
+ * when it's the one currently selected for the Pool Results overlay,
+ * the same ground truth the operator already maintains there, not an
+ * independent inference this overlay could get out of sync with.
+ * "Upcoming" used to be the automatic default for every not-finished,
+ * not-selected pool -- explicit user follow-up request to remove that:
+ * with a real number of pools, EVERY pool nobody's watching yet showed
+ * "Upcoming," which wasn't useful signal. Now it's opt-in per pool
+ * (event.gauntletPoolsUpcoming, one checkbox per pool in dashboard.tsx's
+ * Matches tab) -- a not-finished, not-selected pool the operator hasn't
+ * flagged shows no pill at all rather than a default "Upcoming." */
+function poolStatus(
+  pool: ParsedPool,
+  selectedPool: string | null,
+  upcomingPools: Record<string, boolean>,
+): PoolStatus | null {
+  if (pool.finished) return "final";
+  if (pool.title === selectedPool) return "live";
+  return upcomingPools[pool.title] ? "upcoming" : null;
+}
+
+const STATUS_LABELS: Record<PoolStatus, string> = {
+  final: "Final",
+  live: "Live",
+  upcoming: "Upcoming",
+};
+
+// Solid, high-contrast fills -- not Blueprint's Tag `intent`/`minimal`
+// styling, whose barely-tinted text-on-near-transparent look was
+// confirmed hard to read once layered over a pool's own header-color
+// tint (which can be any hue the sheet's column B picks -- a pale
+// green "Final" tag on a pale-green-tinted header, for instance, is
+// nearly invisible). An opaque pill behind the label reads the same
+// regardless of what's underneath it. Explicit user color choice:
+// red = live (the one thing that most needs your attention right
+// now), grey = final (done, no longer needs attention), gold/yellow
+// = upcoming (on deck, not yet relevant).
+const STATUS_COLORS: Record<PoolStatus, string> = {
+  final: COLORS.muted,
+  live: COLORS.red,
+  upcoming: COLORS.gold,
+};
+
+const statusPillStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "5px 16px",
+  borderRadius: 999,
+  fontFamily: BODY_FONT_FAMILY,
+  fontSize: "0.75em",
+  fontWeight: 700,
+  textTransform: "uppercase",
+  letterSpacing: "0.03em",
+  color: COLORS.panel,
+  whiteSpace: "nowrap",
+};
 
 function PoolBox({
   title,
@@ -859,8 +915,9 @@ function PoolBox({
   row,
   colors,
   headerColors,
-  resolvedEdges,
-  winnerPools,
+  allPools,
+  selectedPool,
+  upcomingPools,
 }: {
   title: string;
   pool: ParsedPool | undefined;
@@ -871,10 +928,17 @@ function PoolBox({
    * `headerColors`), aligned to this specific pool via its
    * headerRowIndex, same mechanism pool-results.tsx already uses. */
   headerColors: (CellColor | null)[];
-  /** Needed to compute a placeholder's "Awaiting {pool}" attribution --
-   * see poolSlotDisplays/unfinishedFeederLabel. */
-  resolvedEdges: GauntletPoolMappingEdge[];
-  winnerPools: ParsedPool[];
+  /** Needed so poolSlotDisplays/resolveSlotDisplay can look up a named
+   * source pool by title (and, once it's finished, its own score-rank)
+   * for each of this pool's own empty slots. */
+  allPools: ParsedPool[];
+  /** Which pool the operator has actually put on Pool Results right now
+   * (event.selectedPool) -- see poolStatus's own comment. */
+  selectedPool: string | null;
+  /** Which pools the operator has manually opted into showing
+   * "Upcoming" (event.gauntletPoolsUpcoming) -- see poolStatus's own
+   * comment. */
+  upcomingPools: Record<string, boolean>;
 }) {
   // colorToCss(null) would return "#f5f5f5" (near-white) -- right for
   // pool-results.tsx's light card, wrong for this file's dark
@@ -882,17 +946,42 @@ function PoolBox({
   // backgroundColor at all, falling through to boxHeaderStyle's own
   // current appearance) rather than ever calling colorToCss(null).
   const headerColor = pool ? (headerColors[pool.headerRowIndex] ?? null) : null;
-  // Side-tinted border (see WINNER_POOL_BORDER/LOSER_POOL_BORDER) --
-  // the one piece of styling that differentiates a Winners pool box
-  // from a Losers one beyond the section label above them, since a
-  // viewer scanning a specific box in isolation (e.g. a close OBS crop)
-  // won't always have that label in frame.
-  const sideBorder = LOSER_POOL_TITLE.test(title)
-    ? LOSER_POOL_BORDER
-    : WINNER_POOL_BORDER;
+  const status = pool ? poolStatus(pool, selectedPool, upcomingPools) : null;
+  // Explicit user follow-up: the winner/loser side-tinted border is
+  // gone for good (see boxStyle's own comment -- only its radius came
+  // back), but the border should still pick up color from this box's
+  // OWN status pill -- and only for "live"/"upcoming", not "final" or
+  // no status at all. A pool that's live or coming up is the one that
+  // actually needs the extra visual pull; a finished pool (already
+  // read as "done" via its own muted pill) or one with no status yet
+  // doesn't need to compete for attention the same way.
+  const borderColor =
+    status === "live" || status === "upcoming"
+      ? STATUS_COLORS[status]
+      : COLORS.border;
+  // Same live/upcoming-only gate as borderColor -- explicit user
+  // follow-up for a faint glow to go with it. Translucent rgba
+  // versions of the exact same STATUS_COLORS.live/upcoming hex values
+  // (rgb(239,68,68)/rgb(239,199,94)) rather than a new color, so the
+  // glow always matches the border/pill it's paired with. `boxShadow`
+  // (not `filter: drop-shadow`, which would also blur the box's own
+  // sharp edges/text) keeps the box itself crisp and only softens the
+  // glow radiating outward from it.
+  const glow =
+    status === "live"
+      ? "0 0 18px 2px rgba(239, 68, 68, 0.45)"
+      : status === "upcoming"
+        ? "0 0 18px 2px rgba(239, 199, 94, 0.45)"
+        : "none";
   return (
     <div
-      style={{ ...boxStyle, border: `1px solid ${sideBorder}`, gridColumn: col, gridRow: row }}
+      style={{
+        ...boxStyle,
+        border: `1px solid ${borderColor}`,
+        boxShadow: glow,
+        gridColumn: col,
+        gridRow: row,
+      }}
     >
       <div
         style={{
@@ -901,93 +990,118 @@ function PoolBox({
         }}
       >
         <span>{title}</span>
-        {pool && (
-          <Tag round minimal intent={pool.finished ? "success" : "danger"}>
-            {pool.finished ? "Final" : "Live"}
-          </Tag>
+        {status && (
+          <span
+            style={{ ...statusPillStyle, backgroundColor: STATUS_COLORS[status] }}
+          >
+            {STATUS_LABELS[status]}
+          </span>
         )}
       </div>
       {!pool ? (
         <div style={emptyNoteStyle}>Not yet in sheet</div>
       ) : (
-        <div style={poolRowListStyle}>
-          {(() => {
-            // Computed once per pool, not per row -- see
-            // finalRankingStatusByName's own comment for why this has
-            // to be a name lookup rather than each row reading its own
-            // Final Ranking cell directly.
-            const statusByName = finalRankingStatusByName(pool, colors);
-            return poolSlotDisplays(pool, resolvedEdges, winnerPools).map(
-            (slot, idx) => {
-              if (slot.kind === "placeholder") {
-                // Same convention as bracket-tree.tsx's own
-                // describeEmptySlot rendering for a not-yet-determined
-                // start.gg bracket slot: the placeholder text sits
-                // inline where a real name would go, muted + italic --
-                // not a separate note block.
-                return (
-                  <div
-                    key={idx}
-                    style={{ ...poolRowStyle, ...placeholderRowStyle }}
-                  >
-                    <span style={poolPlayerNameStyle}>{slot.label}</span>
-                    {/* Empty second cell, purely so this row's gridline
-                        (borderBottom, on both cell styles) runs the full
-                        row width like every real row's does -- without
-                        it, a placeholder row's divider stopped short at
-                        the label's own width instead of reaching the
-                        score column, breaking the "spreadsheet" look. */}
-                    <span style={playerTotalStyle} />
-                  </div>
-                );
-              }
-              const r = slot.row;
-              // Advancing is read from Final Ranking's own color, keyed
-              // by THIS row's own player NAME (statusByName) rather
-              // than this row's own cell position -- see
-              // finalRankingStatusByName's comment for why: the real
-              // count who advance out of a pool varies (1, 2, or 3
-              // players, not always 2), and which specific player that
-              // is isn't necessarily whoever the Final Ranking column
-              // happens to sit beside. Gated on pool.finished, unlike
-              // the pool's own progression count (advancingCount, see
-              // its comment) -- explicit user instruction: a pool's
-              // Final Ranking cells can be pre-colored by template
-              // before any name is even in them, which tells you HOW
-              // MANY slots are winning ones but says nothing about
-              // WHICH player ends up in one, so naming/highlighting a
-              // specific person waits for the pool to actually be
-              // done. Kept in sync with the row's own destination box
-              // (aggregateAdvancing/advancingNames, same Finished gate)
-              // so this box and that one always agree on who's
-              // advancing. Uniform between Winner's and Loser's-side
-              // pools -- not advancing renders the same muted way
-              // regardless of which side eliminates a player.
-              const status = pool.finished
-                ? (statusByName.get(r.player.trim().toLowerCase()) ?? null)
-                : null;
-              return (
-                <div
-                  key={idx}
-                  style={{
-                    ...poolRowStyle,
-                    color:
-                      status === "advancing"
-                        ? COLORS.mint
-                        : status === "eliminated"
-                          ? COLORS.muted
-                          : COLORS.text,
-                  }}
-                >
-                  <span style={poolPlayerNameStyle}>{r.player}</span>
-                  <span style={playerTotalStyle}>{r.total || "--"}</span>
-                </div>
-              );
-            },
-            );
-          })()}
-        </div>
+        <PoolRowList pool={pool} colors={colors} allPools={allPools} />
       )}
+    </div>
+  );
+}
+
+/** The name/score rows inside one PoolBox -- split out from PoolBox
+ * itself purely so `pool` can be typed as a plain (non-optional)
+ * ParsedPool here, letting TypeScript narrow it for free instead of
+ * needing an IIFE (or a non-null assertion) to compute
+ * finalRankingStatusByName/poolSlotDisplays once PoolBox has already
+ * confirmed `pool` exists. */
+function PoolRowList({
+  pool,
+  colors,
+  allPools,
+}: {
+  pool: ParsedPool;
+  colors: (CellColor | null)[];
+  allPools: ParsedPool[];
+}) {
+  // Computed once per pool, not per row -- see finalRankingStatusByName's
+  // own comment for why this has to be a name lookup rather than each
+  // row reading its own Final Ranking cell directly.
+  const statusByName = finalRankingStatusByName(pool, colors);
+  return (
+    <div style={poolRowListStyle}>
+      {poolSlotDisplays(pool, allPools).map((slot, idx) => {
+        if (slot.kind === "placeholder") {
+          // Same convention as bracket-tree.tsx's own describeEmptySlot
+          // rendering for a not-yet-determined start.gg bracket slot:
+          // the placeholder text sits inline where a real name would
+          // go, muted + italic -- not a separate note block.
+          return (
+            <div key={idx} style={{ ...poolRowStyle, ...placeholderRowStyle }}>
+              <span style={poolPlayerNameStyle}>{slot.label}</span>
+              {/* Empty second cell, purely so this row's gridline
+                  (borderBottom, on both cell styles) runs the full row
+                  width like every real row's does -- without it, a
+                  placeholder row's divider stopped short at the
+                  label's own width instead of reaching the score
+                  column, breaking the "spreadsheet" look. */}
+              <span style={playerTotalStyle} />
+            </div>
+          );
+        }
+        if (slot.kind === "predicted") {
+          // Real name, resolved from a Progression code + that source
+          // pool's own finished score-rank (see resolveSlotDisplay) --
+          // not yet an official row in THIS pool's own sheet data, so
+          // still styled like a placeholder (muted + italic) rather
+          // than a confirmed row, just showing who it actually is
+          // instead of a generic label.
+          return (
+            <div key={idx} style={{ ...poolRowStyle, ...placeholderRowStyle }}>
+              <span style={poolPlayerNameStyle}>{slot.player}</span>
+              <span style={playerTotalStyle}>--</span>
+            </div>
+          );
+        }
+        const playerRow = slot.row;
+        // Advancing is read from Final Ranking's own color, keyed by
+        // THIS row's own player NAME (statusByName) rather than this
+        // row's own cell position -- see finalRankingStatusByName's
+        // comment for why: the real count who advance out of a pool
+        // varies (1, 2, or 3 players, not always 2), and which
+        // specific player that is isn't necessarily whoever the Final
+        // Ranking column happens to sit beside. Gated on pool.finished,
+        // unlike the pool's own progression count (advancingCount, see
+        // its comment) -- explicit user instruction: a pool's Final
+        // Ranking cells can be pre-colored by template before any name
+        // is even in them, which tells you HOW MANY slots are winning
+        // ones but says nothing about WHICH player ends up in one, so
+        // naming/highlighting a specific person waits for the pool to
+        // actually be done. Kept in sync with the row's own
+        // destination box (aggregateAdvancing/advancingNames, same
+        // Finished gate) so this box and that one always agree on
+        // who's advancing. Uniform between Winner's and Loser's-side
+        // pools -- not advancing renders the same muted way regardless
+        // of which side eliminates a player.
+        const status = pool.finished
+          ? (statusByName.get(playerRow.player.trim().toLowerCase()) ?? null)
+          : null;
+        return (
+          <div
+            key={idx}
+            style={{
+              ...poolRowStyle,
+              color:
+                status === "advancing"
+                  ? COLORS.mint
+                  : status === "eliminated"
+                    ? COLORS.muted
+                    : COLORS.text,
+            }}
+          >
+            <span style={poolPlayerNameStyle}>{playerRow.player}</span>
+            <span style={playerTotalStyle}>{playerRow.total || "--"}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1051,26 +1165,72 @@ function ArrowCell({
   count: number | null;
 }) {
   return (
+    // Positions within the grid cell itself (not the chip below) so the
+    // chip can stay auto-sized to its own content instead of stretching
+    // to fill the whole 56px arrow column.
     <div
       style={{
         gridColumn: col,
         gridRow: row,
         display: "flex",
-        flexDirection: "row",
         alignItems: "center",
         justifyContent: "center",
-        gap: 4,
-        color: COLORS.muted,
-        fontFamily: BODY_FONT_FAMILY,
-        fontSize: "0.8em",
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.03em",
-        whiteSpace: "nowrap",
       }}
     >
-      <span>{count != null ? `Top ${count}` : "TBD"}</span>
-      <span style={{ fontSize: "1.3em" }}>→</span>
+      {/* Explicit user request: plain muted-gray text floating with no
+          background of its own wasn't legible enough. Same solid-chip
+          idea as statusPillStyle's status badges -- COLORS.text (this
+          palette's highest-contrast option) on a solid COLORS.panel
+          fill, bordered so it still reads as a distinct chip against
+          the card's own near-identical background color. The arrow
+          itself is colored gold to match the destination box it's
+          literally pointing at (COLORS.gold is that box's own border/
+          title color), rather than sharing the label's plain white. */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 6,
+          color: COLORS.text,
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 999,
+          padding: "6px 16px",
+          fontFamily: BODY_FONT_FAMILY,
+          fontSize: "0.8em",
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.03em",
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span>{count != null ? `Top ${count}` : "TBD"}</span>
+        {/* A CSS-drawn triangle now, not the "→" character -- explicit
+            user report: it measured as exactly bounding-box-centered in
+            this environment's own browser (verified directly via
+            getBoundingClientRect), but still looked off-center in a
+            real browser/OBS elsewhere. Unicode arrow glyphs are a known
+            case of this: the actual visible "ink" is asymmetric (the
+            arrowhead carries more visual weight than the thin shaft),
+            so a geometrically-centered character box can still read as
+            optically off, and exactly how far off depends on the font
+            actually rendering it -- which can differ by browser/OS/font
+            fallback in a way this environment can't reproduce or
+            verify. A plain CSS triangle (three transparent/solid
+            borders meeting at a point) has no such glyph-shape
+            asymmetry and no font-fallback dependency at all -- its
+            visual center IS its box center, everywhere, guaranteed. */}
+        <span
+          style={{
+            width: 0,
+            height: 0,
+            borderTop: "0.5em solid transparent",
+            borderBottom: "0.5em solid transparent",
+            borderLeft: `0.7em solid ${COLORS.gold}`,
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -1080,16 +1240,51 @@ function ArrowCell({
 // content) -- previously this overlay was just a bare grid of floating
 // boxes straight on the page background, the biggest visible gap
 // against Schedule's "one panel" look when the two sit on stream
-// together. Deliberately NOT importing schedule.tsx's own banner-art
-// backdrop here -- that image is that overlay's specific branding, and
-// reusing the identical background on a second, simultaneously-visible
-// overlay would read as a duplicated backdrop rather than a shared
-// design system. Ask if you want that added too.
+// together. Now also reuses schedule.tsx's own blurred banner-art
+// backdrop (explicit user request, once this overlay had its own title
+// header to anchor it against) -- `position: relative` + `overflow:
+// hidden` are new specifically for that layer: relative so the banner's
+// `position: absolute` anchors to THIS box (not some further-out
+// ancestor), hidden so its `inset: -20px` bleed (see the banner div's
+// own comment) clips at this card's own rounded corners instead of
+// spilling past them.
 const cardStyle: React.CSSProperties = {
   fontFamily: BODY_FONT_FAMILY,
+  // Explicit base size, not left to inherit the browser default (~14-16px
+  // effective) -- confirmed as a real bug: every size elsewhere in this
+  // file is an `em` value relative to whatever this cascades down as
+  // (0.8em/0.9em/1.1em/1.3em/etc.), which read fine against the small
+  // ~748px preview viewport used for most of this file's own visual
+  // verification, but measured genuinely too small (a pool title at
+  // 15.4px) once actually checked against a real 1920x1080 canvas -- the
+  // resolution this overlay is actually meant to broadcast at. 28px as
+  // the new base was chosen empirically, then verified: it puts the pool
+  // title around 31px, section labels around 36px, and player rows
+  // around 25px, all live-checked against a true 1920x1080 viewport
+  // (not the downscaled screenshot preview, which understates real size
+  // -- see get the actual computed sizes via getBoundingClientRect,
+  // not by eye). Padding/gap/border-radius values throughout this file
+  // were scaled up alongside this (roughly proportionally) since those
+  // are plain px, not em, and wouldn't have grown on their own.
+  fontSize: 28,
+  // The @font-face for both custom fonts (local-fonts.ts's
+  // LOCAL_FONT_FACE_CSS) only ever registers ONE weight (400, hardcoded)
+  // regardless of the actual supplied file's own native weight. This
+  // overlay has real elements asking for a heavier weight than that --
+  // sectionLabelStyle (700) and playerTotalStyle (600) -- with no real
+  // bold/semibold face to fall back to, so the browser was synthesizing
+  // a fake bold by algorithmically thickening the 400-weight glyphs,
+  // which is what actually makes a custom display font look blurry/
+  // smeared instead of crisp. `font-synthesis` is inherited, so setting
+  // `none` once here blocks that synthesis for every descendant --
+  // those elements now render at the font's own true (400) weight
+  // instead of a faked-heavier one, rather than needing every individual
+  // fontWeight value hunted down and changed by hand.
+  fontSynthesis: "none",
   background: "rgba(17, 20, 24, 0.92)",
   borderRadius: 20,
-  padding: 24,
+  position: "relative",
+  overflow: "hidden",
   display: "inline-block",
   // Confirmed as the real cause of a genuine bug: text (long player
   // names, e.g. real sheet data like "Sambruh12345678") visibly running
@@ -1109,6 +1304,44 @@ const cardStyle: React.CSSProperties = {
   // visible canvas, rather than silently compressing every pool column
   // and spilling text past its own border.
   width: "max-content",
+  color: COLORS.text,
+};
+
+// The actual padded content, layered ABOVE the banner (see cardStyle's
+// own comment) via normal DOM order -- position:relative isn't strictly
+// needed for the stacking here (the banner has no z-index and this
+// comes after it in source order, so it already paints on top), but
+// matches schedule.tsx's own content-layer div for consistency between
+// the two. Padding lives here now, not on cardStyle itself, since
+// cardStyle's own box is what overflow:hidden clips the banner against
+// -- padding on that same box would shrink the banner's visible area
+// along with the real content instead of only the latter.
+const cardContentStyle: React.CSSProperties = {
+  position: "relative",
+  padding: 40,
+  display: "flex",
+  flexDirection: "column",
+  gap: 128,
+};
+
+// This overlay's own title bar -- same solid-panel treatment as
+// schedule.tsx's header (COLORS.panel fill, 3px solid white border,
+// 14px radius) but without that overlay's day/clock/status-badge
+// column, since nothing here plays quite that role. `alignSelf:
+// "flex-start"` -- explicit user request: this used to stretch to match
+// however wide the grid below it rendered (cardContentStyle's flex
+// column defaults every child to `stretch`), reading as a full-width
+// strip rather than a bar that hugs just its own icon+title content.
+const titleBarStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  alignSelf: "flex-start",
+  gap: 24,
+  background: COLORS.panel,
+  border: "3px solid rgb(255, 255, 255)",
+  borderRadius: 18,
+  padding: "20px 32px",
+  fontFamily: TITLE_FONT_FAMILY,
   color: COLORS.text,
 };
 
@@ -1137,42 +1370,72 @@ const cardStyle: React.CSSProperties = {
 function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
   return {
     display: "grid",
-    gridTemplateColumns: `repeat(${numColumns}, minmax(240px, max-content) 56px) 180px`,
+    // Pool/arrow/destination column floors scaled up alongside the rest
+    // of this file's sizes (240/56/180 -> 320/72/240) -- unchanged
+    // otherwise (still minmax/max-content, still auto rows), just wide
+    // enough that the now-larger player-name/score text (see cardStyle's
+    // own comment on the 28px base) has room to sit comfortably instead
+    // of forcing every column straight to its own max-content floor.
+    // Arrow column bumped again, 72px -> 150px -- explicit user request
+    // ("fix the pill spacings"): the ArrowCell chip's own natural width
+    // (padding + "Top 2" text + arrow, at this file's current font
+    // sizes) is closer to ~140px, so a 72px track was letting the chip
+    // overflow its own column regardless of how big columnGap was --
+    // the gap was never the actual problem. 150px gives it real room to
+    // sit inside its own track with a little breathing space left over.
+    gridTemplateColumns: `repeat(${numColumns}, minmax(320px, max-content) 150px) 240px`,
     gridTemplateRows: `repeat(${numRows}, auto)`,
-    columnGap: "4px",
-    rowGap: "4px",
+    // Was 4px -- fine back when ArrowCell was borderless floating text,
+    // but explicit user request ("fix the spacing of the pills") once it
+    // became a bordered chip (see ArrowCell's own comment): 4px left it
+    // sitting almost flush against the pool boxes on both sides, reading
+    // as cramped rather than a distinct chip between two boxes. Scaled
+    // up further (12px -> 20px, 4px -> 8px) alongside this file's other
+    // sizes.
+    columnGap: "20px",
+    rowGap: "8px",
   };
 }
 
 // Same "Winners"/"Losers" section-labeling idea as start.gg's own
 // bracket page (and this app's own bracket-tree.tsx overlay, which
 // already renders a label above each side's own <svg> for the exact
-// same reason). `color` is deliberately left out of this shared base --
-// each call site overrides it (COLORS.mint for Winners, COLORS.coral
-// for Losers, the same two side-identity tints PoolBox's own border
-// uses) so the two sections read as visually distinct at a glance, not
-// just by their text.
+// same reason). Went through two treatments before landing here: plain
+// colored text (not legible enough against the blurred banner showing
+// through), then a solid COLORS.panel box with a left accent stripe
+// (legible, but explicit user request to drop the box highlight
+// entirely -- "get rid of the box highlight for the bracket titles").
+// This keeps the ORIGINAL side-identity color as the text itself
+// (COLORS.mint for Winners, COLORS.coral for Losers, set per call site,
+// same tint PoolBox's own border uses) and gets its legibility from a
+// dark drop shadow behind the glyphs instead of a background shape --
+// enough to read clearly against the banner without a boxed look.
 const sectionLabelStyle: React.CSSProperties = {
   fontFamily: TITLE_FONT_FAMILY,
   fontWeight: 700,
   fontSize: "1.3em",
   textTransform: "uppercase",
   letterSpacing: "0.04em",
+  textShadow: "0 2px 6px rgba(0, 0, 0, 0.85)",
 };
 
-// 14px radius and a plain 1px border, matching schedule.tsx's own row
-// treatment (not that overlay's header panel, which gets a heavier 3px
-// white border reserved for the one biggest element on its page --
-// nothing here plays quite that role, so every box here stays at row
-// weight instead of header weight).
+// Plain 1px border, no side-tinted color (see PoolBox's own comment).
+// Radius went 18px -> 0 (square) -> back to 18px again -- explicit user
+// follow-up: square corners read as a mismatch sitting right next to
+// each pool's own fully-rounded status pill (statusPillStyle's 999px).
+// 18px doesn't literally copy that value (999px on a whole multi-row
+// box would just look like an odd, overly-rounded blob, not a "pill"),
+// it's the same rounded-corner LANGUAGE this file already uses
+// elsewhere (titleBarStyle's own radius) -- reads as "rounded, like the
+// pill" without being a bizarre exact match.
 const boxStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   backgroundColor: COLORS.panel,
   border: `1px solid ${COLORS.border}`,
-  borderRadius: 14,
-  padding: "10px 14px",
-  minHeight: 100,
+  borderRadius: 18,
+  padding: "16px 20px",
+  minHeight: 160,
 };
 
 const boxHeaderStyle: React.CSSProperties = {
@@ -1182,24 +1445,24 @@ const boxHeaderStyle: React.CSSProperties = {
   fontFamily: TITLE_FONT_FAMILY,
   fontWeight: 400,
   fontSize: "1.1em",
-  marginBottom: 6,
+  marginBottom: 10,
 };
 
 // PoolBox-only header bar for the optional per-pool color tint (see
 // PoolBox's own headerColor). Derived from boxHeaderStyle by spread,
 // never mutating it -- DestinationBox also spreads boxHeaderStyle
 // directly and must stay visually untouched by this. Bleeds through
-// boxStyle's own 10px/14px padding via a matching negative margin, with
-// its own top-corner radius (matching boxStyle's own 14), so an actual
-// tint reads as a real edge-to-edge bar flush with the card's rounded
-// top corners. No borderBottom hairline is added, so the "no color set"
-// case (backgroundColor: undefined) stays pixel-identical to before
-// this existed.
+// boxStyle's own padding via a matching negative margin so an actual
+// tint reads as a real edge-to-edge bar. No borderBottom hairline is
+// added, so the "no color set" case (backgroundColor: undefined) stays
+// pixel-identical to before this existed.
 const poolHeaderBarStyle: React.CSSProperties = {
   ...boxHeaderStyle,
-  margin: "-10px -14px 0",
-  padding: "8px 14px",
-  borderRadius: "14px 14px 0 0",
+  // Must exactly match boxStyle's own padding/borderRadius (16px 20px /
+  // 18px) -- see this style's own doc above for why.
+  margin: "-16px -20px 0",
+  padding: "12px 20px",
+  borderRadius: "18px 18px 0 0",
 };
 
 const emptyNoteStyle: React.CSSProperties = {
@@ -1209,13 +1472,20 @@ const emptyNoteStyle: React.CSSProperties = {
   fontStyle: "italic",
 };
 
-// Same "not a real, in-sheet value" treatment as bracket-tree.tsx's own
-// describeEmptySlot rendering for an undetermined start.gg bracket
-// slot (muted + italic, inline in the name position) -- spread onto
-// playerRowStyle rather than replacing it, so a placeholder row still
-// lines up with real rows (same padding/font-size/gap).
+// Same "not a real, in-sheet value" idea as bracket-tree.tsx's own
+// describeEmptySlot rendering for an undetermined start.gg bracket slot
+// (italic, inline in the name position) -- spread onto playerRowStyle
+// rather than replacing it, so a placeholder row still lines up with
+// real rows (same padding/font-size/gap). Color was COLORS.muted
+// (plain gray) -- explicit user request for better legibility on these
+// rows (the Progression-driven "TBD"/ordinal-placeholder/predicted-
+// player text). Switched to COLORS.gold instead of just brightening the
+// gray: gold already means "pending, not yet decided" everywhere else
+// on this card (the Upcoming status pill, the destination boxes' own
+// border/title color), so this also makes a placeholder row's own
+// "not real yet" status legible at a glance, not just its text.
 const placeholderRowStyle: React.CSSProperties = {
-  color: COLORS.muted,
+  color: COLORS.gold,
   fontStyle: "italic",
 };
 
@@ -1237,10 +1507,10 @@ const playerRowStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr auto",
   alignItems: "center",
-  columnGap: 8,
+  columnGap: 12,
   fontFamily: BODY_FONT_FAMILY,
   fontSize: "0.9em",
-  padding: "4px 0",
+  padding: "8px 0",
   borderBottom: `1px solid ${COLORS.border}`,
 };
 
@@ -1262,7 +1532,7 @@ const playerRowStyle: React.CSSProperties = {
 const poolRowListStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr auto",
-  columnGap: 20,
+  columnGap: 28,
   fontFamily: BODY_FONT_FAMILY,
   fontSize: "0.9em",
 };
@@ -1308,7 +1578,7 @@ const playerNameStyle: React.CSSProperties = {
 // Google Sheets doesn't drop the final row's underline either.
 const poolPlayerNameStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
-  padding: "4px 0",
+  padding: "8px 0",
   borderBottom: `1px solid ${COLORS.border}`,
 };
 
@@ -1323,7 +1593,7 @@ const poolPlayerNameStyle: React.CSSProperties = {
 // this same borderLeft can only ever render at the same x position.
 const playerTotalStyle: React.CSSProperties = {
   fontWeight: 600,
-  padding: "4px 0 4px 16px",
+  padding: "8px 0 8px 24px",
   borderLeft: `1px solid ${COLORS.border}`,
   borderBottom: `1px solid ${COLORS.border}`,
 };
