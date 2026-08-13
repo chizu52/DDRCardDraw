@@ -134,13 +134,24 @@ export function colorToCss(c: CellColor | null | undefined): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-export async function readColumnBColors(
+/** Reads one or more ranges' cell colors in a SINGLE Sheets API request --
+ * same multi-range `ranges=` combining as sheets-public-read.ts's
+ * fetchPublicCellColors (see its own comment for the full rationale/quota
+ * reasoning), just OAuth-authenticated. Replaces the old one-range-per-
+ * call `readColumnBColors`, which dashboard.tsx's Matches tab called
+ * twice per poll (once for header colors, once for Final Ranking colors)
+ * -- a real, avoidable contributor to hitting Google's per-minute Sheets
+ * API read quota (see [[project_sheets_api_rate_limit]]). */
+export async function readCellColors(
   token: string,
   spreadsheetId: string,
-  range = "Pools!B:B",
-): Promise<(CellColor | null)[]> {
+  ranges: string[],
+): Promise<(CellColor | null)[][]> {
   const fields = "sheets.data.rowData.values.effectiveFormat.backgroundColor";
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?ranges=${encodeURIComponent(range)}&fields=${encodeURIComponent(fields)}`;
+  const rangesParam = ranges
+    .map((r) => `ranges=${encodeURIComponent(r)}`)
+    .join("&");
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?${rangesParam}&fields=${encodeURIComponent(fields)}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -153,17 +164,22 @@ export async function readColumnBColors(
     );
   }
   const data = await res.json();
-  const rowData: SheetsRowData[] = data.sheets?.[0]?.data?.[0]?.rowData || [];
-  return rowData.map((r) => {
-    const bg = r.values?.[0]?.effectiveFormat?.backgroundColor;
-    if (!bg) return null;
-    // `?? 0`, not `?? 1` -- see fetchPublicColumnBColors's identical fix
-    // (sheets-public-read.ts) for the full explanation: the Sheets API
-    // omits a color channel from its JSON when that channel is exactly
-    // 0, not when it's "unspecified, default to white." A pure red or
-    // pure green cell was silently coming back as white under the old
-    // `?? 1` fallback.
-    return { r: bg.red ?? 0, g: bg.green ?? 0, b: bg.blue ?? 0 };
+  // `sheets[0].data[i]` -- the i-th requested range's own rowData, NOT
+  // `sheets[i]` (see fetchPublicCellColors's identical comment).
+  const perRange: { rowData?: SheetsRowData[] }[] = data.sheets?.[0]?.data || [];
+  return ranges.map((_, i) => {
+    const rowData: SheetsRowData[] = perRange[i]?.rowData || [];
+    return rowData.map((r) => {
+      const bg = r.values?.[0]?.effectiveFormat?.backgroundColor;
+      if (!bg) return null;
+      // `?? 0`, not `?? 1` -- see fetchPublicCellColors's identical fix
+      // (sheets-public-read.ts) for the full explanation: the Sheets API
+      // omits a color channel from its JSON when that channel is exactly
+      // 0, not when it's "unspecified, default to white." A pure red or
+      // pure green cell was silently coming back as white under the old
+      // `?? 1` fallback.
+      return { r: bg.red ?? 0, g: bg.green ?? 0, b: bg.blue ?? 0 };
+    });
   });
 }
 

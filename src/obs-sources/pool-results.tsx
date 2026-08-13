@@ -11,7 +11,7 @@ import {
   ParsedPool,
 } from "../sheets/parse-pools";
 import {
-  fetchPublicColumnBColors,
+  fetchPublicCellColors,
   fetchPublicSheetValues,
   PublicSheetReadError,
 } from "../sheets/sheets-public-read";
@@ -99,18 +99,11 @@ export function PoolResultsOverlay() {
 
     async function load() {
       try {
-        // Colors are fetched separately from the values -- if that call
-        // fails (e.g. a quota hiccup) the pool still renders, just
-        // without its custom header color, rather than losing the actual
-        // scores over a cosmetic-only failure.
-        const [rows, colors] = await Promise.all([
-          fetchPublicSheetValues(apiKey!, spreadsheetId!, sheetName),
-          fetchPublicColumnBColors(
-            apiKey!,
-            spreadsheetId!,
-            `${sheetName}!B:B`,
-          ).catch(() => [] as (CellColor | null)[]),
-        ]);
+        const rows = await fetchPublicSheetValues(
+          apiKey!,
+          spreadsheetId!,
+          sheetName,
+        );
         if (cancelled) return;
         const { pools } = parsePoolsFromRows(rows);
         const pool = pools.find((p) => p.title === poolTitle);
@@ -118,27 +111,37 @@ export function PoolResultsOverlay() {
           setState({ status: "not-found" });
           return;
         }
-        // Same two-stage fetch as gauntlet-pools.tsx -- the Final Ranking
-        // column's letter isn't known until after parsing (found by
-        // header text), so this can't run alongside the values/header-color
-        // fetch above. No Final Ranking column on this sheet at all
-        // (finalRankingCol null) just skips the fetch -- advancement then
-        // reads as "unknown" for every row (classifyRankingColor's
-        // callers), not a crash.
-        const rankingColors =
-          pool.finalRankingCol != null
-            ? await fetchPublicColumnBColors(
-                apiKey!,
-                spreadsheetId!,
-                `${sheetName}!${colIndexToLetter(pool.finalRankingCol)}:${colIndexToLetter(pool.finalRankingCol)}`,
-              ).catch(() => [] as (CellColor | null)[])
-            : [];
+        // Header color and Final Ranking color used to be two separate
+        // Sheets API calls (one Promise.all'd alongside the values fetch,
+        // one after -- the Final Ranking column's letter isn't known
+        // until after parsing). Combined into ONE multi-range request now
+        // (fetchPublicCellColors) -- see its own comment for why: every
+        // overlay polling independently made the old per-call approach a
+        // real contributor to hitting Google's per-minute Sheets API read
+        // quota. Both ranges are known by this point regardless (the
+        // Final Ranking column comes from the SAME parse the values
+        // fetch already produced), so there's no real reason left to
+        // keep them as separate requests. Wrapped in its own catch --
+        // a color-fetch hiccup degrades to "no header tint, advancement
+        // unknown" rather than losing the actual scores over a
+        // cosmetic/secondary failure.
+        const colorRanges = [`${sheetName}!B:B`];
+        if (pool.finalRankingCol != null) {
+          colorRanges.push(
+            `${sheetName}!${colIndexToLetter(pool.finalRankingCol)}:${colIndexToLetter(pool.finalRankingCol)}`,
+          );
+        }
+        const [colors, rankingColors] = await fetchPublicCellColors(
+          apiKey!,
+          spreadsheetId!,
+          colorRanges,
+        ).catch(() => colorRanges.map(() => [] as (CellColor | null)[]));
         if (cancelled) return;
         setState({
           status: "ok",
           pool,
           headerColor: colors[pool.headerRowIndex] ?? null,
-          rankingColors,
+          rankingColors: rankingColors ?? [],
         });
       } catch (err) {
         if (cancelled) return;

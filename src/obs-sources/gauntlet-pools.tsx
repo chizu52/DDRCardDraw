@@ -12,7 +12,7 @@ import {
 } from "../sheets/parse-pools";
 import {
   fetchPublicSheetValues,
-  fetchPublicColumnBColors,
+  fetchPublicCellColors,
   PublicSheetReadError,
 } from "../sheets/sheets-public-read";
 import { decodeSheetsConnection } from "../sheets/sheets-connection-param";
@@ -246,47 +246,55 @@ export function GauntletPoolsOverlay() {
 
     async function load() {
       try {
-        // Column B's identity is static (unlike the Final Ranking
-        // column below, whose letter isn't known until after parsing),
-        // so its color fetch can run right alongside the values fetch
-        // -- same Promise.all pattern pool-results.tsx already uses for
-        // its own header-color read. A failure here degrades
-        // gracefully (no header tint, not a broken overlay) same as
-        // every other color fetch in this file.
-        const [rows, headerColors] = await Promise.all([
-          fetchPublicSheetValues(apiKey!, spreadsheetId!, sheetName),
-          fetchPublicColumnBColors(
-            apiKey!,
-            spreadsheetId!,
-            `${sheetName}!B:B`,
-          ).catch(() => [] as (CellColor | null)[]),
-        ]);
+        const rows = await fetchPublicSheetValues(
+          apiKey!,
+          spreadsheetId!,
+          sheetName,
+        );
         if (cancelled) return;
         const { pools } = parsePoolsFromRows(rows);
-        // The Final Ranking column's letter isn't known until after
-        // parsing (found by header text, like every other column here),
-        // so this fetch can't start alongside the values fetch the way
-        // pool-results.tsx's fixed-column-B color fetch does -- it
-        // depends on the parse result. Same column for every pool in
-        // the sheet (parsePoolsFromRows' own assumption -- see
-        // findHeaderColumns), so the first pool that has one stands in
-        // for the whole sheet. A sheet with no Final Ranking column at
-        // all (finalRankingCol always null) just skips the fetch
-        // entirely -- advancement then falls back to "unknown" for
-        // every row (see classifyRankingColor's callers), not a crash.
+        // Header (column B) and Final Ranking colors used to be two
+        // separate Sheets API calls -- one Promise.all'd alongside the
+        // values fetch (column B's identity is static, doesn't need
+        // parsing first), one after (the Final Ranking column's letter
+        // isn't known until parsing finds it by header text). Combined
+        // into ONE multi-range request now (fetchPublicCellColors) --
+        // see its own comment for why: every overlay/dashboard tab
+        // polling independently made the old per-call approach a real
+        // contributor to hitting Google's per-minute Sheets API read
+        // quota. Both ranges are known by the time either is needed
+        // regardless (the Final Ranking column comes from the SAME
+        // parse the values fetch already produced), so there's no
+        // latency actually lost by waiting for parsing before fetching
+        // either -- same column for every pool in the sheet
+        // (parsePoolsFromRows' own assumption -- see findHeaderColumns),
+        // so the first pool that has one stands in for the whole sheet.
+        // A sheet with no Final Ranking column at all (finalRankingCol
+        // always null) just omits that range -- advancement then falls
+        // back to "unknown" for every row (see classifyRankingColor's
+        // callers), not a crash. A failure here degrades gracefully (no
+        // header tint, advancement unknown, not a broken overlay).
         const finalRankingCol = pools.find(
           (p) => p.finalRankingCol !== null,
         )?.finalRankingCol;
-        const colors =
-          finalRankingCol != null
-            ? await fetchPublicColumnBColors(
-                apiKey!,
-                spreadsheetId!,
-                `${sheetName}!${colIndexToLetter(finalRankingCol)}:${colIndexToLetter(finalRankingCol)}`,
-              ).catch(() => [] as (CellColor | null)[])
-            : [];
+        const colorRanges = [`${sheetName}!B:B`];
+        if (finalRankingCol != null) {
+          colorRanges.push(
+            `${sheetName}!${colIndexToLetter(finalRankingCol)}:${colIndexToLetter(finalRankingCol)}`,
+          );
+        }
+        const [headerColors, colors] = await fetchPublicCellColors(
+          apiKey!,
+          spreadsheetId!,
+          colorRanges,
+        ).catch(() => colorRanges.map(() => [] as (CellColor | null)[]));
         if (cancelled) return;
-        setState({ status: "ok", pools, colors, headerColors });
+        setState({
+          status: "ok",
+          pools,
+          colors: colors ?? [],
+          headerColors,
+        });
       } catch (err) {
         if (cancelled) return;
         const message =
@@ -498,7 +506,29 @@ export function GauntletPoolsOverlay() {
             straight into the grid, the biggest remaining visible gap
             against Schedule's "one branded panel" look when both sit on
             stream together. */}
-        <div style={titleBarStyle}>
+        <div
+          style={{
+            ...titleBarStyle,
+            // Counter-transform, explicit user request ("make the
+            // header of the overlay and the headers of both winners and
+            // losers also scroll along with the pools correctly") --
+            // without this, the title bar sits at a fixed x-position in
+            // the WIDE panned content (near its own left edge), so once
+            // the auto-pan camera (see panX's own useLayoutEffect)
+            // shifts deep into the bracket to follow a later pool, the
+            // title scrolls off-screen along with everything else and
+            // never comes back. Negating the parent's own translateX
+            // here cancels it out exactly (transforms compose/add for
+            // final screen position -- parent's panX plus this
+            // element's own -panX nets to 0), so the title stays
+            // pinned at its original on-screen spot regardless of how
+            // far the camera has panned. Same transition as the parent
+            // pan itself so the two animate in perfect lockstep (net
+            // stays exactly 0 at every frame, not just at rest).
+            transform: `translateX(${-panX}px)`,
+            transition: "transform 1.2s ease",
+          }}
+        >
           {/* Optional, same "no icon means don't show one" idea as an
               empty title -- see schedule.tsx's own icon rendering. */}
           {icon && (
@@ -536,6 +566,16 @@ export function GauntletPoolsOverlay() {
               color: COLORS.mint,
               gridColumn: "1 / -1",
               gridRow: 1,
+              // Counter-transform, same fix/reasoning as titleBarStyle's
+              // own call site above -- without it this label's text
+              // (which sits at this box's own left edge, not centered
+              // across its full `1 / -1` grid span) scrolls off-screen
+              // once the auto-pan camera shifts deep into the Winners
+              // row, same explicit user request ("...headers of both
+              // winners and losers also scroll along with the pools
+              // correctly").
+              transform: `translateX(${-panX}px)`,
+              transition: "transform 1.2s ease",
             }}
           >
             Winners Side Bracket
@@ -593,6 +633,10 @@ export function GauntletPoolsOverlay() {
               // everything else. A top margin on this specific label
               // adds extra space only here, on top of the existing gap.
               marginTop: 128,
+              // Counter-transform -- same fix/reasoning as the Winners
+              // label above and titleBarStyle's own call site.
+              transform: `translateX(${-panX}px)`,
+              transition: "transform 1.2s ease",
             }}
           >
             Losers Side Bracket

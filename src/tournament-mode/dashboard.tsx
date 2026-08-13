@@ -45,7 +45,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useHref } from "react-router-dom";
 import {
   colorToCss,
-  readColumnBColors,
+  readCellColors,
   readSheetValues,
   sheetsApiKeyAtom,
   sheetsTokenAtom,
@@ -227,25 +227,31 @@ function MatchesImportPanel() {
       const rows = await readSheetValues(token, spreadsheetId);
       const parsed = parsePoolsFromRows(rows);
       setSheet(parsed);
-      const cellColors = await readColumnBColors(token, spreadsheetId);
-      setColors(cellColors);
-      // Same two-stage fetch as gauntlet-pools.tsx/pool-results.tsx -- the
-      // Final Ranking column's letter isn't known until after parsing.
-      // Wrapped in its own catch (unlike the header-color read above) so a
-      // color-fetch hiccup degrades to "advancement unknown" rather than
-      // failing this whole load.
+      // Header (column B) and Final Ranking colors combined into ONE
+      // multi-range request now (readCellColors) instead of two separate
+      // ones -- same fix as gauntlet-pools.tsx/pool-results.tsx, see
+      // readCellColors' own comment for the full quota-reduction
+      // rationale. Both ranges are known right after parsing (the Final
+      // Ranking column comes from the SAME parse), so there's no reason
+      // left to keep them as separate requests. Wrapped in its own catch
+      // so a color-fetch hiccup degrades to "no header tint, advancement
+      // unknown" rather than failing this whole load.
       const finalRankingCol = parsed.pools.find(
         (p) => p.finalRankingCol !== null,
       )?.finalRankingCol;
-      const rankColors =
-        finalRankingCol != null
-          ? await readColumnBColors(
-              token,
-              spreadsheetId,
-              `Pools!${colIndexToLetter(finalRankingCol)}:${colIndexToLetter(finalRankingCol)}`,
-            ).catch(() => [] as (CellColor | null)[])
-          : [];
-      setRankingColors(rankColors);
+      const colorRanges = ["Pools!B:B"];
+      if (finalRankingCol != null) {
+        colorRanges.push(
+          `Pools!${colIndexToLetter(finalRankingCol)}:${colIndexToLetter(finalRankingCol)}`,
+        );
+      }
+      const [cellColors, rankColors] = await readCellColors(
+        token,
+        spreadsheetId,
+        colorRanges,
+      ).catch(() => colorRanges.map(() => [] as (CellColor | null)[]));
+      setColors(cellColors ?? []);
+      setRankingColors(rankColors ?? []);
       setStatus(null);
     } catch (err) {
       if (err instanceof SheetsAuthError) {
