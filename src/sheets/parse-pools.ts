@@ -232,6 +232,23 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
       // anywhere" -- filtering out blanks here would shift every later
       // slot's code into the wrong position.
       current.progressionCodes.push(progression);
+      // Read unconditionally (not gated behind `if (cell)` below) for the
+      // same reason progressionCodes above is: a pool seeded from
+      // still-unresolved Progression results can have an EMPTY slot 0
+      // (e.g. its 1st-place seat reads "3rd of Pool 2," not a real name
+      // yet) while its later slots already hold real bye-seeded players --
+      // confirmed against real sheet data (Pool L2: slots 0-1 are still
+      // progression placeholders, slots 2-3 already have real names).
+      // Gating this behind `cell` meant a pool in exactly that shape could
+      // never read Finished=TRUE from the sheet at all, no matter what was
+      // actually written there -- silently breaking every finished-gated
+      // feature for that pool forever: the Final/Live status pill,
+      // "Colored Placements upon Finalization" row tinting, and
+      // advancing/eliminated name coloring. Root cause of a real reported
+      // bug ("color placements stopped working").
+      if (slotIndex === 0 && finishedCol !== null) {
+        current.finished = /^true$/i.test((row[finishedCol] || "").trim());
+      }
       if (cell) {
         current.rows.push({
           player: cell,
@@ -241,11 +258,6 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
           rowIndex: i,
           slotIndex,
         });
-        // The sheet only carries the Finished flag on a pool's first player
-        // row, not on every row -- mirror that convention here.
-        if (slotIndex === 0 && finishedCol !== null) {
-          current.finished = /^true$/i.test((row[finishedCol] || "").trim());
-        }
         consecutiveEmpty = 0;
       } else {
         consecutiveEmpty++;

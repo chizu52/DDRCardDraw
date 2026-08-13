@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Callout } from "@blueprintjs/core";
 import {
@@ -45,6 +45,11 @@ const COLORS = {
   border: "#3a3f49",
   text: "#f6f7f9",
   muted: "#9aa2ac",
+  // A second, deliberately DIMMER gray than `muted` above -- explicit user
+  // request for the Progression-driven placeholder text (below) to read
+  // as visibly less prominent than an eliminated player's own `muted`
+  // name color, not just a different hue at the same brightness.
+  dim: "#6b7280",
   mint: "#22c55e",
   gold: "#efc75e",
   coral: "#f0a868",
@@ -220,6 +225,21 @@ export function GauntletPoolsOverlay() {
 
   const [state, setState] = useState<LoadState>({ status: "loading" });
 
+  // Auto-pan camera, explicit user request ("what if the scroll stays
+  // centered on what the current pool is, but it scrolls as the stages
+  // progress") -- replaces the earlier "split into multiple OBS sources"
+  // direction entirely, this is a single-source layout instead. viewportRef
+  // is the fixed-size window (sized to whatever the OBS Browser Source's
+  // own canvas is, same "fills the viewport" convention every overlay in
+  // this app already uses) that clips/frames whatever's currently panned
+  // into view; panRef is the actual wide card (unchanged natural
+  // max-content width, see cardStyle's own comment) that slides left/right
+  // inside it via a CSS transform. See the useLayoutEffect below for how
+  // panX itself gets computed.
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<HTMLDivElement>(null);
+  const [panX, setPanX] = useState(0);
+
   useEffect(() => {
     if (!apiKey || !spreadsheetId) return;
     let cancelled = false;
@@ -286,6 +306,52 @@ export function GauntletPoolsOverlay() {
       clearInterval(timer);
     };
   }, [apiKey, spreadsheetId, sheetName, poolsRefreshedAt]);
+
+  // Recomputes panX whenever the live pool changes (or the sheet
+  // reloads, in case that shifts box positions/widths) -- runs
+  // unconditionally, before the early returns below, same as every
+  // other hook in this component. No-ops harmlessly on every render
+  // before real content exists yet (viewportRef/panRef are both still
+  // null pre-mount of the "ok" branch's JSX).
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const panEl = panRef.current;
+    if (!viewport || !panEl) return;
+    const target = selectedPool
+      ? panEl.querySelector<HTMLElement>(
+          `[data-pool-title="${CSS.escape(selectedPool)}"]`,
+        )
+      : null;
+    const contentWidth = panEl.scrollWidth;
+    const viewportWidth = viewport.clientWidth;
+    // No live pool to center on, its box isn't in the DOM (yet), or the
+    // content already fits inside the viewport with nothing to gain
+    // from panning -- rest at the start (Pool 1 / Winners side) rather
+    // than an arbitrary leftover position.
+    if (!target || contentWidth <= viewportWidth) {
+      setPanX(0);
+      return;
+    }
+    const viewportRect = viewport.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const viewportCenterX = viewportRect.left + viewportRect.width / 2;
+    const targetCenterX = targetRect.left + targetRect.width / 2;
+    // Delta-based (how far to shift from wherever panEl is CURRENTLY
+    // painted) rather than an absolute offset computed from
+    // target.offsetLeft -- panEl isn't the target's nearest positioned
+    // ancestor (cardContentStyle, nested one level deeper, also sets
+    // position: relative), so offsetLeft alone wouldn't account for
+    // that extra nesting. Measuring the current PAINTED delta via
+    // getBoundingClientRect sidesteps that -- it already reflects
+    // whatever transform is currently applied, so adding the delta to
+    // the previous panX self-corrects regardless of how deep the
+    // target sits.
+    setPanX((prev) => {
+      const desired = prev + (viewportCenterX - targetCenterX);
+      const minPan = viewportWidth - contentWidth; // most-negative allowed (right edge of content visible)
+      return Math.max(minPan, Math.min(0, desired));
+    });
+  }, [selectedPool, state]);
 
   const pools = state.status === "ok" ? state.pools : EMPTY_POOLS;
   const colors = state.status === "ok" ? state.colors : EMPTY_COLORS;
@@ -388,10 +454,26 @@ export function GauntletPoolsOverlay() {
   const totalRows = losersLabelRow + loserGroups.length;
 
   return (
-    <div style={cardStyle}>
-      {/* A plain `style` prop can't express @font-face -- see
-          local-fonts.ts's own comment on this. */}
-      <style>{LOCAL_FONT_FACE_CSS}</style>
+    // Fixed-size window the wide card pans within -- explicit user
+    // request to auto-scroll based on which pool is currently Live
+    // rather than the earlier "split into multiple OBS sources"
+    // direction. See panX's own useLayoutEffect above for how the pan
+    // target is computed; overflowX (not the shorthand overflow) is
+    // deliberate -- only horizontal cropping was ever the reported
+    // problem, vertical sizing stays exactly as before (grows to fit its
+    // content, same as pre-pan behavior).
+    <div ref={viewportRef} style={viewportStyle}>
+      <div
+        ref={panRef}
+        style={{
+          ...cardStyle,
+          transform: `translateX(${panX}px)`,
+          transition: "transform 1.2s ease",
+        }}
+      >
+        {/* A plain `style` prop can't express @font-face -- see
+            local-fonts.ts's own comment on this. */}
+        <style>{LOCAL_FONT_FACE_CSS}</style>
       {/* The banner art as a soft out-of-focus backdrop, same treatment
           (and the same actual image) as schedule.tsx's own Banner
           layer -- isolated on its own absolutely-positioned layer since
@@ -554,6 +636,7 @@ export function GauntletPoolsOverlay() {
             />
           )}
         </div>
+      </div>
       </div>
     </div>
   );
@@ -975,6 +1058,10 @@ function PoolBox({
         : "none";
   return (
     <div
+      // Identifies this box's own pool by title -- the auto-pan camera
+      // (GauntletPoolsOverlay's own panX effect) looks this up to find
+      // whichever pool is currently Live and center on it.
+      data-pool-title={title}
       style={{
         ...boxStyle,
         border: `1px solid ${borderColor}`,
@@ -1089,12 +1176,14 @@ function PoolRowList({
             key={idx}
             style={{
               ...poolRowStyle,
+              // Advancing used to render in COLORS.mint (green) -- explicit
+              // user request to switch that to plain COLORS.text (white)
+              // instead, same color a not-yet-determined row already
+              // renders in. Only "eliminated" still shifts color (dims to
+              // COLORS.muted); a winning player just reads as normal/full
+              // brightness now rather than a separate accent color.
               color:
-                status === "advancing"
-                  ? COLORS.mint
-                  : status === "eliminated"
-                    ? COLORS.muted
-                    : COLORS.text,
+                status === "eliminated" ? COLORS.muted : COLORS.text,
             }}
           >
             <span style={poolPlayerNameStyle}>{playerRow.player}</span>
@@ -1235,6 +1324,23 @@ function ArrowCell({
   );
 }
 
+// The fixed-size window the wide card (cardStyle below) pans within --
+// explicit user request for an auto-scrolling camera that follows
+// whichever pool is currently Live (see GauntletPoolsOverlay's own panX
+// useLayoutEffect for how the pan target is computed). Sized to whatever
+// the OBS Browser Source's own canvas is (100vw, same "fills the
+// viewport" convention every overlay in this file already follows)
+// rather than a fixed pixel width. `overflowX` specifically, not the
+// `overflow` shorthand -- only horizontal cropping was ever the reported
+// problem (too many pools side by side); vertical sizing is left
+// completely alone, growing to fit its content exactly as it did before
+// this existed.
+const viewportStyle: React.CSSProperties = {
+  width: "100vw",
+  overflowX: "hidden",
+  position: "relative",
+};
+
 // One cohesive card, same outer treatment as schedule.tsx (rgba(17, 20,
 // 24, 0.92) fill, 20px radius, inline-block so it sizes to its own
 // content) -- previously this overlay was just a bare grid of floating
@@ -1247,7 +1353,9 @@ function ArrowCell({
 // `position: absolute` anchors to THIS box (not some further-out
 // ancestor), hidden so its `inset: -20px` bleed (see the banner div's
 // own comment) clips at this card's own rounded corners instead of
-// spilling past them.
+// spilling past them. Panned horizontally via a `transform: translateX`
+// applied at its own call site (not baked in here, since that value is
+// dynamic/per-render) -- see viewportStyle's own comment just above.
 const cardStyle: React.CSSProperties = {
   fontFamily: BODY_FONT_FAMILY,
   // Explicit base size, not left to inherit the browser default (~14-16px
@@ -1383,7 +1491,14 @@ function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
     // overflow its own column regardless of how big columnGap was --
     // the gap was never the actual problem. 150px gives it real room to
     // sit inside its own track with a little breathing space left over.
-    gridTemplateColumns: `repeat(${numColumns}, minmax(320px, max-content) 150px) 240px`,
+    // Pool column floor bumped again, 320px -> 380px -- explicit user
+    // request ("add a minimum width for every pool so none are too
+    // skinny"). minmax(320px, max-content) was a real, hit-in-practice
+    // floor (measured live: a short-name pool like "Pool 3" was landing
+    // exactly at 320px) sitting right next to much wider long-name pools
+    // in other columns, reading as noticeably skinnier rather than just
+    // "sized to its own content."
+    gridTemplateColumns: `repeat(${numColumns}, minmax(380px, max-content) 150px) 240px`,
     gridTemplateRows: `repeat(${numRows}, auto)`,
     // Was 4px -- fine back when ArrowCell was borderless floating text,
     // but explicit user request ("fix the spacing of the pills") once it
@@ -1391,8 +1506,12 @@ function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
     // sitting almost flush against the pool boxes on both sides, reading
     // as cramped rather than a distinct chip between two boxes. Scaled
     // up further (12px -> 20px, 4px -> 8px) alongside this file's other
-    // sizes.
-    columnGap: "20px",
+    // sizes, then eased back down through three more explicit user
+    // follow-ups (20px -> 14px -> 5px -> 2px) once the wider chip
+    // (150px arrow column, see gridTemplateColumns' own comment) meant
+    // it no longer needed as much surrounding gap to read as a distinct
+    // chip.
+    columnGap: "2px",
     rowGap: "8px",
   };
 }
@@ -1459,10 +1578,25 @@ const boxHeaderStyle: React.CSSProperties = {
 const poolHeaderBarStyle: React.CSSProperties = {
   ...boxHeaderStyle,
   // Must exactly match boxStyle's own padding/borderRadius (16px 20px /
-  // 18px) -- see this style's own doc above for why.
-  margin: "-16px -20px 0",
+  // 18px) -- see this style's own doc above for why. Longhand top/left/
+  // right instead of the `margin` shorthand deliberately -- a shorthand
+  // here would set its own bottom value too, and (found the hard way)
+  // inline React styles apply in each KEY's first-insertion position,
+  // not its later value's position in the object literal, so a `margin`
+  // shorthand added after the spread still silently overwrote
+  // boxHeaderStyle's own earlier-positioned `marginBottom`. Keeping
+  // marginBottom as the ONLY thing that ever touches the bottom side
+  // avoids that trap entirely.
+  marginTop: -16,
+  marginLeft: -20,
+  marginRight: -20,
   padding: "12px 20px",
   borderRadius: "18px 18px 0 0",
+  // boxHeaderStyle's own marginBottom: 10 was fine as a value, but
+  // restated here for clarity now that the shorthand above is gone --
+  // explicit user request for "a tiny bit of space" before player 1's
+  // row, which this pool box previously had none of at all.
+  marginBottom: 8,
 };
 
 const emptyNoteStyle: React.CSSProperties = {
@@ -1476,16 +1610,17 @@ const emptyNoteStyle: React.CSSProperties = {
 // describeEmptySlot rendering for an undetermined start.gg bracket slot
 // (italic, inline in the name position) -- spread onto playerRowStyle
 // rather than replacing it, so a placeholder row still lines up with
-// real rows (same padding/font-size/gap). Color was COLORS.muted
-// (plain gray) -- explicit user request for better legibility on these
-// rows (the Progression-driven "TBD"/ordinal-placeholder/predicted-
-// player text). Switched to COLORS.gold instead of just brightening the
-// gray: gold already means "pending, not yet decided" everywhere else
-// on this card (the Upcoming status pill, the destination boxes' own
-// border/title color), so this also makes a placeholder row's own
-// "not real yet" status legible at a glance, not just its text.
+// real rows (same padding/font-size/gap). Went through two colors before
+// this one: plain COLORS.muted (gray) was hard to read, so it became
+// COLORS.gold (matching "pending, not yet decided" everywhere else on
+// this card) -- but explicit user follow-up found that bright yellow too
+// loud for this much text. Now COLORS.dim -- still a distinct gray, not
+// a color swap back to muted, but visibly DIMMER than an eliminated
+// player's own `muted` name color (see COLORS.dim's own comment) so a
+// still-undetermined slot doesn't compete for attention with real
+// results, while staying clearly different from a real loss.
 const placeholderRowStyle: React.CSSProperties = {
-  color: COLORS.gold,
+  color: COLORS.dim,
   fontStyle: "italic",
 };
 
@@ -1529,10 +1664,21 @@ const playerRowStyle: React.CSSProperties = {
 // bottom, and with no row gap, every row's borderBottom butts directly
 // against the next row's top edge -- reading as one continuous ruled
 // line rather than a stack of separately-drawn segments.
+// columnGap was 28 -- explicit user request to connect the name column's
+// horizontal borderBottom to the score column's own borderBottom instead
+// of leaving them as two separate segments. A CSS Grid columnGap is real
+// empty space that belongs to NEITHER cell, so neither cell's own
+// border-bottom (drawn by its own box, see poolPlayerNameStyle/
+// playerTotalStyle) ever reached across it -- the line visibly broke in
+// the gap between the two columns. columnGap: 0 makes the two cells'
+// boxes touch directly, so their border-bottoms now draw one continuous
+// line; the same visual whitespace around the vertical divider is
+// preserved via padding instead (poolPlayerNameStyle's new paddingRight,
+// symmetric with playerTotalStyle's existing paddingLeft).
 const poolRowListStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr auto",
-  columnGap: 28,
+  columnGap: 0,
   fontFamily: BODY_FONT_FAMILY,
   fontSize: "0.9em",
 };
@@ -1578,7 +1724,12 @@ const playerNameStyle: React.CSSProperties = {
 // Google Sheets doesn't drop the final row's underline either.
 const poolPlayerNameStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
-  padding: "8px 0",
+  // Right padding replaces what used to be poolRowListStyle's own
+  // columnGap -- see that style's own comment on why the gap moved from
+  // "empty space between the two grid tracks" to "padding inside each
+  // cell's own box" (needed so the two cells' border-bottoms now touch
+  // and connect into one line, instead of a gap breaking it).
+  padding: "8px 24px 8px 0",
   borderBottom: `1px solid ${COLORS.border}`,
 };
 

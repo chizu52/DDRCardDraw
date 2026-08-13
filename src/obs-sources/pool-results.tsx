@@ -7,6 +7,7 @@ import {
   colIndexToLetter,
   finalRankingStatusByName,
   formatSongScore,
+  sumScores,
   ParsedPool,
 } from "../sheets/parse-pools";
 import {
@@ -247,6 +248,24 @@ function PoolTable({
     ? finalRankingStatusByName(pool, rankingColors)
     : new Map<string, "advancing" | "eliminated">();
 
+  // Standings sorted by current score, highest first -- explicit user
+  // request ("reorganize the players and their rows by highest score to
+  // lowest") so this reads as a live leaderboard instead of staying in
+  // original seed/entry order. Array.prototype.sort is stable per spec,
+  // so ties keep their original relative order -- same tie-break
+  // convention topScoreRanks already documents ("ties broken by row
+  // order"). Rank/tier lookups below still key off each row's ORIGINAL
+  // index (rowIdx, into pool.rows) -- unrelated to this sort, ranks was
+  // already built from that same original index space, so nothing else
+  // needs to change to stay correct.
+  const sortedRows = pool.rows
+    .map((row, rowIdx) => ({
+      row,
+      rowIdx,
+      total: parseFloat(sumScores(row.songs)),
+    }))
+    .sort((a, b) => b.total - a.total);
+
   return (
     <div style={cardStyle}>
       {/* A plain `style` prop can't express @font-face -- see
@@ -301,11 +320,12 @@ function PoolTable({
             only affect its own cell (truncating via playerNameStyle
             below if needed), never the table's overall shape. */}
         <colgroup>
-          <col style={{ width: "26%" }} />
+          <col style={{ width: "24%" }} />
           {Array.from({ length: pool.songCount }).map((_, i) => (
-            <col key={i} style={{ width: `${60 / pool.songCount}%` }} />
+            <col key={i} style={{ width: `${54 / pool.songCount}%` }} />
           ))}
-          <col style={{ width: "14%" }} />
+          <col style={{ width: "12%" }} />
+          <col style={{ width: "10%" }} />
         </colgroup>
         <thead>
           <tr>
@@ -315,18 +335,21 @@ function PoolTable({
                 Song {i + 1}
               </th>
             ))}
-            <th style={{ ...thStyle, borderRight: "none" }}>Total</th>
+            <th style={thStyle}>Total</th>
+            <th style={{ ...thStyle, borderRight: "none" }}>Diff</th>
           </tr>
         </thead>
         <tbody>
-          {pool.rows.map((row, rowIdx) => {
+          {sortedRows.map(({ row, rowIdx, total }, displayIdx) => {
             const rank = ranks.get(rowIdx);
             const tierColor = rowColors
               ? rowColorForRank(rank, rowColorTiers)
               : null;
             const backgroundColor =
               tierColor ??
-              (rowIdx % 2 === 0 ? "transparent" : "rgba(143,153,168,0.08)");
+              (displayIdx % 2 === 0
+                ? "transparent"
+                : "rgba(143,153,168,0.08)");
             // Automatic now -- reads the sheet's own Final Ranking color
             // for this player's name, same as gauntlet-pools.tsx, rather
             // than a manually configured cutoff count that could drift
@@ -335,6 +358,17 @@ function PoolTable({
             // single fixed number across every pool).
             const status =
               statusByName.get(row.player.trim().toLowerCase()) ?? null;
+            // How far off this player is from the opponent directly
+            // above them in the current sorted standings -- explicit
+            // user request. First place (displayIdx 0) never has one.
+            // Also withheld for a player with no real score yet (total
+            // 0 -- same "not entered yet" convention topScoreRanks
+            // already uses) since there's nothing real to be "off" from.
+            const above = displayIdx > 0 ? sortedRows[displayIdx - 1] : null;
+            const diffText =
+              above && total > 0
+                ? `-${(above.total - total).toFixed(4)}%`
+                : "";
             return (
               <tr key={rowIdx} style={{ backgroundColor }}>
                 <td style={{ ...tdStyle, fontWeight: 500 }}>
@@ -347,12 +381,16 @@ function PoolTable({
                   <span
                     style={{
                       ...playerNameStyle,
+                      // Advancing used to render in COLORS.mint (green) --
+                      // explicit user request to switch that to plain
+                      // COLORS.text (white) instead, same as
+                      // gauntlet-pools.tsx's identical convention (kept in
+                      // sync, same request applied to both overlays). Only
+                      // "eliminated" still shifts color (dims to
+                      // COLORS.muted); a winning player just reads as
+                      // normal/full brightness now, no separate accent.
                       color:
-                        status === "advancing"
-                          ? COLORS.mint
-                          : status === "eliminated"
-                            ? COLORS.muted
-                            : COLORS.text,
+                        status === "eliminated" ? COLORS.muted : COLORS.text,
                     }}
                   >
                     {row.player}
@@ -363,10 +401,16 @@ function PoolTable({
                     {formatSongScore(s) || "--"}
                   </td>
                 ))}
+                <td style={{ ...tdStyle, fontWeight: 700 }}>{row.total}</td>
                 <td
-                  style={{ ...tdStyle, borderRight: "none", fontWeight: 700 }}
+                  style={{
+                    ...tdStyle,
+                    borderRight: "none",
+                    color: COLORS.red,
+                    fontWeight: 600,
+                  }}
                 >
-                  {row.total}
+                  {diffText || "--"}
                 </td>
               </tr>
             );
