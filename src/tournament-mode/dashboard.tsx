@@ -1887,6 +1887,7 @@ const inputStyle: React.CSSProperties = {
 function ObsTextSources() {
   const [currentEdit, setCurrentEdit] = useState<string | null>(null);
   const labels = useAppState((s) => s.event.obsLabels);
+  const dispatch = useAppDispatch();
 
   return (
     <>
@@ -1907,6 +1908,9 @@ function ObsTextSources() {
               label={label}
               value={value}
               onEdit={() => setCurrentEdit(id)}
+              onDelete={() =>
+                dispatch(eventSlice.actions.removeLabel({ id }))
+              }
             />
           ))}
         </CardList>
@@ -1921,6 +1925,7 @@ function LabelCard(props: {
   label: string;
   value: string;
   onEdit(this: void): void;
+  onDelete(this: void): void;
 }) {
   const href = useHref(routableGlobalSourcePath(props.id));
   return (
@@ -1938,6 +1943,19 @@ function LabelCard(props: {
             copyObsSource(new URL(href, document.location.href).href);
           }}
           href={href}
+        />
+        <Button
+          icon={<Trash />}
+          intent="danger"
+          onClick={() => {
+            if (
+              confirm(
+                `Delete the "${props.label}" text source? This cannot be undone.`,
+              )
+            ) {
+              props.onDelete();
+            }
+          }}
         />
       </ButtonGroup>
     </Card>
