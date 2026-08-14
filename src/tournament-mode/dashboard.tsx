@@ -803,6 +803,19 @@ function GauntletPoolsSettingsSection() {
     }
   }, [savedTitle, titleDirty]);
 
+  // Explicit divider list, room-synced -- see event.slice.ts's own
+  // gauntletPoolsDividers doc for why this is a plain list (not a
+  // per-pool "group" tag) and why it's keyed by pool-set NUMBER, not
+  // pool title text. New-divider fields are local/uncontrolled-ish
+  // state, cleared back to blank once Add actually dispatches -- no
+  // buffer-then-Save pattern needed here (unlike the title field above)
+  // since adding a divider is itself already a single, deliberate,
+  // explicit action.
+  const dividers = useAppState((s) => s.event.gauntletPoolsDividers);
+  const [newDividerNumber, setNewDividerNumber] = useState<number | "">("");
+  const [newDividerLabel, setNewDividerLabel] = useState("");
+  const canAddDivider = newDividerNumber !== "" && newDividerLabel.trim();
+
   return (
     <Card elevation={1} className={styles.settingsSection}>
       {/* Same minimal-icon-in-the-heading treatment as the other three
@@ -878,6 +891,88 @@ function GauntletPoolsSettingsSection() {
           </div>
         </FormGroup>
       </div>
+      <Divider style={{ margin: "1rem 0" }} />
+      {/* Explicit dividers -- e.g. "Day 2" between two pools -- explicit
+          user request. Keyed by pool-set NUMBER (see event.slice.ts's
+          own gauntletPoolsDividers doc for why), so this form asks for
+          a plain number ("insert before pool #6") rather than needing
+          this Settings section to have any real pool titles loaded
+          (it doesn't -- this section isn't Sheets-connected the way
+          the Matches tab is). */}
+      <FormGroup label="Dividers" helperText='e.g. "Day 2" before pool #6 -- applies to both the Winners and Losers columns that share pool #6.'>
+        {dividers.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.5rem",
+              marginBottom: "0.75rem",
+            }}
+          >
+            {dividers.map((d) => (
+              <div
+                key={d.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                }}
+              >
+                <span style={{ minWidth: 110 }}>
+                  Before Pool #{d.beforeSetNumber}
+                </span>
+                <span style={{ flex: 1, fontStyle: "italic" }}>
+                  "{d.label}"
+                </span>
+                <Button
+                  icon={<Trash />}
+                  minimal
+                  onClick={() =>
+                    dispatch(
+                      eventSlice.actions.removeGauntletPoolsDivider(d.id),
+                    )
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <NumericInput
+            placeholder="Pool #"
+            value={newDividerNumber}
+            min={1}
+            buttonPosition="none"
+            style={{ width: "70px" }}
+            onValueChange={(n, valueAsString) =>
+              setNewDividerNumber(valueAsString === "" ? "" : n)
+            }
+          />
+          <InputGroup
+            placeholder="Label, e.g. Day 2"
+            value={newDividerLabel}
+            onChange={(e) => setNewDividerLabel(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <Button
+            icon={<Add />}
+            disabled={!canAddDivider}
+            onClick={() => {
+              if (!canAddDivider) return;
+              dispatch(
+                eventSlice.actions.addGauntletPoolsDivider({
+                  beforeSetNumber: newDividerNumber as number,
+                  label: newDividerLabel.trim(),
+                }),
+              );
+              setNewDividerNumber("");
+              setNewDividerLabel("");
+            }}
+          >
+            Add
+          </Button>
+        </div>
+      </FormGroup>
     </Card>
   );
 }

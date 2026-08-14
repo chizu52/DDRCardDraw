@@ -214,6 +214,10 @@ export function GauntletPoolsOverlay() {
   // -- see poolStatus's own comment on why this is opt-in now, not the
   // automatic default it used to be.
   const upcomingPools = useAppState((s) => s.event.gauntletPoolsUpcoming);
+  // Explicit operator-placed dividers (e.g. "Day 2" before pool #6) --
+  // see event.slice.ts's own gauntletPoolsDividers doc and the
+  // dividerPositions useLayoutEffect below for how these get rendered.
+  const dividers = useAppState((s) => s.event.gauntletPoolsDividers);
   // This overlay's own header title/icon -- same room-synced,
   // dashboard-editable pattern as schedule.tsx's subtitle/icon (see
   // dashboard.tsx's GauntletPoolsSettingsSection), rendered in the new
@@ -239,6 +243,24 @@ export function GauntletPoolsOverlay() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<HTMLDivElement>(null);
   const [panX, setPanX] = useState(0);
+  // Explicit user report: "a tiny line at the bottom not affected by
+  // background filters." Root-caused to viewportStyle's own CSS
+  // auto-height ending up a few pixels TALLER than panRef's real content
+  // height -- confirmed live (a 4px gap, present on a fresh reload, that
+  // tracked panRef's height proportionally when forced smaller) but its
+  // exact CSS cause couldn't be pinned down for certain through remote
+  // DOM probing alone (tried and ruled out the obvious suspect, the
+  // `<main>` route wrapper's flex stretch -- that container turned out
+  // to be column-direction, where align-items/self governs WIDTH, not
+  // height, so it was never the actual mechanism). Rather than keep
+  // chasing the exact cause, this makes viewportStyle's height
+  // authoritatively MEASURED from panRef's own true layout height
+  // (`offsetHeight`, unaffected by panRef's own transform) instead of
+  // trusting CSS auto-sizing to match it -- guaranteed zero gap
+  // regardless of whatever was causing the mismatch.
+  const [contentHeight, setContentHeight] = useState<number | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     if (!apiKey || !spreadsheetId) return;
@@ -325,6 +347,12 @@ export function GauntletPoolsOverlay() {
     const viewport = viewportRef.current;
     const panEl = panRef.current;
     if (!viewport || !panEl) return;
+    // offsetHeight, not getBoundingClientRect().height -- unaffected by
+    // panEl's own transform (which is purely a paint-time operation and
+    // never changes layout height anyway, but offsetHeight is the more
+    // direct "true layout height" read regardless). See contentHeight's
+    // own comment above for why this exists at all.
+    setContentHeight(panEl.offsetHeight);
     const target = selectedPool
       ? panEl.querySelector<HTMLElement>(
           `[data-pool-title="${CSS.escape(selectedPool)}"]`,
@@ -380,6 +408,46 @@ export function GauntletPoolsOverlay() {
   const winnerPools = pools
     .filter((p) => !LOSER_POOL_TITLE.test(p.title))
     .sort((a, b) => poolSortKey(a.title) - poolSortKey(b.title));
+
+  // Explicit operator-placed dividers (e.g. "Day 2" before pool #6) --
+  // each one anchors to whichever pool CURRENTLY has that set number
+  // (winner or loser side, doesn't matter which -- pool-set numbers
+  // share their own column position across both, see columnFor below)
+  // and measures its real DOM position, same technique as panX's own
+  // effect above. Rendered as absolutely-positioned overlay children of
+  // the grid (see gridStyle's own `position: relative`) rather than
+  // real inserted grid columns -- avoids needing to renumber every
+  // later pool's own column index around each divider. Deliberately
+  // NOT counter-transformed like the title bar/section labels above --
+  // a divider marks a specific point IN the pool sequence, so it should
+  // pan along with the content it's dividing, not stay pinned to the
+  // viewport. A configured divider whose set number doesn't exist in
+  // the currently loaded sheet is silently skipped, not rendered as a
+  // broken/floating line -- same "don't guess" convention this file's
+  // other placeholder logic already follows.
+  const [dividerPositions, setDividerPositions] = useState<
+    { id: string; label: string; left: number }[]
+  >([]);
+  useLayoutEffect(() => {
+    const panEl = panRef.current;
+    if (!panEl) return;
+    const positions = dividers
+      .map((d) => {
+        const anchorPool = pools.find(
+          (p) => poolSetNumber(p.title) === d.beforeSetNumber,
+        );
+        if (!anchorPool) return null;
+        const el = panEl.querySelector<HTMLElement>(
+          `[data-pool-title="${CSS.escape(anchorPool.title)}"]`,
+        );
+        if (!el) return null;
+        return { id: d.id, label: d.label, left: el.offsetLeft };
+      })
+      .filter(
+        (p): p is { id: string; label: string; left: number } => p !== null,
+      );
+    setDividerPositions(positions);
+  }, [dividers, pools]);
 
   if (!apiKey || !spreadsheetId) {
     const missing = [!apiKey && "apiKey", !spreadsheetId && "spreadsheetId"]
@@ -466,11 +534,35 @@ export function GauntletPoolsOverlay() {
     // request to auto-scroll based on which pool is currently Live
     // rather than the earlier "split into multiple OBS sources"
     // direction. See panX's own useLayoutEffect above for how the pan
-    // target is computed; overflowX (not the shorthand overflow) is
-    // deliberate -- only horizontal cropping was ever the reported
-    // problem, vertical sizing stays exactly as before (grows to fit its
-    // content, same as pre-pan behavior).
-    <div ref={viewportRef} style={viewportStyle}>
+    // target is computed. `height: contentHeight` (measured, see its own
+    // comment above) overrides whatever this element's own CSS
+    // auto-height would otherwise resolve to -- `undefined` on first
+    // render (before anything's been measured yet) falls through to
+    // ordinary auto-sizing so there's no flash of a collapsed/zero-height
+    // box before the first measurement lands.
+    <div
+      ref={viewportRef}
+      style={{ ...viewportStyle, height: contentHeight }}
+    >
+      {/* The banner art as a soft out-of-focus backdrop -- explicit user
+          follow-up to keep this FIXED to the screen/viewport, not
+          panning along with the pools ("I want the only thing to scroll
+          across are the pools"). Used to live INSIDE panRef below, which
+          meant it panned along with everything else -- moved out to be
+          a sibling here, a direct child of the fixed viewport, so it
+          stays put regardless of pan position. `inset: -20px` so the
+          blur has room to bleed past the viewport's own edges without
+          visibly softening right at the border -- see viewportStyle's
+          own comment for why it needs `overflow: hidden` (both axes,
+          not just X) for this to clip correctly now. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: -20,
+          background: `url(${Banner}) center/cover no-repeat`,
+          filter: "blur(3px)",
+        }}
+      />
       <div
         ref={panRef}
         style={{
@@ -482,22 +574,6 @@ export function GauntletPoolsOverlay() {
         {/* A plain `style` prop can't express @font-face -- see
             local-fonts.ts's own comment on this. */}
         <style>{LOCAL_FONT_FACE_CSS}</style>
-      {/* The banner art as a soft out-of-focus backdrop, same treatment
-          (and the same actual image) as schedule.tsx's own Banner
-          layer -- isolated on its own absolutely-positioned layer since
-          inline styles can't express ::before, `inset: -20px` so the
-          blur has room to bleed past the card's own edges without
-          visibly softening right at the border. See cardStyle's own
-          comment for why the card needs `overflow: hidden` + `position:
-          relative` for this to clip and anchor correctly. */}
-      <div
-        style={{
-          position: "absolute",
-          inset: -20,
-          background: `url(${Banner}) center/cover no-repeat`,
-          filter: "blur(3px) brightness(0.55)",
-        }}
-      />
       <div style={cardContentStyle}>
         {/* Same header-bar treatment as schedule.tsx's own title panel
             (solid COLORS.panel fill, 3px white border, TITLE_FONT_FAMILY
@@ -679,6 +755,43 @@ export function GauntletPoolsOverlay() {
               advancing={loserFinalAdvancing}
             />
           )}
+          {/* Explicit operator-placed dividers -- see
+              dividerPositions' own comment above for how `left` gets
+              measured. Absolutely positioned against gridStyle's own
+              `position: relative`, spanning the grid's full height
+              (top:0/bottom:0) since Winners and Losers pools sharing a
+              set number typically happen around the same time. Not a
+              real grid item (no gridColumn/gridRow) -- deliberately
+              overlaid on top rather than participating in grid layout,
+              so it never affects any pool's own column sizing. */}
+          {dividerPositions.map((d) => (
+            <div
+              key={d.id}
+              style={{
+                position: "absolute",
+                left: d.left - 12,
+                top: -56,
+                bottom: 0,
+                width: 3,
+                background: COLORS.dim,
+                pointerEvents: "none",
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 10,
+                  whiteSpace: "nowrap",
+                  ...statusPillStyle,
+                  backgroundColor: COLORS.dim,
+                  color: COLORS.text,
+                }}
+              >
+                {d.label}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
       </div>
@@ -1108,7 +1221,7 @@ function PoolBox({
       data-pool-title={title}
       style={{
         ...boxStyle,
-        border: `1px solid ${borderColor}`,
+        border: `3px solid ${borderColor}`,
         boxShadow: glow,
         gridColumn: col,
         gridRow: row,
@@ -1374,14 +1487,38 @@ function ArrowCell({
 // useLayoutEffect for how the pan target is computed). Sized to whatever
 // the OBS Browser Source's own canvas is (100vw, same "fills the
 // viewport" convention every overlay in this file already follows)
-// rather than a fixed pixel width. `overflowX` specifically, not the
-// `overflow` shorthand -- only horizontal cropping was ever the reported
-// problem (too many pools side by side); vertical sizing is left
-// completely alone, growing to fit its content exactly as it did before
-// this existed.
+// rather than a fixed pixel width. Also now the banner's own direct
+// parent (explicit user follow-up: the background should stay fixed to
+// the screen, not pan along with the pools) -- `overflow: hidden`
+// (both axes now, was `overflowX` only) clips the banner's own
+// `inset: -20px` blur-bleed on every side, not just left/right. This
+// doesn't reintroduce any vertical-cropping risk for the pool content
+// itself: this element has no explicit height (grows to fit panRef's
+// own natural height, an ordinary normal-flow child), so the only thing
+// that can ever exceed that auto-established box vertically is the
+// banner's own deliberate bleed, which is exactly what should get clipped.
+//
+// Real bug, found and fixed: this element's own CSS auto-height was
+// landing a few pixels (measured live: 4px, reproducible on a fresh
+// reload) TALLER than panRef's real content height -- explicit user
+// report: "a tiny line at the bottom not affected by background
+// filters," exactly what that stray gap would look like (the banner,
+// this element's own child sized to match ITS box, nominally covers it,
+// but any sub-pixel/paint mismatch in that extra sliver reveals the raw
+// page background underneath instead, which -- unlike the banner -- has
+// no blur/brightness filter on it at all). The `<main>` route wrapper's
+// flex stretch was the obvious first suspect, but ruled out live: that
+// container is `flex-direction: column`, where align-items/self governs
+// WIDTH, not height, so it was never the actual mechanism, and the exact
+// CSS cause couldn't be pinned down for certain through remote DOM
+// probing alone. Fixed at the call site instead (GauntletPoolsOverlay's
+// own render) by setting `height` explicitly from a MEASURED value
+// (`contentHeight`, panRef's own true `offsetHeight`) rather than
+// trusting this element's CSS auto-sizing to match it -- guaranteed
+// zero gap regardless of whatever was actually causing the mismatch.
 const viewportStyle: React.CSSProperties = {
   width: "100vw",
-  overflowX: "hidden",
+  overflow: "hidden",
   position: "relative",
 };
 
@@ -1390,16 +1527,13 @@ const viewportStyle: React.CSSProperties = {
 // content) -- previously this overlay was just a bare grid of floating
 // boxes straight on the page background, the biggest visible gap
 // against Schedule's "one panel" look when the two sit on stream
-// together. Now also reuses schedule.tsx's own blurred banner-art
-// backdrop (explicit user request, once this overlay had its own title
-// header to anchor it against) -- `position: relative` + `overflow:
-// hidden` are new specifically for that layer: relative so the banner's
-// `position: absolute` anchors to THIS box (not some further-out
-// ancestor), hidden so its `inset: -20px` bleed (see the banner div's
-// own comment) clips at this card's own rounded corners instead of
-// spilling past them. Panned horizontally via a `transform: translateX`
-// applied at its own call site (not baked in here, since that value is
-// dynamic/per-render) -- see viewportStyle's own comment just above.
+// together. `position: relative` + `overflow: hidden` still needed even
+// though the banner backdrop moved out to viewportStyle (explicit user
+// follow-up, see its own comment) -- this box still needs to clip its
+// own rounded corners against whatever content sits inside it. Panned
+// horizontally via a `transform: translateX` applied at its own call
+// site (not baked in here, since that value is dynamic/per-render) --
+// see viewportStyle's own comment just above.
 const cardStyle: React.CSSProperties = {
   fontFamily: BODY_FONT_FAMILY,
   // Explicit base size, not left to inherit the browser default (~14-16px
@@ -1433,8 +1567,30 @@ const cardStyle: React.CSSProperties = {
   // instead of a faked-heavier one, rather than needing every individual
   // fontWeight value hunted down and changed by hand.
   fontSynthesis: "none",
-  background: "rgba(17, 20, 24, 0.92)",
-  borderRadius: 20,
+  // 0.92 -> 0.65 opacity -- this is the REAL reason bumping the banner's
+  // own brightness() earlier barely changed how the overlay actually
+  // looked: this card sits ON TOP of the banner (later sibling inside
+  // viewportStyle) and spans essentially the whole visible width at all
+  // times (that's the auto-pan camera's whole point), so at 92% opacity
+  // only 8% of the banner underneath was ever blending through --
+  // brightening the banner itself has almost no visible effect when
+  // this near-solid dark fill is what's actually covering 92% of the
+  // screen. Lowered so the (already-brightened) banner genuinely shows
+  // through more -- individual UI elements (pool boxes, title bar, etc.)
+  // all carry their own separate, fully-opaque COLORS.panel backgrounds
+  // already, so text/table legibility isn't riding on this outer fill's
+  // own opacity -- it only affects the "ambient" space between them.
+  background: "rgba(17, 20, 24, 0.65)",
+  // Was 20 -- explicit user follow-up once the banner moved out to
+  // viewportStyle (see that fix's own comment): the banner is a plain
+  // RECTANGLE with square corners, so this card's own rounded corners
+  // no longer had anything rounded to blend into -- at each corner, the
+  // dark translucent fill's own curve pulled back from the true edge,
+  // leaving a small triangular sliver where the banner's square corner
+  // showed through un-tinted/un-darkened, a visible mismatch. Square
+  // corners here now match the banner's own shape exactly, so the fill
+  // covers edge-to-edge with no seam.
+  borderRadius: 0,
   position: "relative",
   overflow: "hidden",
   display: "inline-block",
@@ -1522,6 +1678,14 @@ const titleBarStyle: React.CSSProperties = {
 function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
   return {
     display: "grid",
+    // Positioned ancestor for the divider overlay elements (see
+    // GauntletPoolsOverlay's own dividerPositions effect/render) --
+    // makes THIS grid wrapper each PoolBox's offsetParent (nearer than
+    // cardContentStyle, which also sets position:relative), so a
+    // divider's own offsetLeft-based `left` lines up correctly, and
+    // gives the divider's `position: absolute` a real box to anchor
+    // its own top/bottom against.
+    position: "relative",
     // Pool/arrow/destination column floors scaled up alongside the rest
     // of this file's sizes (240/56/180 -> 320/72/240) -- unchanged
     // otherwise (still minmax/max-content, still auto rows), just wide
@@ -1635,7 +1799,17 @@ const poolHeaderBarStyle: React.CSSProperties = {
   marginLeft: -20,
   marginRight: -20,
   padding: "12px 20px",
-  borderRadius: "18px 18px 0 0",
+  // 15px, not boxStyle's own 18px outer radius -- a border's INNER edge
+  // has to curve tighter than its OUTER edge by roughly the border's own
+  // width to stay concentric (nested inside it), not project past it.
+  // This was already technically off-by-a-pixel at the original 1px
+  // border (should've been 17px), just imperceptible at that width --
+  // explicit user follow-up after widening the border to 3px made the
+  // mismatch large enough to visibly show boxStyle's own dark
+  // COLORS.panel background peeking through at the top corners, right
+  // where a colored header tint should have read as a clean edge-to-edge
+  // bar. 18 - 3 = 15.
+  borderRadius: "15px 15px 0 0",
   // boxHeaderStyle's own marginBottom: 10 was fine as a value, but
   // restated here for clarity now that the shorthand above is gone --
   // explicit user request for "a tiny bit of space" before player 1's

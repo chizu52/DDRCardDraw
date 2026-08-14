@@ -171,6 +171,26 @@ interface EventState {
    * holds `true` entries, a pool is removed from this map entirely
    * rather than set to `false` when unchecked. */
   gauntletPoolsUpcoming: Record<string, boolean>;
+  /** Explicit, operator-placed dividers on the gauntlet-pools overlay --
+   * e.g. a "Day 2" label between two pools -- explicit user request.
+   * Keyed by the pool-set NUMBER a divider renders before (e.g. `6`
+   * renders before whichever column "Pool 6"/"Pool L6" share -- pool-set
+   * numbers already drive that shared column position, see
+   * gauntlet-pools.tsx's own columnFor/poolSetNumber), not by exact pool
+   * title text: avoids a typo silently failing to match, and doesn't
+   * need this settings panel to have its own list of real pool titles
+   * loaded (it doesn't -- unlike the Matches tab, this section isn't
+   * Sheets-connected, and fetching just to populate a title dropdown
+   * would undo the whole point of the combined-color-fetch work in
+   * [[project_sheets_api_rate_limit]]). A plain LIST (not a map), by
+   * explicit user choice over a per-pool "group" tag on every single
+   * pool -- only the handful of actual break points need any data here
+   * at all, not every pool in the bracket. */
+  gauntletPoolsDividers: {
+    id: string;
+    beforeSetNumber: number;
+    label: string;
+  }[];
 }
 
 const initialState: EventState = {
@@ -202,6 +222,7 @@ const initialState: EventState = {
   gauntletPoolsTitle: "",
   gauntletPoolsIcon: null,
   gauntletPoolsUpcoming: {},
+  gauntletPoolsDividers: [],
 };
 
 export const eventSlice = createSlice({
@@ -380,6 +401,30 @@ export const eventSlice = createSlice({
         delete state.gauntletPoolsUpcoming[action.payload.title];
       }
     },
+    // id generated here (prepare), not left to the caller -- same
+    // pattern the cabs' own add-cab action already uses (see its own
+    // `nanoid(5)` above) so dashboard.tsx doesn't need its own id
+    // scheme just for this one list.
+    addGauntletPoolsDivider: {
+      prepare(divider: { beforeSetNumber: number; label: string }) {
+        return { payload: { ...divider, id: nanoid(5) } };
+      },
+      reducer(
+        state,
+        action: PayloadAction<{
+          id: string;
+          beforeSetNumber: number;
+          label: string;
+        }>,
+      ) {
+        state.gauntletPoolsDividers.push(action.payload);
+      },
+    },
+    removeGauntletPoolsDivider(state, action: PayloadAction<string>) {
+      state.gauntletPoolsDividers = state.gauntletPoolsDividers.filter(
+        (d) => d.id !== action.payload,
+      );
+    },
     // Per-day (see scheduleStatus's own doc) -- staged alongside that
     // day's own rows in dashboard.tsx's ScheduleDayEditor and sent by
     // the same Submit click, not dispatched live the instant the
@@ -498,5 +543,8 @@ export function addOverlaySettings(state: EventState) {
   }
   if (!state.gauntletPoolsUpcoming) {
     state.gauntletPoolsUpcoming = {};
+  }
+  if (!state.gauntletPoolsDividers) {
+    state.gauntletPoolsDividers = [];
   }
 }
