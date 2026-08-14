@@ -15,45 +15,24 @@ import { useAppState } from "../state/store";
 // reuses this exact same image for its own backdrop now, see its own
 // comment on why.
 import Banner from "../other-assets/backgrounds/bg.png";
-import { bodyFont, titleFont } from "./local-fonts";
+import {
+  bodyFont,
+  titleFont,
+  TITLE_FONT_FAMILY,
+  BODY_FONT_FAMILY,
+} from "./local-fonts";
+import { BROADCAST_COLORS } from "./broadcast-theme";
 
-// Dark broadcast base (panel/border/text/muted) still matches
-// bracket-tree.tsx -- legibility over arbitrary video footage is the
-// same requirement for both, and a stream typically targets 1080p, not
-// 4K, so there's no headroom to spend on a lighter background that'd
-// fight the rest of the stream for contrast. The accent trio (mint/
-// gold/coral) is sampled directly from the Dairyland Duel event banner
-// art, replacing the old generic blue/green -- this overlay is styled
-// for that specific event's branding, not a reusable neutral palette
-// like bracket-tree.tsx's.
+// The accent trio (mint/gold/coral) is shared with gauntlet-pools.tsx/
+// pool-results.tsx; currentBg/blue/red are this overlay's own additions
+// (red in particular is a different shade than the other two overlays'
+// -- not a duplicate to consolidate).
 const COLORS = {
-  panel: "#1c2127",
-  border: "#3a3f49",
-  text: "#f6f7f9",
-  muted: "#9aa2ac",
-  mint: "#22c55e",
-  gold: "#efc75e",
-  coral: "#f0a868",
+  ...BROADCAST_COLORS,
   currentBg: "#2c4435",
   blue: "#3A7CDE",
   red: "#F54927",
 };
-// Two independent slots, not one shared FONT_FAMILY -- a bold hand-drawn
-// display face reads fine at the title's large size but hurts legibility
-// at the smaller sizes everything else on the card uses, so the title
-// gets its own font, separate from the rest of the card's body text.
-// titleFont/bodyFont are never actually null -- local-fonts.ts always
-// resolves each slot to either a locally-supplied title-font.*/
-// body-font.* or its own bundled, openly-licensed fallback font. The
-// ternary below is just defensive in case that ever changes; it doesn't
-// currently fall through to SYSTEM_FONT_STACK in practice.
-const SYSTEM_FONT_STACK = "Roboto, Helvetica, Arial, sans-serif";
-const TITLE_FONT_FAMILY = titleFont
-  ? `TitleFont, ${SYSTEM_FONT_STACK}`
-  : SYSTEM_FONT_STACK;
-const BODY_FONT_FAMILY = bodyFont
-  ? `BodyFont, ${SYSTEM_FONT_STACK}`
-  : SYSTEM_FONT_STACK;
 
 // A plain `style` prop can't express @font-face any more than it can
 // @keyframes (see ANIMATIONS_CSS below) -- also rendered via a raw
@@ -137,18 +116,6 @@ const VALUE_FADE_MS = 700;
 // in milliseconds (it's also used as a plain JS setTimeout duration,
 // not just a CSS string). ---
 
-/** The whole panel's entrance (scheduleDayIn) -- plays when the
- * displayed DAY changes, and once, on this overlay's very first mount. */
-const DAY_CHANGE_DURATION_S = 0.4;
-/** Each header piece's own fade-in (icon, title, the "Schedule for:"
- * row, the clock) -- scheduleFadeIn. All four play at once as DAY_CHANGE
- * plays, staggered start-to-start by HEADER_STAGGER_S (the icon starts
- * slightly earlier still, by HEADER_ICON_LEAD_S, so it's already
- * settling in by the time the title beside it starts). */
-const HEADER_FADE_DURATION_S = 0.4;
-const HEADER_STAGGER_S = 0.1;
-const HEADER_ICON_LEAD_S = 0.05;
-
 /** A row's own staggered slide-in entrance (scheduleSlideDown/
  * scheduleSlideDownFade) -- only plays right after a day change (see
  * entranceSettled). ROW_ENTRANCE_BASE_DELAY_S before the first row
@@ -157,11 +124,6 @@ const HEADER_ICON_LEAD_S = 0.05;
 const ROW_ENTRANCE_DURATION_S = 0.5;
 const ROW_ENTRANCE_BASE_DELAY_S = 0.3;
 const ROW_ENTRANCE_STAGGER_S = 0.05;
-
-/** Once a row's entrance has settled, how long its background/border/
- * opacity (and its own event-text color) take to crossfade when
- * current/completed changes -- see the row's own `transition`. */
-const ROW_SETTLE_TRANSITION_S = 0.3;
 
 /**
  * Holds onto the OLD `value` (and keeps rendering it) while fading it out,
@@ -278,13 +240,9 @@ const DAY_LABELS: Record<ScheduleDay, string> = {
 };
 
 // A stable reference for "no items yet" -- a fresh `[]` literal inline
-// in the selector below would be a NEW array on every single selector
-// call, which react-redux's default reference-equality check reads as
-// "changed" on every dispatch (confirmed as a real infinite-render bug
-// in dashboard.tsx's ScheduleDayEditor, which also depends on this same
-// selector shape plus an effect keyed on the result -- this file has no
-// such effect, so it wouldn't loop, but it's the same wasteful
-// re-render pattern either way).
+// in the selector below would be a new array on every selector call,
+// which react-redux's default reference-equality check reads as
+// "changed" on every dispatch.
 const EMPTY_SCHEDULE: ScheduleItem[] = [];
 
 interface DisplayTime {
@@ -361,17 +319,12 @@ function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
 }
 
 // Automatic mode's own "now," as "HH:mm" (24-hour, zero-padded) -- the
-// exact same format ScheduleItem.time is already stored/typed in (see
-// its own doc), so the two compare correctly as plain strings. Derived
-// from the machine's own LOCAL wall clock (Date's plain getHours/
-// getMinutes, no explicit timeZone), same convention this file's own
-// corner clock (formatClock) already uses -- explicit user request:
-// not a hardcoded timezone. An operator typing "20:30" into a row means
-// their own local 8:30pm, whatever timezone the machine they typed it
-// on happens to be in, so comparing against THIS machine's local time
-// is what actually lines up with what they typed (matters most when
-// the OBS machine and the entry device are the same one, the common
-// case here).
+// exact same format ScheduleItem.time is already stored/typed in, so
+// the two compare correctly as plain strings. Derived from the
+// machine's own local wall clock (Date's plain getHours/getMinutes, no
+// explicit timeZone), same convention this file's own corner clock
+// (formatClock) uses -- not a hardcoded timezone, so it lines up with
+// whatever local time an operator typed into a row.
 function currentLocalTimeString(ms: number): string {
   if (!ms) return "";
   const d = new Date(ms);
@@ -489,14 +442,11 @@ function formatDayDate(day: ScheduleDay, nowMs: number): string {
 
 // Centers `children` within its (position:relative) parent using
 // measured, integer-pixel offsets instead of the CSS `left: 50%` +
-// `transform: translate(-50%, -50%)` trick tried first -- that reliably
-// lands the content at a sub-pixel position (confirmed directly: e.g.
-// `left: 75.99px`), which browsers render by anti-aliasing across the
-// pixel boundary, reading as slightly blurrier text than a crisp
-// integer-pixel position does. Runs in useLayoutEffect (before paint,
-// so no visible jump) and stays hidden until the first measurement
-// lands, since there's nothing meaningful to show before the content's
-// own natural size is known.
+// `transform: translate(-50%, -50%)` trick -- that reliably lands the
+// content at a sub-pixel position (e.g. `left: 75.99px`), which browsers
+// anti-alias across the pixel boundary, reading as slightly blurrier
+// text. Runs in useLayoutEffect (before paint) and stays hidden until
+// the first measurement lands.
 function CenteredTimeText({
   children,
   style,
@@ -534,15 +484,12 @@ function CenteredTimeText({
     };
     measure();
     // Re-measure once every @font-face has actually finished loading --
-    // the measurement above necessarily runs against whatever font is
-    // available at that instant (the system fallback, while a real
-    // title-font.otf/body-font.otf is still downloading -- see
-    // local-fonts.ts), and a custom font's own glyph widths are rarely
-    // identical to the fallback's. Without this, the box was measured
-    // and centered against the WRONG font, then visibly reflowed (with
-    // nothing re-centering it) the instant the real font finished
-    // loading -- the "times move on refresh" symptom, confirmed
-    // directly.
+    // the measurement above runs against whatever font is available at
+    // that instant (the system fallback, while a real title-font.otf/
+    // body-font.otf is still downloading), and a custom font's glyph
+    // widths are rarely identical to the fallback's. Without this, the
+    // box stays measured against the wrong font, then visibly reflows
+    // uncentered once the real font finishes loading.
     void document.fonts.ready.then(measure);
   }, [children]);
 

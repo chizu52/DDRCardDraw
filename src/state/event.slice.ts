@@ -161,15 +161,10 @@ interface EventState {
    * the same reason scheduleIcon is. null renders nothing. */
   gauntletPoolsIcon: string | null;
   /** Which pools the operator has manually flagged to show "Upcoming" on
-   * the gauntlet-pools overlay, keyed by pool title -- explicit user
-   * request. "Upcoming" used to be that overlay's own automatic default
-   * for every not-finished, not-currently-selected pool (poolStatus,
-   * gauntlet-pools.tsx), which meant literally every pool nobody was
-   * watching yet showed it -- not useful signal once every pool has it.
-   * Now nothing shows unless a pool's title is explicitly opted in here
-   * (dashboard.tsx's Matches tab, one checkbox per pool) -- only ever
-   * holds `true` entries, a pool is removed from this map entirely
-   * rather than set to `false` when unchecked. */
+   * the gauntlet-pools overlay, keyed by pool title (dashboard.tsx's
+   * Matches tab, one checkbox per pool) -- only ever holds `true`
+   * entries, a pool is removed from this map entirely rather than set
+   * to `false` when unchecked. */
   gauntletPoolsUpcoming: Record<string, boolean>;
   /** Operator-placed dividers on the gauntlet-pools overlay, e.g. a
    * "Day 2" label before pool #6. Keyed by pool-set number. */

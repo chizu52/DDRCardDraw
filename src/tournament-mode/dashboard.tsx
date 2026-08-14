@@ -100,15 +100,11 @@ const CV_READER_TRIGGER_URL = "http://localhost:8765/capture";
 const CV_READER_TRIGGER_TIMEOUT_MS = 35000;
 
 // The "Pending" tab is a single fixed 4-row staging block, not a
-// per-pool reserved range -- confirmed directly against the live sheet:
-// header on row 1, then exactly 4 data rows (2-5), Seed/Pool always
-// blank, reused/overwritten by whatever was captured most recently.
+// per-pool reserved range: header on row 1, then exactly 4 data rows
+// (2-5), reused/overwritten by whatever was captured most recently.
 // start_row is where Score Scope should start writing captured songs --
-// see its src/read_scores.py: "column 0 writes to start_row, column 1
-// writes to start_row + 1", so this points at the Pending tab's first
-// data row, not anything pool-specific (there's no per-pool block to
-// point at -- pool.rows[*].rowIndex belongs to the *Pools* tab, a
-// completely different row numbering, and would be wrong here).
+// see its src/read_scores.py -- always the Pending tab's first data
+// row, never pool.rows[*].rowIndex (a different tab's row numbering).
 const PENDING_START_ROW = 2;
 
 interface CvCaptureResult {
@@ -366,16 +362,11 @@ function MatchesImportPanel() {
         const range = `Pools!${colIndexToLetter(firstCol)}${row.rowIndex + 1}:${colIndexToLetter(lastCol)}${row.rowIndex + 1}`;
         return { range, values: [[...row.songs]] };
       });
-      // Exporting IS the operator's own "this pool is done" signal now --
-      // explicit user request: no separate manual Finished toggle, no
-      // completeness check, just TRUE every time Export runs (same sheet
-      // cell/mechanism the old manual checkbox used to write to -- see
-      // the Checkbox's own comment below for why it's a read-only
-      // indicator now). Folded into the same batchUpdateValues call as
-      // the scores themselves rather than a second request -- one write,
-      // not two round trips to Sheets. Only writable if this sheet
-      // actually has a Finished column and the pool has a first row to
-      // anchor it to, same guard the old toggleFinished had.
+      // Exporting is the operator's own "this pool is done" signal --
+      // TRUE every time Export runs, folded into the same
+      // batchUpdateValues call as the scores themselves (one write, not
+      // two round trips to Sheets). Only writable if this sheet has a
+      // Finished column and the pool has a first row to anchor it to.
       if (pool.finishedCol !== null && pool.rows.length) {
         data.push({
           range: `Pools!${colIndexToLetter(pool.finishedCol)}${pool.rows[0].rowIndex + 1}`,
@@ -482,19 +473,10 @@ function MatchesImportPanel() {
                   style={{ display: "flex", alignItems: "center", gap: "10px" }}
                 >
                   {pool.title}
-                  {/* A plain Tag now, not a Checkbox -- explicit user
-                      request to remove EVERY interactive affordance, not
-                      just the click handler. A disabled Checkbox still
-                      renders as a form control (hover/focus states,
-                      checkbox-shaped indicator) even with nothing wired
-                      to it; a Tag has no interactive semantics at all
-                      unless one is explicitly added, so there's nothing
-                      left to remove. Same intent-color meaning the old
-                      custom checkbox CSS gave it (red = not finished,
-                      green = finished), and the same "Final"/"Live"-style
-                      Tag pool-results.tsx's own overlay already uses for
-                      this exact status, just labeled for the editing
-                      context here ("In - Progress," not "Live"). */}
+                  {/* A plain Tag, not a Checkbox -- no interactive
+                      semantics at all, unlike a disabled Checkbox which
+                      still renders hover/focus states. Same intent-color
+                      meaning as pool-results.tsx's own status Tags. */}
                   <Tag round intent={pool.finished ? "success" : "danger"}>
                     {pool.finished ? "Finished" : "In - Progress"}
                   </Tag>
@@ -551,12 +533,9 @@ function MatchesImportPanel() {
                         ? "Stop showing this pool on the OBS overlay"
                         : "Show this pool on the OBS overlay"
                     }
-                    // A real toggle now -- explicit user request: clicking
-                    // this while it's already the active pool turns it
-                    // OFF (null) instead of just re-setting the same
-                    // value. Previously one-directional (always set to
-                    // THIS pool, no way to clear it from here at all
-                    // short of picking a different pool).
+                    // A real toggle: clicking this while it's already
+                    // the active pool turns it off (null) instead of
+                    // just re-setting the same value.
                     onClick={() =>
                       dispatch(
                         eventSlice.actions.setSelectedPool(
@@ -735,13 +714,11 @@ function MatchesSettingsPanel() {
     // than each section styling its own divider differently) is what
     // actually reads as "three separate things," not just three headings.
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-      {/* Groups the three bracket/pool-progress overlays -- explicit user
-          request -- separately from ScheduleSettingsSection below, which
-          stays outside this wrapper (a different kind of overlay, event
-          timing rather than tournament progress). elevation={0}, lower
-          than the elevation={1} cards nested inside, so this reads as a
-          flatter grouping box the other three visually sit on top of,
-          rather than competing with them. */}
+      {/* Groups the three bracket/pool-progress overlays, separately
+          from ScheduleSettingsSection below (event timing, not
+          tournament progress). elevation={0}, lower than the
+          elevation={1} cards nested inside, reads as a flatter grouping
+          box the other three visually sit on top of. */}
       <Card elevation={0} className={styles.tournamentOverlaysGroup}>
         <h2>Tournament Overlays</h2>
         <div
@@ -1294,10 +1271,8 @@ function ScheduleSettingsSection() {
   const [subtitle, setSubtitle] = useState(savedSubtitle);
   // Explicit flag, not `subtitle !== savedSubtitle` -- see
   // ScheduleDayEditor's own `dirty` state for why a derived comparison
-  // is the wrong check (confirmed as a real bug there: it can't tell
-  // "user is editing" apart from "this component hasn't caught up to a
-  // savedSubtitle it's never seen before," which look identical but
-  // need opposite handling).
+  // can't tell "user is editing" apart from "hasn't caught up to a
+  // savedSubtitle it's never seen before."
   const [subtitleDirty, setSubtitleDirty] = useState(false);
   // Same resync-while-not-dirty pattern as ScheduleDayEditor's own
   // savedSchedule effect below -- picks up an external change (another
@@ -1479,54 +1454,34 @@ function ScheduleSettingsSection() {
 function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
   const dispatch = useAppDispatch();
   // EMPTY_SCHEDULE, not an inline `?? []` -- a fresh array literal on
-  // every selector call is a NEW reference every time even when a day
-  // has no saved items (the common case for a new event), which
-  // react-redux's default reference-equality check reads as "changed"
-  // on every single dispatch. Combined with the resync effect below
-  // (which depends on this value), that was a real, confirmed infinite
-  // loop ("Maximum update depth exceeded") the moment this tab was
-  // opened on a day with nothing saved yet -- not a hypothetical
-  // concern, this actually happened. A stable reference for the empty
-  // case fixes it.
+  // every selector call is a new reference every time, which combined
+  // with the resync effect below caused a real infinite loop
+  // ("Maximum update depth exceeded") on a day with nothing saved yet.
   const savedSchedule = useAppState(
     (s) => s.event.schedules[day] ?? EMPTY_SCHEDULE,
   );
-  // Per-day (like savedSchedule above), staged/submitted alongside this
-  // day's own rows via the same dirty flag and Submit button below --
-  // moved here (out of the always-live "Day to display" controls above)
-  // so a status change goes out deliberately, reviewed together with
-  // whatever row edits are also pending, rather than the instant the
-  // operator touches the radio.
+  // Per-day, staged/submitted alongside this day's own rows via the
+  // same dirty flag and Submit button below, so a status change goes
+  // out deliberately rather than instantly on touching the radio.
   const savedStatus = useAppState(
     (s) => s.event.scheduleStatus[day] ?? DEFAULT_SCHEDULE_STATUS,
   );
   const [schedule, setSchedule] = useState<ScheduleItem[]>(savedSchedule);
   const [status, setStatus] = useState(savedStatus);
-  // An explicit flag the user's own edits set, NOT a derived comparison
+  // An explicit flag the user's own edits set, not a derived comparison
   // of schedule vs savedSchedule -- comparing values conflates "the user
-  // is actively editing, don't clobber it" with "this component just
-  // hasn't caught up to a savedSchedule it's never seen before," which
-  // look identical (local != saved) but need opposite handling. That
-  // second case is real, not hypothetical: confirmed directly -- an
-  // external update (another operator's submit, arriving while this
-  // editor's local buffer was still sitting at its initial empty
-  // default) got permanently stuck showing 0 rows, because that empty
-  // default already "differed" from the incoming saved value the moment
-  // it arrived, so the old isDirty-by-comparison guard treated it as
-  // an in-progress edit worth protecting and never synced at all.
+  // is actively editing" with "this component hasn't caught up to a
+  // savedSchedule it's never seen before" (both look like local != saved
+  // but need opposite handling: an external update arriving while the
+  // local buffer still sat at its initial empty default got permanently
+  // stuck showing 0 rows under the old comparison-based guard).
   const [dirty, setDirty] = useState(false);
 
-  // Re-sync to the room-synced value whenever it changes from elsewhere
-  // (another operator's dashboard, or this device's own submit echoing
-  // back through the party socket) -- but only while nothing unsaved is
-  // in progress locally. Without the dirty guard, an incoming update
-  // mid-edit would silently overwrite whatever the user was still
-  // typing; without the effect at all (the bug this is fixing, confirmed
-  // against the original PR this was ported from), an external update
-  // never shows up here until the tab is reloaded. Not the "derive
-  // state from props" antipattern set-state-in-effect normally warns
-  // about -- same reasoning as ScheduleSettingsSection's own subtitle
-  // effect above.
+  // Re-sync to the room-synced value whenever it changes from elsewhere,
+  // but only while nothing unsaved is in progress locally -- without the
+  // dirty guard, an incoming update mid-edit would overwrite what the
+  // user was typing; without the effect at all, an external update
+  // never shows up here until reload.
   useEffect(() => {
     if (!dirty) {
       // eslint-disable-next-line react-hooks-js/set-state-in-effect
@@ -1712,27 +1667,19 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
                 </td>
                 <td>
                   {/* A completed row can't also be current -- the overlay
-                    itself already assumes this can't happen ("completed
-                    wins over current," schedule.tsx), but nothing here
-                    previously actually enforced it. Disabling instead of
-                    just hiding keeps the column's shape stable
-                    (no layout shift row-to-row) and makes it visibly
-                    clear why it can't be picked, rather than silently
-                    doing nothing on click. */}
+                    already assumes this ("completed wins over current,"
+                    schedule.tsx). Disabling (not hiding) keeps the
+                    column's shape stable and shows why it can't be
+                    picked. */}
                   <Radio
                     name={`schedule-current-${day}`}
                     checked={!!row.current}
                     disabled={!!row.completed}
-                    // Both onClick AND onChange, calling the same logic --
-                    // confirmed directly that a native radio's `change`
-                    // event doesn't fire when clicking one that's already
-                    // checked (its own checked state isn't changing), so
-                    // onClick is what actually catches the deselect click.
-                    // onChange stays too, just to satisfy React's "checked
-                    // prop needs an onChange handler" warning on a
-                    // controlled input -- for a normal select-a-different-
-                    // row click, both fire and both compute the same
-                    // result, which is harmless.
+                    // Both onClick AND onChange -- a native radio's
+                    // `change` event doesn't fire when clicking one
+                    // that's already checked, so onClick catches the
+                    // deselect click; onChange satisfies React's
+                    // controlled-input warning.
                     onClick={() => setCurrentRow(row.current ? null : i)}
                     onChange={() => setCurrentRow(row.current ? null : i)}
                   />

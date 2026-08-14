@@ -47,24 +47,17 @@ export interface ParsedPool {
   finished: boolean;
   rows: PoolPlayerRow[];
   /** Every Progression cell across this pool's row range -- e.g. "3PL2"
-   * (3rd place of Pool L2) -- ALWAYS exactly POOL_SLOT_COUNT (4) long,
+   * (3rd place of Pool L2) -- always exactly POOL_SLOT_COUNT (4) long,
    * one entry per slot position ("" for a slot with no code), read
    * regardless of whether that specific row has a player name yet.
    * Position matters: gauntlet-pools.tsx's poolSlotDisplays looks up a
-   * SPECIFIC empty slot's own code by index (progressionCodes[slotIndex])
-   * to resolve exactly which rank/pool that one slot refers to, not
-   * just "does this pool have any code anywhere" -- filtering out
-   * blanks here (an earlier version of this field did) silently shifts
-   * every later slot's code into the wrong position. Confirmed as a
-   * real bug once this pool tracked progression per-PoolPlayerRow
-   * instead: a Progression code is placed on the DESTINATION pool's row
-   * (stating where that seat's occupant came FROM, not where this
-   * pool's own players are going -- confirmed with the user directly),
-   * which is exactly the row most likely to have NO player name yet
-   * (that's the whole reason the code exists at all) -- rows.push only
-   * ever happens `if (cell)` (a real player name present), so any code
-   * sitting on a still-empty seat was being silently dropped before
-   * gauntlet-pools.tsx's poolSlotDisplays ever saw it. */
+   * specific empty slot's own code by index, not just "does this pool
+   * have any code anywhere" -- filtering out blanks would shift every
+   * later slot's code into the wrong position. A Progression code is
+   * placed on the DESTINATION pool's row (stating where that seat's
+   * occupant came from), which is exactly the row most likely to have
+   * no player name yet -- rows.push only happens `if (cell)`, so a code
+   * on a still-empty seat would be silently dropped without this. */
   progressionCodes: string[];
 }
 
@@ -84,14 +77,11 @@ function findHeaderColumns(headerRow: string[]): {
 } {
   // Which column is "Seed" -- and therefore which column right after it
   // is the pool title / player-name column -- isn't fixed at 0/1
-  // either: confirmed by a real sheet gaining a new column A
-  // ("Progression"), shifting Seed to B and the title/player column to
-  // C. Detected by content first, same principle findHeaderRowIndex
-  // already applies to finding the header ROW, rather than assuming
-  // either column sits at a fixed index. Falls back to the old fixed
-  // assumption (column 1) if this sheet's header row doesn't literally
-  // spell out "Seed" -- every real layout seen so far does, but this
-  // keeps a sheet that somehow doesn't working exactly as before.
+  // either: a sheet gaining a new column A ("Progression") shifts Seed
+  // to B and the title/player column to C. Detected by content first,
+  // same principle findHeaderRowIndex applies to the header row.
+  // Falls back to the old fixed assumption (column 1) if this sheet's
+  // header row doesn't spell out "Seed".
   let seedCol: number | null = null;
   for (let col = 0; col < headerRow.length; col++) {
     if (/^seed$/i.test((headerRow[col] || "").trim())) {
@@ -234,18 +224,13 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
       current.progressionCodes.push(progression);
       // Read unconditionally (not gated behind `if (cell)` below) for the
       // same reason progressionCodes above is: a pool seeded from
-      // still-unresolved Progression results can have an EMPTY slot 0
-      // (e.g. its 1st-place seat reads "3rd of Pool 2," not a real name
-      // yet) while its later slots already hold real bye-seeded players --
-      // confirmed against real sheet data (Pool L2: slots 0-1 are still
-      // progression placeholders, slots 2-3 already have real names).
-      // Gating this behind `cell` meant a pool in exactly that shape could
-      // never read Finished=TRUE from the sheet at all, no matter what was
-      // actually written there -- silently breaking every finished-gated
-      // feature for that pool forever: the Final/Live status pill,
-      // "Colored Placements upon Finalization" row tinting, and
-      // advancing/eliminated name coloring. Root cause of a real reported
-      // bug ("color placements stopped working").
+      // still-unresolved Progression results can have an empty slot 0
+      // while its later slots already hold real bye-seeded players.
+      // Gating this behind `cell` meant such a pool could never read
+      // Finished=TRUE at all, silently breaking every finished-gated
+      // feature for it: the Final/Live status pill, "Colored Placements
+      // upon Finalization" row tinting, and advancing/eliminated name
+      // coloring.
       if (slotIndex === 0 && finishedCol !== null) {
         current.finished = /^true$/i.test((row[finishedCol] || "").trim());
       }
@@ -323,21 +308,15 @@ export function topScoreRanks(pool: ParsedPool): Map<number, number> {
 }
 
 /** Classifies a Final Ranking cell's background color as "advancing"
- * (green) or "eliminated" (red) by HUE, not raw channel dominance --
- * confirmed as a real bug: a channel-dominance check (is green clearly
- * bigger than red and blue by some margin) fails on Google Sheets' own
- * default PASTEL green/red fill presets (e.g. their "light green 3"
- * swatch, ~rgb(217,234,211) -- green is barely bigger than red there,
- * nowhere near a fixed dominance margin), since a pale and a saturated
- * shade of the same color share roughly the same hue but very different
- * channel gaps. Hue is robust to exactly that kind of lightness/
- * saturation variation, so this reads correctly whether the sheet uses a
- * bold or a pastel swatch. Near-gray/white/unset cells (very low
- * saturation -- every channel close together) are excluded up front so a
- * faint zebra-stripe tint or a blank cell never misclassifies. Shared by
- * every place that reads pool advancement -- the gauntlet-pools overlay,
- * the pool-results overlay, and the Matches tab's own live table -- so
- * they can never drift into disagreeing about who's actually advancing. */
+ * (green) or "eliminated" (red) by hue, not raw channel dominance -- a
+ * channel-dominance check fails on Google Sheets' own default pastel
+ * fill presets (e.g. "light green 3", ~rgb(217,234,211), where green is
+ * barely bigger than red), since a pale and a saturated shade of the
+ * same color share roughly the same hue but very different channel
+ * gaps. Near-gray/white/unset cells are excluded up front so a faint
+ * zebra-stripe tint or a blank cell never misclassifies. Shared by
+ * every place that reads pool advancement (gauntlet-pools, pool-results,
+ * the Matches tab) so they can never drift into disagreement. */
 export function classifyRankingColor(
   cellColor: CellColor | null | undefined,
 ): "advancing" | "eliminated" | null {
@@ -357,24 +336,17 @@ export function classifyRankingColor(
   return null;
 }
 
-/** Winner/loser status for a finished pool, keyed by player NAME rather
- * than row position -- confirmed against real sheet data that Final
- * Ranking is a rank-summary list (row 1's cell names whoever placed 1st
- * by score in this pool, row 2's names 2nd, and so on), not "this row's
- * own result." A pool's rows stay in their original seed/entry order
- * rather than being re-sorted by score, so a row's Final Ranking TEXT
- * very often names a completely different player than whoever's printed
- * in that same row's own player-name column -- real example: row 1 is
- * "DaUTF" (own score is 2nd-highest in the pool), but row 1's Final
- * Ranking cell reads "Tibby," the pool's actual highest scorer. The
- * COLOR (bright green = a winning rank, bright red = a losing rank)
- * lives on that same cell and still means exactly what it always meant
- * -- but it describes the RANK SLOT that row represents, not whichever
- * player happens to share that row, so the player it actually applies to
- * is whoever's name is written there as text. Confirmed live: coloring
- * by row position instead of by this text attributes wins/losses to the
- * wrong players entirely (a pool's actual top scorer showing eliminated,
- * its actual bottom scorer showing advancing) once rows aren't already
+/** Winner/loser status for a finished pool, keyed by player name rather
+ * than row position. Final Ranking is a rank-summary list (row 1's cell
+ * names whoever placed 1st by score, row 2's names 2nd, and so on), not
+ * "this row's own result" -- a pool's rows stay in their original seed/
+ * entry order rather than being re-sorted by score, so a row's Final
+ * Ranking text very often names a different player than whoever's
+ * printed in that same row's own player-name column. The color (green =
+ * winning rank, red = losing rank) lives on that same cell and describes
+ * the rank slot the row represents, not whichever player happens to
+ * share that row -- coloring by row position instead of by this text
+ * attributes wins/losses to the wrong players once rows aren't already
  * in score order. Callers should still gate on `pool.finished` before
  * attributing a specific NAME to a colored slot -- a Final Ranking cell
  * can be (and often is) pre-colored by template before any real name is
@@ -387,10 +359,9 @@ export function finalRankingStatusByName(
   const byName = new Map<string, "advancing" | "eliminated">();
   for (const row of pool.rows) {
     const status = classifyRankingColor(colors[row.rowIndex]);
-    // Case-insensitive key -- confirmed against real data that the same
-    // player's name isn't always typed with matching capitalization in
-    // both places (real example: roster column has "jabronski," that
-    // same pool's Final Ranking column names them "Jabronski").
+    // Case-insensitive key -- a player's name isn't always typed with
+    // matching capitalization in both the roster and Final Ranking
+    // columns.
     const name = row.finalRanking.trim().toLowerCase();
     if (status && name) byName.set(name, status);
   }

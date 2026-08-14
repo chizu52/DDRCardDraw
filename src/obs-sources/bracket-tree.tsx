@@ -93,17 +93,12 @@ export function BracketTreeOverlay() {
   const apiKey = params.get("apiKey");
 
   // A dedicated client scoped to this key, independent of the app's own
-  // startgg-gql/index.ts urqlClient (which reads its token from this
-  // device's localStorage atom) -- same reasoning as pool-results.tsx's
-  // apiKey/spreadsheetId: an OBS browser source is a separate, isolated
-  // profile, so credentials are baked into the URL rather than relied on
-  // from local storage. No cacheExchange -- this overlay always wants a
-  // fresh read (see the network-only reexecuteQuery below), so a
-  // normalized cache adds nothing but risk: it needs __typename on every
-  // object to normalize entities correctly, which PhaseBracketDoc doesn't
-  // request (confirmed this the hard way -- with graphcache in place, a
-  // response missing __typename silently resolved as "phase not found"
-  // instead of erroring loudly).
+  // startgg-gql/index.ts urqlClient -- credentials are baked into the
+  // URL rather than relied on from local storage (an OBS browser source
+  // is a separate, isolated profile). No cacheExchange: PhaseBracketDoc
+  // doesn't request __typename on every object, so a normalized cache
+  // silently resolved a response as "phase not found" instead of
+  // erroring loudly.
   const client = useMemo(() => {
     if (!apiKey) return null;
     return new Client({
@@ -267,22 +262,18 @@ function BracketTreeInner({ phaseId }: { phaseId: string }) {
 
 // How many rounds of "fetch whatever unresolved phantom ids the last
 // round turned up" to run before giving up -- a real bye-collapse chain
-// (confirmed one level deep for Stage 5) shouldn't ever need many hops,
-// this is purely a safety cap against a pathological/cyclical data shape
-// looping forever, not a limit expected to actually bind in practice.
+// shouldn't ever need many hops; this is a safety cap against a
+// pathological/cyclical data shape looping forever.
 const MAX_PHANTOM_HOPS = 5;
 
 /** Fetches whatever bye-collapse phantom sets (see PhantomSet's own doc
  * in bracket-layout.ts) this phase's real sets reference via a "set"
  * prereq id that never came back in the main phase.sets query -- start
- * .gg only materializes REAL sets there; a still-unstarted bracket's
+ * .gg only materializes real sets there; a still-unstarted bracket's
  * deeper structural rounds are only reachable one `set(id:)` lookup at a
- * time (confirmed directly: Stage 5's losers round 1 needed exactly
- * this to reach the real promotion underneath a bye-only phantom match).
- * Loops via collectUnresolvedSetPrereqIds, since a freshly-fetched
- * phantom set can itself reference another, deeper phantom id -- not
- * assumed to always bottom out in exactly one hop, just bounded by
- * MAX_PHANTOM_HOPS so a pathological chain can't loop forever. */
+ * time. Loops via collectUnresolvedSetPrereqIds, since a freshly-fetched
+ * phantom set can itself reference another, deeper phantom id, bounded
+ * by MAX_PHANTOM_HOPS so a pathological chain can't loop forever. */
 function usePhantomSets(
   sets: (StartggSet | null)[],
   setsById: SetsById,
@@ -320,13 +311,11 @@ function usePhantomSets(
 
 /** One GraphQL request per hop, aliasing every id in that hop's batch
  * together (s0, s1, ...) instead of one request per id. A raw query
- * string (not a static gql document -- there's no fixed set of ids to
- * write a document for ahead of time) built fresh per call; urql's
- * Client.query accepts a plain string directly (DocumentInput = string
- * | DocumentNode | TypedDocumentNode, confirmed against @urql/core's own
- * type declarations), so no gql-tag parsing dance is needed. Requests
- * only the minimal fields resolveThroughByes/describeEmptySlot/
- * incomingProgressionLabel actually read -- not a full Set. */
+ * string, not a static gql document -- there's no fixed set of ids to
+ * write a document for ahead of time, and urql's Client.query accepts a
+ * plain string directly. Requests only the minimal fields
+ * resolveThroughByes/describeEmptySlot/incomingProgressionLabel
+ * actually read, not a full Set. */
 async function fetchPhantomSets(
   client: Client,
   ids: string[],
@@ -358,9 +347,7 @@ async function fetchPhantomSets(
 const BOX_WIDTH = 200;
 // Must comfortably clear a live match's elapsed-timer pill, which
 // extends 8px (gap) + LIVE_TIMER_WIDTH (58px) = 66px past its own box's
-// right edge -- 56 wasn't enough (confirmed live: the timer pill visibly
-// overlapped the next column's box), so this needs to be bigger than
-// that 66px with real room to spare, not just barely past it.
+// right edge -- needs real room to spare beyond that 66px.
 const COL_GAP = 90;
 // The gap between the header text and a row-0 match's LIVE/NEXT badge is
 // controlled by the two elements' relative y offsets (see the header
@@ -401,13 +388,9 @@ function BracketTree({
     boxHeight: MATCH_BOX_HEIGHT,
   });
   // Every column with a live match in it -- a Set, not a single index,
-  // since more than one match can be live at once in DIFFERENT columns
-  // (confirmed directly against real Stage 2 data: "Losers Round 1" and
-  // "Losers Quarter-Final" were both live simultaneously). Each one's
-  // header gets a soft glow so "what round are we in" reads at a glance
-  // instead of needing to scan every column for the live match yourself
-  // -- findIndex's old single-column version silently dropped every
-  // live column after the first.
+  // since more than one match can be live at once in different columns.
+  // Each one's header gets a soft glow so "what round are we in" reads
+  // at a glance.
   const liveCols = new Set(
     side.columns
       .map((col, i) => (col.some((m) => isSetLive(m.set)) ? i : -1))
@@ -511,15 +494,12 @@ function BracketTree({
                     />
                   </rect>
                 )}
-                {/* y is HEADER_HEIGHT - 26, not just "- 12", specifically
-                    so it does NOT scale 1:1 with the LIVE/NEXT badge's own
-                    y (HEADER_HEIGHT - BADGE_HEIGHT/2, see MatchBox) --
-                    when both offsets were simple HEADER_HEIGHT deltas, the
-                    gap between them stayed exactly 0 no matter how big
-                    HEADER_HEIGHT got (confirmed via getBoundingClientRect:
-                    36, 44, and 50 all measured a 0px gap). This one has to
-                    sit further from HEADER_HEIGHT's own baseline than the
-                    badge does, not just closer to it. */}
+                {/* y is HEADER_HEIGHT - 26, not just "- 12" -- if both
+                    this and the LIVE/NEXT badge's own y (HEADER_HEIGHT -
+                    BADGE_HEIGHT/2, see MatchBox) are simple HEADER_HEIGHT
+                    deltas, the gap between them stays 0 regardless of
+                    HEADER_HEIGHT. This one sits further from
+                    HEADER_HEIGHT's own baseline than the badge does. */}
                 <text
                   x={x}
                   y={HEADER_HEIGHT - 26}
@@ -617,17 +597,13 @@ function MatchBox({
   // directly by seed, not by a prior same-phase set) -- everywhere else,
   // an empty slot is always fed by a same-phase connector instead.
   const isEntryColumn = match.col === 0;
-  // One independent pill per PROMOTED PLAYER, not per box -- if both
-  // slots in a match are genuinely promoted, both get their own pill and
-  // their own straight (never diagonal) line at their own row, duplicated
-  // rather than merged into one. Strictly confirmed data only
-  // (incomingProgressionLabel) -- no fallback for a still-undetermined
-  // slot, deliberately (see that function's own doc comment for why
-  // every fallback tried here turned out wrong). setsById/phantomSetsById
+  // One independent pill per promoted player, not per box -- if both
+  // slots in a match are genuinely promoted, both get their own pill
+  // and their own straight (never diagonal) line at their own row.
+  // Strictly confirmed data only (incomingProgressionLabel), no
+  // fallback for a still-undetermined slot. setsById/phantomSetsById
   // let this see through a losers-side bye-collapse chain to the real
-  // seed underneath (see resolveThroughByes) -- without them a slot fed
-  // by an unmaterialized phantom set just looks like an ordinary
-  // same-phase connector with nothing to show a pill for.
+  // seed underneath (see resolveThroughByes).
   const row0Label = isEntryColumn
     ? incomingProgressionLabel(
         slots[0],
@@ -912,21 +888,15 @@ function ElapsedTimerPill({
  * placement (incomingProgressionLabel), on the right for a winner/loser
  * that progresses out to a later phase (outgoingProgression). Connected
  * to the match box with a single plain dashed line, same idea as
- * start.gg's own dotted connector into/out of the pill (verified
- * directly against a real screenshot -- always one level line into one
- * pill, never split or angled toward a specific row).
+ * start.gg's own dotted connector into/out of the pill -- always one
+ * level line into one pill, never split or angled toward a specific row.
  *
- * The line spans from the box edge to the pill's OWN near edge (gap
+ * The line spans from the box edge to the pill's own near edge (gap
  * away from the box), not from the box edge to a point `gap` away that
- * happens to land inside the pill's own footprint -- an earlier version
- * did the latter (computed the line's far endpoint as a fixed offset
- * from edgeX without ever checking where the pill itself actually
- * started), which put the entire line underneath the pill's own opaque
- * rect, 100% hidden the whole time despite genuinely existing in the
- * DOM (confirmed the hard way: every "is the line drawn" check kept
- * saying yes, because it was -- just invisibly, under an opaque shape on
- * top of it). Rewritten so the pill's position is computed first, and
- * the line explicitly stops at its edge.
+ * happens to land inside the pill's own footprint -- that would put the
+ * entire line underneath the pill's own opaque rect, invisibly hidden
+ * despite genuinely existing in the DOM. The pill's position is
+ * computed first, and the line explicitly stops at its edge.
  *
  * `boxEdgeX` (defaults to `edgeX`) is where the line's OTHER end lands --
  * separate from `edgeX` because the left/incoming case positions the

@@ -24,22 +24,13 @@ import {
   LOCAL_FONT_FACE_CSS,
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
+import { BROADCAST_COLORS, statusPillStyle } from "./broadcast-theme";
 
-// Same dark broadcast-panel tokens gauntlet-pools.tsx/schedule.tsx use --
-// explicit user request to bring this overlay in line with those two
-// rather than staying on its own separate light/white Blueprint-table
-// look. Scope is colors/fonts/status-pill styling only (confirmed with
-// the user) -- no banner backdrop or title/icon header bar here, this
-// overlay keeps its existing single pool-title header bar, just
-// recolored.
+// Scope is colors/fonts/status-pill styling only -- no banner backdrop
+// or title/icon header bar here, this overlay keeps its existing
+// single pool-title header bar, just recolored.
 const COLORS = {
-  panel: "#1c2127",
-  border: "#3a3f49",
-  text: "#f6f7f9",
-  muted: "#9aa2ac",
-  mint: "#22c55e",
-  gold: "#efc75e",
-  coral: "#f0a868",
+  ...BROADCAST_COLORS,
   red: "#ef4444",
 };
 
@@ -69,12 +60,9 @@ type LoadState =
 
 export function PoolResultsOverlay() {
   const [params] = useSearchParams();
-  // Credentials now travel as one opaque `src` param (see
-  // sheets-connection-param.ts) rather than plain readable
-  // `apiKey`/`spreadsheetId` params -- explicit user request. Falls back
-  // to those old params directly when `src` isn't present so an OBS
-  // source already configured with the old-style URL (copied before this
-  // change) keeps working without needing to be re-copied/re-pasted.
+  // Credentials travel as one opaque `src` param (see
+  // sheets-connection-param.ts), falling back to plain `apiKey`/
+  // `spreadsheetId` params for an OBS source configured with the old URL.
   const decoded = decodeSheetsConnection(params.get("src"));
   const apiKey = decoded.apiKey ?? params.get("apiKey");
   const spreadsheetId = decoded.spreadsheetId ?? params.get("spreadsheetId");
@@ -215,14 +203,11 @@ export function PoolResultsOverlay() {
   );
 }
 
-// Dark broadcast-panel theme now, matching gauntlet-pools.tsx/
-// schedule.tsx (explicit user request) rather than the Matches tab's own
-// light Blueprint-table look this used to mirror -- same thStyle/tdStyle
-// layout and same header-color chip (colorToCss, shared from
-// sheets-export.ts) as before, just recolored. Row tier highlighting
-// (rowColorForRank) and the zebra-stripe fallback are untouched --
-// both are already low-opacity rgba() tints that blend correctly over
-// either a light or dark base, so nothing there needed to change.
+// Dark broadcast-panel theme, matching gauntlet-pools.tsx/schedule.tsx
+// -- same thStyle/tdStyle layout and header-color chip as before, just
+// recolored. Row tier highlighting and the zebra-stripe fallback are
+// untouched -- both are already low-opacity rgba() tints that blend
+// correctly over either a light or dark base.
 function PoolTable({
   pool,
   headerColor,
@@ -251,16 +236,11 @@ function PoolTable({
     ? finalRankingStatusByName(pool, rankingColors)
     : new Map<string, "advancing" | "eliminated">();
 
-  // Standings sorted by current score, highest first -- explicit user
-  // request ("reorganize the players and their rows by highest score to
-  // lowest") so this reads as a live leaderboard instead of staying in
-  // original seed/entry order. Array.prototype.sort is stable per spec,
-  // so ties keep their original relative order -- same tie-break
-  // convention topScoreRanks already documents ("ties broken by row
-  // order"). Rank/tier lookups below still key off each row's ORIGINAL
-  // index (rowIdx, into pool.rows) -- unrelated to this sort, ranks was
-  // already built from that same original index space, so nothing else
-  // needs to change to stay correct.
+  // Standings sorted by current score, highest first, so this reads as
+  // a live leaderboard instead of staying in original seed/entry order.
+  // Array.prototype.sort is stable, so ties keep their original
+  // relative order. Rank/tier lookups below still key off each row's
+  // original index (rowIdx, into pool.rows), unrelated to this sort.
   const sortedRows = pool.rows
     .map((row, rowIdx) => ({
       row,
@@ -384,14 +364,9 @@ function PoolTable({
                   <span
                     style={{
                       ...playerNameStyle,
-                      // Advancing used to render in COLORS.mint (green) --
-                      // explicit user request to switch that to plain
-                      // COLORS.text (white) instead, same as
-                      // gauntlet-pools.tsx's identical convention (kept in
-                      // sync, same request applied to both overlays). Only
-                      // "eliminated" still shifts color (dims to
-                      // COLORS.muted); a winning player just reads as
-                      // normal/full brightness now, no separate accent.
+                      // Only "eliminated" shifts color (dims to
+                      // COLORS.muted); advancing renders as plain
+                      // full-brightness text, same as gauntlet-pools.tsx.
                       color:
                         status === "eliminated" ? COLORS.muted : COLORS.text,
                     }}
@@ -476,24 +451,6 @@ const headerBarStyle: React.CSSProperties = {
   justifyContent: "space-between",
   alignItems: "center",
   gap: "16px",
-};
-
-// Same solid-pill treatment as gauntlet-pools.tsx's own statusPillStyle
-// -- not Blueprint's Tag `intent`/`round`, whose barely-tinted look
-// washes out over an arbitrary sheet-set header color the same way it
-// did there. See this overlay's own two call-site colors (COLORS.muted
-// for Final, COLORS.red for Live) in PoolTable above.
-const statusPillStyle: React.CSSProperties = {
-  display: "inline-block",
-  padding: "5px 16px",
-  borderRadius: 999,
-  fontFamily: BODY_FONT_FAMILY,
-  fontSize: "0.75em",
-  fontWeight: 700,
-  textTransform: "uppercase",
-  letterSpacing: "0.03em",
-  color: COLORS.panel,
-  whiteSpace: "nowrap",
 };
 
 const thStyle: React.CSSProperties = {
