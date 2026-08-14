@@ -803,19 +803,6 @@ function GauntletPoolsSettingsSection() {
     }
   }, [savedTitle, titleDirty]);
 
-  // Explicit divider list, room-synced -- see event.slice.ts's own
-  // gauntletPoolsDividers doc for why this is a plain list (not a
-  // per-pool "group" tag) and why it's keyed by pool-set NUMBER, not
-  // pool title text. New-divider fields are local/uncontrolled-ish
-  // state, cleared back to blank once Add actually dispatches -- no
-  // buffer-then-Save pattern needed here (unlike the title field above)
-  // since adding a divider is itself already a single, deliberate,
-  // explicit action.
-  const dividers = useAppState((s) => s.event.gauntletPoolsDividers);
-  const [newDividerNumber, setNewDividerNumber] = useState<number | "">("");
-  const [newDividerLabel, setNewDividerLabel] = useState("");
-  const canAddDivider = newDividerNumber !== "" && newDividerLabel.trim();
-
   return (
     <Card elevation={1} className={styles.settingsSection}>
       {/* Same minimal-icon-in-the-heading treatment as the other three
@@ -898,83 +885,129 @@ function GauntletPoolsSettingsSection() {
           a plain number ("insert before pool #6") rather than needing
           this Settings section to have any real pool titles loaded
           (it doesn't -- this section isn't Sheets-connected the way
-          the Matches tab is). */}
-      <FormGroup label="Dividers" helperText='e.g. "Day 2" before pool #6 -- applies to both the Winners and Losers columns that share pool #6.'>
-        {dividers.length > 0 && (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.5rem",
-              marginBottom: "0.75rem",
-            }}
-          >
-            {dividers.map((d) => (
-              <div
-                key={d.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <span style={{ minWidth: 110 }}>
-                  Before Pool #{d.beforeSetNumber}
-                </span>
-                <span style={{ flex: 1, fontStyle: "italic" }}>
-                  "{d.label}"
-                </span>
-                <Button
-                  icon={<Trash />}
-                  minimal
-                  onClick={() =>
-                    dispatch(
-                      eventSlice.actions.removeGauntletPoolsDivider(d.id),
-                    )
-                  }
-                />
-              </div>
-            ))}
-          </div>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <NumericInput
-            placeholder="Pool #"
-            value={newDividerNumber}
-            min={1}
-            buttonPosition="none"
-            style={{ width: "70px" }}
-            onValueChange={(n, valueAsString) =>
-              setNewDividerNumber(valueAsString === "" ? "" : n)
-            }
-          />
-          <InputGroup
-            placeholder="Label, e.g. Day 2"
-            value={newDividerLabel}
-            onChange={(e) => setNewDividerLabel(e.target.value)}
-            style={{ flex: 1 }}
-          />
-          <Button
-            icon={<Add />}
-            disabled={!canAddDivider}
-            onClick={() => {
-              if (!canAddDivider) return;
-              dispatch(
-                eventSlice.actions.addGauntletPoolsDivider({
-                  beforeSetNumber: newDividerNumber as number,
-                  label: newDividerLabel.trim(),
-                }),
-              );
-              setNewDividerNumber("");
-              setNewDividerLabel("");
-            }}
-          >
-            Add
-          </Button>
-        </div>
-      </FormGroup>
+          the Matches tab is). Its own component (not inlined here), same
+          reason ScheduleDayEditor is split out -- it owns a real chunk
+          of local buffered state. */}
+      <GauntletPoolsDividerEditor />
     </Card>
   );
+}
+
+/** Buffer-locally-then-Submit editor for the gauntlet-pools overlay's
+ * explicit dividers -- explicit user request to match ScheduleDayEditor's
+ * own pattern (edit existing rows in place, don't go live until Submit)
+ * rather than the previous "read-only list + always-immediate Add"
+ * treatment, which had no way to fix a typo in an already-added row
+ * short of deleting and re-adding it, and pushed every add straight to
+ * the room the instant the button was clicked. See ScheduleDayEditor's
+ * own comments (savedSchedule/dirty/the resync effect) for the full
+ * reasoning this mirrors -- not repeated in full here. */
+function GauntletPoolsDividerEditor() {
+  const dispatch = useAppDispatch();
+  const savedDividers = useAppState((s) => s.event.gauntletPoolsDividers);
+  const [dividers, setDividers] = useState<DividerRow[]>(savedDividers);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!dirty) {
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setDividers(savedDividers);
+    }
+  }, [savedDividers, dirty]);
+
+  function updateRow(index: number, patch: Partial<DividerRow>) {
+    setDividers((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
+    setDirty(true);
+  }
+
+  function addRow() {
+    setDividers((prev) => [...prev, emptyDividerRow()]);
+    setDirty(true);
+  }
+
+  function removeRow(index: number) {
+    setDividers((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  }
+
+  function submit() {
+    dispatch(eventSlice.actions.setGauntletPoolsDividers(dividers));
+    setDirty(false);
+  }
+
+  return (
+    <FormGroup
+      label="Dividers"
+      helperText='e.g. "Day 2" before pool #6 -- applies to both the Winners and Losers columns that share pool #6. Edits do not go out to the overlay until Submit is pressed.'
+    >
+      {dividers.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.5rem",
+            marginBottom: "0.75rem",
+          }}
+        >
+          {dividers.map((row, i) => (
+            <div
+              key={row.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+              }}
+            >
+              <span style={{ whiteSpace: "nowrap" }}>Before Pool #</span>
+              <NumericInput
+                value={row.beforeSetNumber}
+                min={1}
+                clampValueOnBlur
+                buttonPosition="none"
+                style={{ width: "70px" }}
+                onValueChange={(n, valueAsString) => {
+                  if (valueAsString !== "") {
+                    updateRow(i, { beforeSetNumber: n });
+                  }
+                }}
+              />
+              <InputGroup
+                placeholder="Label, e.g. Day 2"
+                value={row.label}
+                onChange={(e) => updateRow(i, { label: e.target.value })}
+                style={{ flex: 1 }}
+              />
+              <Button icon={<Trash />} minimal onClick={() => removeRow(i)} />
+            </div>
+          ))}
+        </div>
+      )}
+      <ButtonGroup>
+        <Button icon={<Add />} onClick={addRow}>
+          Add divider
+        </Button>
+        <Button
+          disabled={!dirty}
+          intent={dirty ? "primary" : undefined}
+          onClick={submit}
+        >
+          Submit
+        </Button>
+      </ButtonGroup>
+    </FormGroup>
+  );
+}
+
+interface DividerRow {
+  id: string;
+  beforeSetNumber: number;
+  label: string;
+}
+
+function emptyDividerRow(): DividerRow {
+  return { id: nanoid(5), beforeSetNumber: 1, label: "" };
 }
 
 

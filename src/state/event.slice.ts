@@ -401,29 +401,22 @@ export const eventSlice = createSlice({
         delete state.gauntletPoolsUpcoming[action.payload.title];
       }
     },
-    // id generated here (prepare), not left to the caller -- same
-    // pattern the cabs' own add-cab action already uses (see its own
-    // `nanoid(5)` above) so dashboard.tsx doesn't need its own id
-    // scheme just for this one list.
-    addGauntletPoolsDivider: {
-      prepare(divider: { beforeSetNumber: number; label: string }) {
-        return { payload: { ...divider, id: nanoid(5) } };
-      },
-      reducer(
-        state,
-        action: PayloadAction<{
-          id: string;
-          beforeSetNumber: number;
-          label: string;
-        }>,
-      ) {
-        state.gauntletPoolsDividers.push(action.payload);
-      },
-    },
-    removeGauntletPoolsDivider(state, action: PayloadAction<string>) {
-      state.gauntletPoolsDividers = state.gauntletPoolsDividers.filter(
-        (d) => d.id !== action.payload,
-      );
+    // Whole-list replace, same buffer-locally-then-submit pattern as
+    // setDaySchedule above -- dashboard.tsx's divider editor stages
+    // add/edit/remove locally (its own row ids minted client-side via
+    // nanoid, same determinism reasoning as prepare() elsewhere in this
+    // file: an id decided once, before dispatch, then carried in the
+    // payload, replays identically everywhere) and sends the entire
+    // buffer here in one Submit, rather than dispatching each add/edit/
+    // remove live as separate actions the moment the operator touches a
+    // field.
+    setGauntletPoolsDividers(
+      state,
+      action: PayloadAction<
+        { id: string; beforeSetNumber: number; label: string }[]
+      >,
+    ) {
+      state.gauntletPoolsDividers = action.payload;
     },
     // Per-day (see scheduleStatus's own doc) -- staged alongside that
     // day's own rows in dashboard.tsx's ScheduleDayEditor and sent by

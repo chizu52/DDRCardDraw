@@ -221,8 +221,9 @@ export function GauntletPoolsOverlay() {
   // automatic default it used to be.
   const upcomingPools = useAppState((s) => s.event.gauntletPoolsUpcoming);
   // Explicit operator-placed dividers (e.g. "Day 2" before pool #6) --
-  // see event.slice.ts's own gauntletPoolsDividers doc and the
-  // dividerPositions useLayoutEffect below for how these get rendered.
+  // see event.slice.ts's own gauntletPoolsDividers doc, and columnFor's
+  // own comment further down for how a divider claims a real grid
+  // column of its own.
   const dividers = useAppState((s) => s.event.gauntletPoolsDividers);
   // This overlay's own header title/icon -- same room-synced,
   // dashboard-editable pattern as schedule.tsx's subtitle/icon (see
@@ -543,65 +544,6 @@ export function GauntletPoolsOverlay() {
     .filter((p) => !LOSER_POOL_TITLE.test(p.title))
     .sort((a, b) => poolSortKey(a.title) - poolSortKey(b.title));
 
-  // Explicit operator-placed dividers (e.g. "Day 2" before pool #6) --
-  // each one anchors to whichever pool CURRENTLY has that set number
-  // (winner or loser side, doesn't matter which -- pool-set numbers
-  // share their own column position across both, see columnFor below)
-  // and measures its real DOM position, same technique as panX's own
-  // effect above. Rendered as absolutely-positioned overlay children of
-  // the grid (see gridStyle's own `position: relative`) rather than
-  // real inserted grid columns -- avoids needing to renumber every
-  // later pool's own column index around each divider. Deliberately
-  // NOT counter-transformed like the title bar/section labels above --
-  // a divider marks a specific point IN the pool sequence, so it should
-  // pan along with the content it's dividing, not stay pinned to the
-  // viewport. A configured divider whose set number doesn't exist in
-  // the currently loaded sheet is silently skipped, not rendered as a
-  // broken/floating line -- same "don't guess" convention this file's
-  // other placeholder logic already follows.
-  const [dividerPositions, setDividerPositions] = useState<
-    { id: string; label: string; left: number }[]
-  >([]);
-  // useCallback (not inlined in a single effect), same reason as
-  // recomputePan above -- so it can also be re-run by the SAME
-  // ResizeObserver down in that effect whenever panEl's real size
-  // changes for any reason this hook's own [dividers, pools] dependency
-  // array can't see coming (e.g. the same async font-swap case).
-  const recomputeDividerPositions = useCallback(() => {
-    const panEl = panRef.current;
-    if (!panEl) return;
-    const positions = dividers
-      .map((d) => {
-        const anchorPool = pools.find(
-          (p) => poolSetNumber(p.title) === d.beforeSetNumber,
-        );
-        if (!anchorPool) return null;
-        const el = panEl.querySelector<HTMLElement>(
-          `[data-pool-title="${CSS.escape(anchorPool.title)}"]`,
-        );
-        if (!el) return null;
-        return { id: d.id, label: d.label, left: el.offsetLeft };
-      })
-      .filter(
-        (p): p is { id: string; label: string; left: number } => p !== null,
-      );
-    setDividerPositions(positions);
-  }, [dividers, pools]);
-  useLayoutEffect(() => {
-    recomputeDividerPositions();
-  }, [recomputeDividerPositions]);
-  // Own ResizeObserver, separate from recomputePan's -- this callback
-  // isn't in scope up where that one is declared (it depends on `pools`,
-  // computed later than panX's own effects). See recomputePan's own
-  // comment for why watching panEl's real size matters at all.
-  useEffect(() => {
-    const panEl = panRef.current;
-    if (!panEl) return;
-    const observer = new ResizeObserver(() => recomputeDividerPositions());
-    observer.observe(panEl);
-    return () => observer.disconnect();
-  }, [recomputeDividerPositions]);
-
   if (!apiKey || !spreadsheetId) {
     const missing = [!apiKey && "apiKey", !spreadsheetId && "spreadsheetId"]
       .filter(Boolean)
@@ -675,9 +617,81 @@ export function GauntletPoolsOverlay() {
     (a, b) => a - b,
   );
   const columnIndexForNumber = new Map(allNumbers.map((n, i) => [n, i]));
-  const columnFor = (pool: ParsedPool) =>
-    1 + columnIndexForNumber.get(poolSetNumber(pool.title))! * 2;
-  const destCol = 1 + allNumbers.length * 2;
+  // Explicit operator-placed dividers -- now real grid columns (see
+  // gridColumnTemplate below), not the absolutely-positioned/DOM-
+  // measured overlay this used before. That approach anchored a
+  // divider's own `top: -56` to reach up above the grid's first row and
+  // cover the title bar too, guessing at how far was "enough" -- when
+  // the guess came up short (or overshot into territory the scroll
+  // container's own overflow clipped), the divider visibly ran off the
+  // top edge. A real grid column can't do that: its own height IS the
+  // grid's height, spanning every row exactly like the section labels'
+  // `1 / -1` gridColumn already does horizontally, so there's no
+  // separate measurement to get wrong. A configured divider whose set
+  // number doesn't exist in the currently loaded sheet is silently
+  // skipped, not rendered as a broken/floating column -- same "don't
+  // guess" convention this file's other placeholder logic already
+  // follows. Sorted by each divider's own resolved column position (not
+  // creation order) so two dividers always render left-to-right in the
+  // same order as the pools they sit between.
+  const validDividers = dividers
+    .map((d) => ({
+      ...d,
+      poolIdx: columnIndexForNumber.get(d.beforeSetNumber),
+    }))
+    .filter(
+      (d): d is typeof d & { poolIdx: number } => d.poolIdx !== undefined,
+    )
+    .sort((a, b) => a.poolIdx - b.poolIdx);
+  // How many divider tracks land at or before a given pool-number index
+  // -- every pool/arrow pair from that point on has to shift right by
+  // this many extra tracks. `<=`, not `<`: a divider "before set number
+  // 6" has to push pool 6's own column over too, not just numbers after
+  // it.
+  const dividerTracksBefore = (poolIdx: number) =>
+    validDividers.filter((d) => d.poolIdx <= poolIdx).length;
+  const columnFor = (pool: ParsedPool) => {
+    const poolIdx = columnIndexForNumber.get(poolSetNumber(pool.title))!;
+    return 1 + poolIdx * 2 + dividerTracksBefore(poolIdx);
+  };
+  // Each divider's own column -- immediately before its target pool's
+  // (already-shifted) column, i.e. exactly where that pool would have
+  // started without this divider's own extra track. `i`, this divider's
+  // own rank within the sorted list above, is exactly how many divider
+  // tracks land strictly before it (every earlier entry has a poolIdx
+  // <= this one's by construction, since the list is sorted).
+  const dividerColumns = new Map(
+    validDividers.map((d, i) => [d.id, 1 + d.poolIdx * 2 + i]),
+  );
+  const destCol = 1 + allNumbers.length * 2 + validDividers.length;
+  // 64px visible box, wide enough to hold the vertically-oriented label
+  // text (see the divider's own render below) with real breathing room
+  // on both sides, explicit user request for "a thick column" over the
+  // previous 3px hairline rule. DIVIDER_TRACK_WIDTH is wider still --
+  // gridStyle's own columnGap (2px) is deliberately tight everywhere
+  // else (tuned through several explicit follow-ups for the arrow chips
+  // specifically), too tight on its own for the divider to read as a
+  // separate, deliberate break rather than crammed against its
+  // neighboring pool -- explicit user follow-up ("add some space
+  // between the divider and the pools"). Extra track width beyond the
+  // visible box becomes margin on the divider's own item below, so only
+  // the divider's own gap changes, not columnGap globally (which would
+  // also pull every arrow chip away from its pool box again).
+  const DIVIDER_BOX_WIDTH = 64;
+  const DIVIDER_SIDE_MARGIN = 16;
+  const DIVIDER_TRACK_WIDTH = DIVIDER_BOX_WIDTH + DIVIDER_SIDE_MARGIN * 2;
+  const gridColumnTemplate = (() => {
+    const tracks: string[] = [];
+    for (let i = 0; i < allNumbers.length; i++) {
+      for (const d of validDividers) {
+        if (d.poolIdx === i) tracks.push(`${DIVIDER_TRACK_WIDTH}px`);
+      }
+      tracks.push("minmax(380px, max-content)");
+      tracks.push("150px");
+    }
+    tracks.push("240px");
+    return tracks.join(" ");
+  })();
   // Row 1 is the title bar now (moved into this same grid, see its own
   // call site's comment for why), row 2 is the Winners label -- both
   // used to be "row 1" back when the title bar lived in its own,
@@ -732,7 +746,101 @@ export function GauntletPoolsOverlay() {
               local-fonts.ts's own comment on this. */}
           <style>{LOCAL_FONT_FACE_CSS}</style>
       <div style={cardContentStyle}>
-        <div style={gridStyle(allNumbers.length, totalRows)}>
+        <div style={gridStyle(gridColumnTemplate, totalRows)}>
+          {/* Explicit operator-placed dividers -- rendered FIRST (not
+              last) so normal DOM paint order puts them BEHIND the title
+              bar/section labels/pool boxes below, in case an early
+              divider's own column ever falls within one of those wider
+              elements' own `1 / -1` gridColumn box (their justifySelf:
+              "start" sizes them to their own text content, not the full
+              grid width, so this is mostly a defensive ordering, not a
+              layout requirement). A real grid item now (gridColumn from
+              dividerColumns above), spanning every POOL row (row 3, the
+              first winner row, through totalRows, the last loser row --
+              NOT the full `1 / -1`) since Winners and Losers pools
+              sharing a set number typically happen around the same time.
+              Deliberately excludes the title bar/Winners label/Losers
+              label rows above and around it now -- explicit user
+              follow-up ("adjust the column's length so it goes just a
+              tiny bit past above the winners and just below the losers
+              pools"): spanning all the way up through the title bar (the
+              original, full-height treatment) read as covering far more
+              than just the bracket the divider is actually marking.
+              marginTop/marginBottom below bleed the box a small amount
+              past even those exact row boundaries -- negative margin,
+              not a wider row-span, so the overhang is a fixed, small
+              amount regardless of how tall row 2's own marginTop:128 gap
+              (see the Winners label's own comment) happens to be, rather
+              than scaling with it the way spanning an entire extra row
+              would. Explicit user request for a thick column (not the
+              previous 3px hairline rule) with its label readable running
+              down the column itself, rather than a small pill floating
+              near the top -- writingMode below turns the label sideways,
+              centered in the column both ways so it reads as one clean
+              vertical run regardless of how tall the grid ends up being.
+              Styled to match boxStyle exactly (COLORS.panel fill, 1px
+              COLORS.border, 18px radius) -- explicit user follow-up
+              ("stylize the column so it fits better along with the rest
+              of the overlay"): the first pass's flat COLORS.dim fill
+              with no border read as a foreign gray slab dropped next to
+              everything else's dark-panel-plus-border treatment, rather
+              than one of this overlay's own panels. Centering is
+              explicit on both the flex container AND the label span
+              itself (belt-and-suspenders, explicit follow-up too --
+              "center the value as well"): a writing-mode: vertical-rl
+              span is an inline box by default, which can carry baseline-
+              related slack a flex container's own cross-axis centering
+              doesn't fully cancel out, so `display: "block"` plus
+              `textAlign: "center"` on the span removes that ambiguity
+              rather than trusting the parent alone. */}
+          {validDividers.map((d) => (
+            <div
+              key={d.id}
+              style={{
+                gridColumn: dividerColumns.get(d.id),
+                gridRow: `3 / ${totalRows + 1}`,
+                // Vertical: negative, for the small overhang past the
+                // pool rows (see this block's own comment above).
+                // Horizontal: positive, to actually shrink the box
+                // within DIVIDER_TRACK_WIDTH's own wider track -- a grid
+                // item defaults to justify-self: stretch, so without
+                // this the box was just stretching to fill the whole
+                // wider track, leaving the visible gap this was
+                // supposed to add at a bare 2px (gridStyle's own
+                // columnGap) either side, same as before the track was
+                // ever widened. Real bug, caught live: measured the
+                // actual rendered gap and got 2px back, not
+                // DIVIDER_SIDE_MARGIN.
+                margin: `-16px ${DIVIDER_SIDE_MARGIN}px`,
+                background: COLORS.panel,
+                border: `1px solid ${COLORS.border}`,
+                borderRadius: 18,
+                pointerEvents: "none",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "24px 0",
+              }}
+            >
+              <span
+                style={{
+                  display: "block",
+                  writingMode: "vertical-rl",
+                  transform: "rotate(180deg)",
+                  textAlign: "center",
+                  fontFamily: TITLE_FONT_FAMILY,
+                  fontWeight: 700,
+                  fontSize: "1.2em",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: COLORS.text,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {d.label}
+              </span>
+            </div>
+          ))}
           {/* Same header-bar treatment as schedule.tsx's own title panel
               (solid COLORS.panel fill, 3px white border, TITLE_FONT_FAMILY
               at the same 44px size) -- this overlay had no title/header
@@ -976,43 +1084,6 @@ export function GauntletPoolsOverlay() {
               advancing={loserFinalAdvancing}
             />
           )}
-          {/* Explicit operator-placed dividers -- see
-              dividerPositions' own comment above for how `left` gets
-              measured. Absolutely positioned against gridStyle's own
-              `position: relative`, spanning the grid's full height
-              (top:0/bottom:0) since Winners and Losers pools sharing a
-              set number typically happen around the same time. Not a
-              real grid item (no gridColumn/gridRow) -- deliberately
-              overlaid on top rather than participating in grid layout,
-              so it never affects any pool's own column sizing. */}
-          {dividerPositions.map((d) => (
-            <div
-              key={d.id}
-              style={{
-                position: "absolute",
-                left: d.left - 12,
-                top: -56,
-                bottom: 0,
-                width: 3,
-                background: COLORS.dim,
-                pointerEvents: "none",
-              }}
-            >
-              <span
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 10,
-                  whiteSpace: "nowrap",
-                  ...statusPillStyle,
-                  backgroundColor: COLORS.dim,
-                  color: COLORS.text,
-                }}
-              >
-                {d.label}
-              </span>
-            </div>
-          ))}
         </div>
       </div>
         </div>
@@ -1915,8 +1986,11 @@ const titleBarStyle: React.CSSProperties = {
   color: COLORS.text,
 };
 
-// `numColumns` is however many distinct set numbers exist across BOTH
-// sides (see allNumbers) -- (pool, arrow) repeated `numColumns` times,
+// `gridTemplateColumns` is built by the caller (GauntletPoolsOverlay's
+// own gridColumnTemplate) -- (pool, arrow) repeated once per distinct
+// set number across BOTH sides (see allNumbers), with a fixed-width
+// divider track spliced in wherever an operator-placed divider claims
+// one (see columnFor/dividerColumns/gridColumnTemplate's own comments),
 // plus one trailing destination column shared by every row. `numRows`
 // is a label row plus one row per letter-group on each side (see
 // winnerGroups/loserGroups/losersLabelRow/totalRows) -- no more fixed
@@ -1937,16 +2011,17 @@ const titleBarStyle: React.CSSProperties = {
 // to its old 180px width to look nearly square. The arrow (56px) and
 // destination (180px) columns stay fixed -- only pool columns are
 // asked to grow.
-function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
+function gridStyle(
+  gridTemplateColumns: string,
+  numRows: number,
+): React.CSSProperties {
   return {
     display: "grid",
-    // Positioned ancestor for the divider overlay elements (see
-    // GauntletPoolsOverlay's own dividerPositions effect/render) --
-    // makes THIS grid wrapper each PoolBox's offsetParent (nearer than
-    // cardContentStyle, which also sets position:relative), so a
-    // divider's own offsetLeft-based `left` lines up correctly, and
-    // gives the divider's `position: absolute` a real box to anchor
-    // its own top/bottom against.
+    // Positioned ancestor for anything inside that needs one (e.g.
+    // recomputeScroll's own offsetParent chain-walk, see its comment) --
+    // not load-bearing for the dividers anymore now that they're real
+    // grid items with an analytically-computed column instead of a
+    // DOM-measured absolute overlay.
     position: "relative",
     // Pool/arrow/destination column floors scaled up alongside the rest
     // of this file's sizes (240/56/180 -> 320/72/240) -- unchanged
@@ -1968,7 +2043,7 @@ function gridStyle(numColumns: number, numRows: number): React.CSSProperties {
     // exactly at 320px) sitting right next to much wider long-name pools
     // in other columns, reading as noticeably skinnier rather than just
     // "sized to its own content."
-    gridTemplateColumns: `repeat(${numColumns}, minmax(380px, max-content) 150px) 240px`,
+    gridTemplateColumns,
     gridTemplateRows: `repeat(${numRows}, auto)`,
     // Was 4px -- fine back when ArrowCell was borderless floating text,
     // but explicit user request ("fix the spacing of the pills") once it
