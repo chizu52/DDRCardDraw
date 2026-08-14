@@ -34,19 +34,22 @@ import {
   Export,
   FloppyDisk,
   Import,
+  LogIn,
   Refresh,
   Trash,
 } from "@blueprintjs/icons";
 import { css } from "@codemirror/lang-css";
 import ReactCodeMirror from "@uiw/react-codemirror";
-import { useAtomValue } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { nanoid } from "nanoid";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useHref } from "react-router-dom";
 import {
   colorToCss,
+  googleClientIdAtom,
   readCellColors,
   readSheetValues,
+  requestSheetsToken,
   sheetsApiKeyAtom,
   sheetsTokenAtom,
   spreadsheetIdAtom,
@@ -196,8 +199,22 @@ interface ExportStatus {
 }
 
 function MatchesImportPanel() {
-  const token = useAtomValue(sheetsTokenAtom);
+  // useAtom (not useAtomValue) -- this tab now also WRITES sheetsTokenAtom
+  // itself (see reconnectGoogle below), not just reads it.
+  const [token, setToken] = useAtom(sheetsTokenAtom);
   const spreadsheetId = useAtomValue(spreadsheetIdAtom);
+  // Only needed to actually request a fresh token (see reconnectGoogle
+  // below) -- SheetsCredsManager's own "Connected -- reconnect" button
+  // already does exactly this, but living on a separate settings page
+  // means an operator hitting "Session expired." mid-event (see the
+  // SheetsAuthError catches below) has to navigate away from the very
+  // panel that just told them something's wrong to fix it. Explicit user
+  // request: a reconnect action right here instead.
+  const googleClientId = useAtomValue(googleClientIdAtom);
+  const reconnectGoogle = useCallback(() => {
+    if (!googleClientId) return;
+    requestSheetsToken(googleClientId, setToken);
+  }, [googleClientId, setToken]);
   const dispatch = useAppDispatch();
   // Same room-synced settings the pool-results OBS overlay uses (see
   // event.slice.ts) -- applied here too so this table and the overlay are
@@ -401,7 +418,32 @@ function MatchesImportPanel() {
         }}
       >
         Pools
-        <Button icon={<Refresh />} minimal onClick={loadPools} />
+        <ButtonGroup>
+          {/* Reconnect the Google account itself (a fresh OAuth token),
+              distinct from the plain data-refresh button beside it --
+              see reconnectGoogle's own comment above for why this lives
+              here instead of only on the separate Settings page. Always
+              visible/actionable (not just once a "Session expired." error
+              has already appeared), same "don't make the operator wait
+              for it to break" idea as this whole button existing at all. */}
+          <Button
+            icon={<LogIn />}
+            minimal
+            disabled={!googleClientId}
+            title={
+              googleClientId
+                ? "Reconnect Google account"
+                : "Save a Google OAuth client ID in Google Sheets settings first (see the Sheets connection panel)"
+            }
+            onClick={reconnectGoogle}
+          />
+          <Button
+            icon={<Refresh />}
+            minimal
+            title="Refresh pools"
+            onClick={loadPools}
+          />
+        </ButtonGroup>
       </h1>
       {status && (
         <Callout intent={status.type} style={{ marginBottom: "1rem" }}>
@@ -693,56 +735,72 @@ function MatchesSettingsPanel() {
     // than each section styling its own divider differently) is what
     // actually reads as "three separate things," not just three headings.
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-      <Card elevation={1} className={styles.settingsSection}>
-        {/* Same minimal-icon-in-the-heading treatment as the other two
-            settings sections below -- see BracketSettingsSection's own
-            comment on this. Icon sits right next to the heading text
-            (small gap, no space-between) rather than pushed out to the
-            card's far edge. */}
-        <h3
-          style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+      {/* Groups the three bracket/pool-progress overlays -- explicit user
+          request -- separately from ScheduleSettingsSection below, which
+          stays outside this wrapper (a different kind of overlay, event
+          timing rather than tournament progress). elevation={0}, lower
+          than the elevation={1} cards nested inside, so this reads as a
+          flatter grouping box the other three visually sit on top of,
+          rather than competing with them. */}
+      <Card elevation={0} className={styles.tournamentOverlaysGroup}>
+        <h2>Tournament Overlays</h2>
+        <div
+          style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}
         >
-          Pool Results Overlay
-          <CopyOverlayUrlButton />
-        </h3>
-        <Checkbox
-          checked={rowColors}
-          label="Colored Placements upon Finalization"
-          onChange={(e) =>
-            dispatch(
-              eventSlice.actions.setOverlayRowColors(e.currentTarget.checked),
-            )
-          }
-        />
-        <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
-          <RowColorTierCheckbox
-            tier="first"
-            label="1st place (gold)"
-            tiers={rowColorTiers}
-            disabled={!rowColors}
-          />
-          <RowColorTierCheckbox
-            tier="second"
-            label="2nd place (silver)"
-            tiers={rowColorTiers}
-            disabled={!rowColors}
-          />
-          <RowColorTierCheckbox
-            tier="third"
-            label="3rd place (bronze)"
-            tiers={rowColorTiers}
-            disabled={!rowColors}
-          />
-          <RowColorTierCheckbox
-            tier="fourthPlus"
-            label="4th place and below (gray)"
-            tiers={rowColorTiers}
-            disabled={!rowColors}
-          />
+          <Card elevation={1} className={styles.settingsSection}>
+            {/* Same minimal-icon-in-the-heading treatment as the other two
+                settings sections below -- see BracketSettingsSection's own
+                comment on this. Icon sits right next to the heading text
+                (small gap, no space-between) rather than pushed out to the
+                card's far edge. */}
+            <h3
+              style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+            >
+              Pool Results Overlay
+              <CopyOverlayUrlButton />
+            </h3>
+            <Checkbox
+              checked={rowColors}
+              label="Colored Placements upon Finalization"
+              onChange={(e) =>
+                dispatch(
+                  eventSlice.actions.setOverlayRowColors(
+                    e.currentTarget.checked,
+                  ),
+                )
+              }
+            />
+            <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
+              <RowColorTierCheckbox
+                tier="first"
+                label="1st place (gold)"
+                tiers={rowColorTiers}
+                disabled={!rowColors}
+              />
+              <RowColorTierCheckbox
+                tier="second"
+                label="2nd place (silver)"
+                tiers={rowColorTiers}
+                disabled={!rowColors}
+              />
+              <RowColorTierCheckbox
+                tier="third"
+                label="3rd place (bronze)"
+                tiers={rowColorTiers}
+                disabled={!rowColors}
+              />
+              <RowColorTierCheckbox
+                tier="fourthPlus"
+                label="4th place and below (gray)"
+                tiers={rowColorTiers}
+                disabled={!rowColors}
+              />
+            </div>
+          </Card>
+          <GauntletPoolsSettingsSection />
+          <BracketSettingsSection />
         </div>
       </Card>
-      <GauntletPoolsSettingsSection />
-      <BracketSettingsSection />
       <ScheduleSettingsSection />
     </div>
   );
@@ -879,29 +937,11 @@ function GauntletPoolsSettingsSection() {
         </FormGroup>
       </div>
       <Divider style={{ margin: "1rem 0" }} />
-      {/* Explicit dividers -- e.g. "Day 2" between two pools -- explicit
-          user request. Keyed by pool-set NUMBER (see event.slice.ts's
-          own gauntletPoolsDividers doc for why), so this form asks for
-          a plain number ("insert before pool #6") rather than needing
-          this Settings section to have any real pool titles loaded
-          (it doesn't -- this section isn't Sheets-connected the way
-          the Matches tab is). Its own component (not inlined here), same
-          reason ScheduleDayEditor is split out -- it owns a real chunk
-          of local buffered state. */}
       <GauntletPoolsDividerEditor />
     </Card>
   );
 }
 
-/** Buffer-locally-then-Submit editor for the gauntlet-pools overlay's
- * explicit dividers -- explicit user request to match ScheduleDayEditor's
- * own pattern (edit existing rows in place, don't go live until Submit)
- * rather than the previous "read-only list + always-immediate Add"
- * treatment, which had no way to fix a typo in an already-added row
- * short of deleting and re-adding it, and pushed every add straight to
- * the room the instant the button was clicked. See ScheduleDayEditor's
- * own comments (savedSchedule/dirty/the resync effect) for the full
- * reasoning this mirrors -- not repeated in full here. */
 function GauntletPoolsDividerEditor() {
   const dispatch = useAppDispatch();
   const savedDividers = useAppState((s) => s.event.gauntletPoolsDividers);
@@ -938,10 +978,7 @@ function GauntletPoolsDividerEditor() {
   }
 
   return (
-    <FormGroup
-      label="Dividers"
-      helperText='e.g. "Day 2" before pool #6 -- applies to both the Winners and Losers columns that share pool #6. Edits do not go out to the overlay until Submit is pressed.'
-    >
+    <FormGroup label="Dividers">
       {dividers.length > 0 && (
         <div
           style={{

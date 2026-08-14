@@ -76,6 +76,18 @@
   margin-top: 0;
 }
 
+/* Groups Pool Results/Gauntlet Pools/Bracket Tree under one "Tournament
+   Overlays" heading -- see dashboard.tsx's MatchesSettingsPanel. Widened
+   past the inner cards' own 700px cap so their boundary reads as
+   genuinely separate from this wrapper's own edge, not flush against it. */
+.tournamentOverlaysGroup {
+  max-width: 740px;
+}
+
+.tournamentOverlaysGroup h2 {
+  margin-top: 0;
+}
+
 /* Overrides settingsSection's shared 700px cap for this one card only
    (Pool Results/Bracket Tree stay at 700px) -- the day-content table's
    Color/Time/Event/Description/Current/Completed columns genuinely need
