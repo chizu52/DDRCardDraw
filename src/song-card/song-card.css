@@ -63,13 +63,23 @@
   font-family:
     Evogria, "Russo One", Arial, "Helvetica Neue", Helvetica, sans-serif;
   -webkit-tap-highlight-color: transparent;
-  margin: 10px 10px auto;
+  /* Uniform on all four sides, not 10px 10px auto -- the old `auto`
+     bottom resolved to near-0 in this flex-wrap container (no
+     dedicated `gap` on .chartList, see its own comment), giving a
+     card noticeably less vertical breathing room than horizontal.
+     18px is sized for transform: scale(1.1)'s ~5%-per-side visual
+     overflow (see .protected/.replaced/.tiebreaker below) against the
+     card sizes actually seen in this app's grid (up to ~350px wide) --
+     comfortably covers that without needing a per-state margin change,
+     which is what caused cards to visibly shift when protected/vetoed/
+     etc. before (see git history on this file). */
+  margin: 18px;
   word-wrap: break-word;
   overflow: hidden;
   transform: scale(1);
   filter: brightness(1) grayscale(0%);
   box-shadow: 0 0 0px transparent;
-  transition: transform 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease, filter 0.9s ease-out, margin 0.5s ease;
+  transition: transform 0.5s ease, border-color 0.5s ease, box-shadow 0.5s ease, filter 0.9s ease-out;
   position: relative;
   min-width: 165px;
   max-width: 600px;
@@ -146,7 +156,6 @@
 @keyframes protectLanding {
   0% {
     transform: scale(1.0);
-    margin: 10px 10px auto;
     border-color: white;
     box-shadow: none;
     filter: brightness(1.3) grayscale(0%);
@@ -163,7 +172,6 @@
   80% {
     transform: scale(1.1);
     border-color: green;
-    margin: -8px 15px auto;
     box-shadow: 0 0 5px green;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -175,7 +183,6 @@
   0% {
     transform: scale(1);
     border-color: white;
-    margin: 10px 10px auto;
     box-shadow: none;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -190,7 +197,6 @@
   }
   80% {
     transform: scale(0.95);
-    margin: 10px 10px auto;
     border-color: red;
     box-shadow: 0 0 5px red;
     filter: brightness(1.3) grayscale(75%);
@@ -203,7 +209,6 @@
   0% {
     transform: scale(1.0);
     border-color: white;
-    margin: 10px 10px auto;
     box-shadow: none;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -219,7 +224,6 @@
   80% {
     transform: scale(1.1);
     border-color: #2d72d2;
-    margin: -8px 15px auto;
     box-shadow: 0 0 5px #2d72d2;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -231,7 +235,6 @@
   0% {
     transform: scale(1.0);
     border-color: white;
-    margin: 10px 10px auto;
     box-shadow: none;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -247,7 +250,6 @@
   80% {
     transform: scale(1.1);
     border-color: gold;
-    margin: -8px 15px auto;
     box-shadow: 0px 0px 5px gold;
     filter: brightness(1.3) grayscale(0%);
   }
@@ -260,20 +262,17 @@
   transform: scale(0.95);
   filter: brightness(1) grayscale(75%);
   border-color: red;
-  margin: 10px 10px auto;
   box-shadow: 0 0 5px red;
 }
 .protected {
   filter: brightness(1) grayscale(0%);
   transform: scale(1.1);
   border-color: green;
-  margin: -8px 15px auto;
   box-shadow: 0 0 5px green;
 }
 .replaced {
   transform: scale(1.1);
   border-color: #2d72d2;
-  margin: -8px 15px auto;
   filter: brightness(1) grayscale(0%);
   box-shadow: 0 0 5px #2d72d2;
 }
@@ -284,7 +283,6 @@
 .tiebreaker {
   transform: scale(1.1);
   border-color: gold;
-  margin: -8px 15px auto;
   box-shadow: 0px 0px 5px gold;
   filter: brightness(1) grayscale(0%);
 }

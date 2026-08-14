@@ -38,17 +38,3 @@
   letter-spacing: 0.05em;
   margin-bottom: 30px;
 }
-.specialRow:not(:empty)::before {
-  content: "Special Picks";
-  position: absolute;
-  top: -12px;
-  left: 12px;
-  background: #222;
-  color: gold;
-  font-size: 0.75em;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 2px 8px;
-  border-radius: 4px;
-}

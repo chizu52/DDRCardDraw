@@ -117,7 +117,7 @@ function CabSummary({ cab }: { cab: CabInfo }) {
         />
         <CopySourceMenuItem
           icon={<Layers />}
-          text="Draw15 Protected Row"
+          text="Match Songlist"
           stub="special-picks"
           cabId={cab.id}
         />
