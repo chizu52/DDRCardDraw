@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import { Callout } from "@blueprintjs/core";
 import {
@@ -232,32 +238,65 @@ export function GauntletPoolsOverlay() {
   // Auto-pan camera, explicit user request ("what if the scroll stays
   // centered on what the current pool is, but it scrolls as the stages
   // progress") -- replaces the earlier "split into multiple OBS sources"
-  // direction entirely, this is a single-source layout instead. viewportRef
-  // is the fixed-size window (sized to whatever the OBS Browser Source's
-  // own canvas is, same "fills the viewport" convention every overlay in
-  // this app already uses) that clips/frames whatever's currently panned
-  // into view; panRef is the actual wide card (unchanged natural
-  // max-content width, see cardStyle's own comment) that slides left/right
-  // inside it via a CSS transform. See the useLayoutEffect below for how
-  // panX itself gets computed.
+  // direction entirely, this is a single-source layout instead.
+  //
+  // Uses REAL native horizontal scrolling now, not a CSS `transform:
+  // translateX` -- explicit user follow-up after two real transform-era
+  // bugs (a glitch mid-pan, and a background-coverage gap specifically
+  // when the last pool was selected -- see git history/memory for the
+  // full diagnosis) plus a direct request to "get rid of all logic on
+  // headers... so they dont move." Native scroll gets that almost for
+  // free: the title bar and Winners/Losers section labels are plain
+  // `position: sticky; left: <n>` now (see their own call sites) --
+  // zero JS, no counter-transform to keep in sync with anything, since
+  // `position: sticky` is a real CSS mechanism built to solve exactly
+  // this ("stay put while an ancestor scrolls"), unlike a `transform`,
+  // which sticky doesn't respond to at all (this is WHY it wasn't an
+  // option before this rewrite -- sticky only activates relative to a
+  // genuine scrolling ancestor, and this element used to be panned via
+  // transform, not scrolled). Scrolling itself also gets simpler and
+  // more robust than the transform version was: `scrollLeft` is a real,
+  // continuously-accurate JS-readable value (unlike a mid-transition
+  // CSS transform, which has no such live-readable "current" value,
+  // the root cause of the glitch bug above), and out-of-range
+  // assignments self-clamp natively -- no more manual min/max math.
+  //
+  // viewportRef is now the actual SCROLLING element (its own clientWidth
+  // is the visible width, its own scrollLeft is what recomputeScroll
+  // sets); panRef is the wide card (unchanged natural max-content width,
+  // see cardStyle's own comment) sitting inside it as a plain,
+  // untransformed block -- its own overflow is what triggers real
+  // browser scrolling. See recomputeScroll below for how the target
+  // scrollLeft gets computed.
   const viewportRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<HTMLDivElement>(null);
-  const [panX, setPanX] = useState(0);
-  // Explicit user report: "a tiny line at the bottom not affected by
-  // background filters." Root-caused to viewportStyle's own CSS
-  // auto-height ending up a few pixels TALLER than panRef's real content
-  // height -- confirmed live (a 4px gap, present on a fresh reload, that
-  // tracked panRef's height proportionally when forced smaller) but its
-  // exact CSS cause couldn't be pinned down for certain through remote
-  // DOM probing alone (tried and ruled out the obvious suspect, the
-  // `<main>` route wrapper's flex stretch -- that container turned out
-  // to be column-direction, where align-items/self governs WIDTH, not
-  // height, so it was never the actual mechanism). Rather than keep
-  // chasing the exact cause, this makes viewportStyle's height
-  // authoritatively MEASURED from panRef's own true layout height
-  // (`offsetHeight`, unaffected by panRef's own transform) instead of
-  // trusting CSS auto-sizing to match it -- guaranteed zero gap
-  // regardless of whatever was causing the mismatch.
+  // Real bug, found live, root cause never fully pinned down: the title
+  // bar's own `position: sticky; left: 40` (see its call site) lands
+  // ~70px too far left in this exact structure, despite the Winners/
+  // Losers section labels using the identical mechanism correctly.
+  // Isolated by directly stripping styles via DOM manipulation: the
+  // title bar's own `border`/`padding` (unlike the plain-text section
+  // labels, which have neither) throws the sticky offset off by roughly
+  // their own combined size -- confirmed the offset is CONSTANT
+  // regardless of actual scroll position (measured identical across
+  // four different scrollLeft values), so it's safe to correct with a
+  // single measured value rather than needing continuous tracking.
+  // titleBarNudgeRef is the title bar's own OUTER sticky wrapper (see
+  // its call site); the correction itself is a plain `transform:
+  // translateX`, but -- unlike the transform this file used for panning
+  // before this session's rewrite -- it's a STATIC, measured-once (or
+  // on resize) constant, not something animated in lockstep with an
+  // ongoing scroll, so it doesn't carry that same class of bug.
+  const titleBarNudgeRef = useRef<HTMLDivElement>(null);
+  const [titleBarNudge, setTitleBarNudge] = useState(0);
+  // Explicit user report (from the transform-panning era, still
+  // relevant): "a tiny line at the bottom not affected by background
+  // filters." Root-caused to the outer wrapper's own CSS auto-height
+  // landing a few pixels taller than panRef's real content height, exact
+  // CSS cause never conclusively pinned down. Kept as a safety net in
+  // this rewrite too -- authoritatively MEASURED from panRef's own true
+  // layout height (`offsetHeight`) rather than trusted to CSS
+  // auto-sizing, applied to the outer (non-scrolling) wrapper below.
   const [contentHeight, setContentHeight] = useState<number | undefined>(
     undefined,
   );
@@ -337,57 +376,152 @@ export function GauntletPoolsOverlay() {
     };
   }, [apiKey, spreadsheetId, sheetName, poolsRefreshedAt]);
 
-  // Recomputes panX whenever the live pool changes (or the sheet
-  // reloads, in case that shifts box positions/widths) -- runs
-  // unconditionally, before the early returns below, same as every
-  // other hook in this component. No-ops harmlessly on every render
-  // before real content exists yet (viewportRef/panRef are both still
-  // null pre-mount of the "ok" branch's JSX).
-  useLayoutEffect(() => {
-    const viewport = viewportRef.current;
+  // Recomputes the real scrollLeft target (and contentHeight) from
+  // panEl's CURRENT real layout -- pulled out to its own function
+  // (useCallback, not inlined in the effect below) so it can also be
+  // re-run by the ResizeObserver further down, not just on
+  // [selectedPool, state] changes. That observer exists for a real
+  // reason: this measurement can run before panEl has reached its TRUE
+  // final size -- e.g. LOCAL_FONT_FACE_CSS's custom fonts load
+  // asynchronously, so an early measurement can be taken against
+  // fallback-font-width text, then never get corrected once the real
+  // font swaps in and reflows wider (this effect's own dependency array
+  // has no way to know a font finished loading). A stale, too-narrow
+  // contentWidth reading was a real, confirmed bug in the OLD
+  // transform-based version of this ("when the final pool is
+  // selected..., the background wrapper does not cover the background
+  // anymore" -- explicit user report, reproduced on the real last pool,
+  // "Pool 11"): the old manual `minPan` clamp could end up less negative
+  // than reality needed, leaving panEl's true right edge short of the
+  // viewport's own, exposing the banner un-tinted by this card's own
+  // dark fill in the gap. Native scrolling doesn't remove the STALE-
+  // MEASUREMENT risk itself (a stale contentWidth could still under-
+  // report how far there is to scroll) but DOES remove the failure mode
+  // that made it visible -- `scrollLeft` assignments self-clamp to
+  // whatever the browser's OWN live scrollWidth/clientWidth actually
+  // are, so a stale target can at worst scroll to the wrong SPOT, never
+  // leave the card short of the viewport's true edge the way a manually
+  // computed minPan could. The ResizeObserver is kept anyway, since a
+  // correct target position still matters, not just a safe one.
+  const recomputeScroll = useCallback(() => {
+    const scrollEl = viewportRef.current;
     const panEl = panRef.current;
-    if (!viewport || !panEl) return;
-    // offsetHeight, not getBoundingClientRect().height -- unaffected by
-    // panEl's own transform (which is purely a paint-time operation and
-    // never changes layout height anyway, but offsetHeight is the more
-    // direct "true layout height" read regardless). See contentHeight's
-    // own comment above for why this exists at all.
+    if (!scrollEl || !panEl) return;
+    // offsetHeight, a pure layout read -- see contentHeight's own
+    // comment above for why this exists at all.
     setContentHeight(panEl.offsetHeight);
     const target = selectedPool
       ? panEl.querySelector<HTMLElement>(
           `[data-pool-title="${CSS.escape(selectedPool)}"]`,
         )
       : null;
-    const contentWidth = panEl.scrollWidth;
-    const viewportWidth = viewport.clientWidth;
-    // No live pool to center on, its box isn't in the DOM (yet), or the
-    // content already fits inside the viewport with nothing to gain
-    // from panning -- rest at the start (Pool 1 / Winners side) rather
-    // than an arbitrary leftover position.
-    if (!target || contentWidth <= viewportWidth) {
-      setPanX(0);
+    if (!target) {
+      scrollEl.scrollLeft = 0;
       return;
     }
-    const viewportRect = viewport.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const viewportCenterX = viewportRect.left + viewportRect.width / 2;
-    const targetCenterX = targetRect.left + targetRect.width / 2;
-    // Delta-based (how far to shift from wherever panEl is CURRENTLY
-    // painted) rather than an absolute offset computed from
-    // target.offsetLeft -- panEl isn't the target's nearest positioned
-    // ancestor (cardContentStyle, nested one level deeper, also sets
-    // position: relative), so offsetLeft alone wouldn't account for
-    // that extra nesting. Measuring the current PAINTED delta via
-    // getBoundingClientRect sidesteps that -- it already reflects
-    // whatever transform is currently applied, so adding the delta to
-    // the previous panX self-corrects regardless of how deep the
-    // target sits.
-    setPanX((prev) => {
-      const desired = prev + (viewportCenterX - targetCenterX);
-      const minPan = viewportWidth - contentWidth; // most-negative allowed (right edge of content visible)
-      return Math.max(minPan, Math.min(0, desired));
-    });
-  }, [selectedPool, state]);
+    // target isn't a direct child of panEl (it's nested inside
+    // gridStyle's own position:relative div, itself inside
+    // cardContentStyle's), so a single target.offsetLeft read isn't
+    // relative to panEl -- walk the offsetParent chain, summing
+    // offsetLeft at each hop, until panEl itself is reached (which sits
+    // flush at the scroll container's own content-box origin, zero
+    // padding/border on either, so this is ALSO the correct scrollLeft-
+    // relative offset, no separate conversion needed). General/self-
+    // correcting: works regardless of how many position:relative
+    // wrappers sit in between, now or after any future restructuring.
+    let targetLeft = 0;
+    for (
+      let node: HTMLElement | null = target;
+      node && node !== panEl;
+      node = node.offsetParent as HTMLElement | null
+    ) {
+      targetLeft += node.offsetLeft;
+    }
+    const targetCenterX = targetLeft + target.offsetWidth / 2;
+    // No manual clamping needed -- assigning scrollLeft outside its
+    // valid [0, scrollWidth - clientWidth] range is a no-op past
+    // whichever edge it overshoots (the browser's own native behavior),
+    // same effect the old code's explicit Math.max/min achieved by
+    // hand.
+    scrollEl.scrollLeft = targetCenterX - scrollEl.clientWidth / 2;
+  }, [selectedPool]);
+
+  // Runs recomputeScroll whenever the live pool changes or the sheet
+  // reloads (in case that shifts box positions/widths) -- unconditional,
+  // before the early returns below, same as every other hook in this
+  // component. No-ops harmlessly on every render before real content
+  // exists yet (viewportRef/panRef are both still null pre-mount of the
+  // "ok" branch's JSX).
+  useLayoutEffect(() => {
+    recomputeScroll();
+  }, [recomputeScroll, state]);
+
+  // Catches size changes recomputeScroll's own dependency array can't
+  // see coming -- see recomputeScroll's own comment for why this exists
+  // (async font swap being the concrete example found, but this covers
+  // any cause of panEl's real size changing after its own last
+  // measurement).
+  useEffect(() => {
+    const panEl = panRef.current;
+    if (!panEl) return;
+    const observer = new ResizeObserver(() => recomputeScroll());
+    observer.observe(panEl);
+    return () => observer.disconnect();
+  }, [recomputeScroll]);
+
+  // Measures and corrects the title bar's own sticky-offset bug -- see
+  // titleBarNudgeRef's own comment above for the diagnosis. Compares
+  // where the title bar's sticky wrapper is CURRENTLY sitting against
+  // where its own `left: 40` asks for, relative to the scroll
+  // container's own edge, and stores whatever correction closes that
+  // gap. A ResizeObserver (not a one-time effect) since the exact wrong
+  // amount is tied to the title bar's own border/padding box -- if the
+  // title/icon content ever changes this element's real size, the
+  // needed correction could shift too.
+  useEffect(() => {
+    const scrollEl = viewportRef.current;
+    const nudgeEl = titleBarNudgeRef.current;
+    if (!scrollEl || !nudgeEl) return;
+    const measure = () => {
+      const currentLeft =
+        nudgeEl.getBoundingClientRect().left -
+        scrollEl.getBoundingClientRect().left;
+      setTitleBarNudge((prev) => prev + (40 - currentLeft));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(nudgeEl);
+    // Also re-measure across the scroll container's own scroll events --
+    // real bug, found live: `scrollEl.scrollLeft = x` (recomputeScroll)
+    // doesn't move `scrollLeft` synchronously when `scroll-behavior:
+    // smooth` is set (see scrollContainerStyle) -- it animates there
+    // over the following frames. Measuring only once, right after
+    // recomputeScroll's own effect sets a new target, was catching the
+    // title bar BEFORE the browser's own scroll animation had moved it
+    // at all -- often still in its un-stuck resting position (which
+    // needs little to no correction), producing a wrong, near-zero
+    // nudge. `scrollend` (fires once, exactly when the browser's own
+    // smooth-scroll animation genuinely finishes) re-measures at the
+    // moment that actually matters; the plain `scroll` listener is a
+    // defensive fallback for engines without `scrollend` support, so
+    // this still converges via repeated measurement even there.
+    scrollEl.addEventListener("scroll", measure);
+    scrollEl.addEventListener("scrollend", measure);
+    return () => {
+      observer.disconnect();
+      scrollEl.removeEventListener("scroll", measure);
+      scrollEl.removeEventListener("scrollend", measure);
+    };
+    // `state`, not `[]` -- real bug, found live: on first mount, data is
+    // still "loading" and the "ok" branch's JSX (which is what actually
+    // has titleBarNudgeRef attached to anything) hasn't rendered yet, so
+    // nudgeEl is null and this silently no-ops -- with an empty deps
+    // array, that was the ONLY chance this effect ever got to run,
+    // since there was nothing to trigger it again once data actually
+    // arrived. Depending on `state` re-runs this once real content (and
+    // therefore a real ref) exists, same pattern recomputeScroll's own
+    // effect already uses for the identical reason.
+  }, [state]);
 
   const pools = state.status === "ok" ? state.pools : EMPTY_POOLS;
   const colors = state.status === "ok" ? state.colors : EMPTY_COLORS;
@@ -428,7 +562,12 @@ export function GauntletPoolsOverlay() {
   const [dividerPositions, setDividerPositions] = useState<
     { id: string; label: string; left: number }[]
   >([]);
-  useLayoutEffect(() => {
+  // useCallback (not inlined in a single effect), same reason as
+  // recomputePan above -- so it can also be re-run by the SAME
+  // ResizeObserver down in that effect whenever panEl's real size
+  // changes for any reason this hook's own [dividers, pools] dependency
+  // array can't see coming (e.g. the same async font-swap case).
+  const recomputeDividerPositions = useCallback(() => {
     const panEl = panRef.current;
     if (!panEl) return;
     const positions = dividers
@@ -448,6 +587,20 @@ export function GauntletPoolsOverlay() {
       );
     setDividerPositions(positions);
   }, [dividers, pools]);
+  useLayoutEffect(() => {
+    recomputeDividerPositions();
+  }, [recomputeDividerPositions]);
+  // Own ResizeObserver, separate from recomputePan's -- this callback
+  // isn't in scope up where that one is declared (it depends on `pools`,
+  // computed later than panX's own effects). See recomputePan's own
+  // comment for why watching panEl's real size matters at all.
+  useEffect(() => {
+    const panEl = panRef.current;
+    if (!panEl) return;
+    const observer = new ResizeObserver(() => recomputeDividerPositions());
+    observer.observe(panEl);
+    return () => observer.disconnect();
+  }, [recomputeDividerPositions]);
 
   if (!apiKey || !spreadsheetId) {
     const missing = [!apiKey && "apiKey", !spreadsheetId && "spreadsheetId"]
@@ -525,36 +678,34 @@ export function GauntletPoolsOverlay() {
   const columnFor = (pool: ParsedPool) =>
     1 + columnIndexForNumber.get(poolSetNumber(pool.title))! * 2;
   const destCol = 1 + allNumbers.length * 2;
-  const losersLabelRow = 2 + winnerGroups.length;
+  // Row 1 is the title bar now (moved into this same grid, see its own
+  // call site's comment for why), row 2 is the Winners label -- both
+  // used to be "row 1" back when the title bar lived in its own,
+  // separate outer wrapper. Every row number from here on is +1 from
+  // what it used to be.
+  const losersLabelRow = 3 + winnerGroups.length;
   const loserFirstRow = losersLabelRow + 1;
   const totalRows = losersLabelRow + loserGroups.length;
 
   return (
-    // Fixed-size window the wide card pans within -- explicit user
-    // request to auto-scroll based on which pool is currently Live
-    // rather than the earlier "split into multiple OBS sources"
-    // direction. See panX's own useLayoutEffect above for how the pan
-    // target is computed. `height: contentHeight` (measured, see its own
-    // comment above) overrides whatever this element's own CSS
-    // auto-height would otherwise resolve to -- `undefined` on first
-    // render (before anything's been measured yet) falls through to
-    // ordinary auto-sizing so there's no flash of a collapsed/zero-height
-    // box before the first measurement lands.
-    <div
-      ref={viewportRef}
-      style={{ ...viewportStyle, height: contentHeight }}
-    >
+    // Outer, non-scrolling wrapper -- exists to host the banner backdrop
+    // as a static layer (see its own comment) and to apply the
+    // JS-measured contentHeight safety net (see that state's own
+    // comment). `height: contentHeight` overrides whatever this
+    // element's own CSS auto-height would otherwise resolve to --
+    // `undefined` on first render (before anything's been measured yet)
+    // falls through to ordinary auto-sizing so there's no flash of a
+    // collapsed/zero-height box before the first measurement lands.
+    <div style={{ ...outerWrapperStyle, height: contentHeight }}>
       {/* The banner art as a soft out-of-focus backdrop -- explicit user
-          follow-up to keep this FIXED to the screen/viewport, not
-          panning along with the pools ("I want the only thing to scroll
-          across are the pools"). Used to live INSIDE panRef below, which
-          meant it panned along with everything else -- moved out to be
-          a sibling here, a direct child of the fixed viewport, so it
-          stays put regardless of pan position. `inset: -20px` so the
-          blur has room to bleed past the viewport's own edges without
-          visibly softening right at the border -- see viewportStyle's
-          own comment for why it needs `overflow: hidden` (both axes,
-          not just X) for this to clip correctly now. */}
+          request to keep this FIXED to the screen, not scrolling along
+          with the pools ("I want the only thing to scroll across are
+          the pools"). A sibling of the scroll container below, not a
+          descendant of it, so native scrolling never moves it.
+          `inset: -20px` so the blur has room to bleed past this
+          wrapper's own edges without visibly softening right at the
+          border -- see outerWrapperStyle's own comment for why it needs
+          `overflow: hidden` for this to clip correctly. */}
       <div
         style={{
           position: "absolute",
@@ -563,73 +714,111 @@ export function GauntletPoolsOverlay() {
           filter: "blur(3px)",
         }}
       />
+      {/* The actual scrolling element -- real native horizontal scroll
+          now, not a CSS transform (see recomputeScroll's own comment for
+          the full reasoning). Scrollbar hidden (see the embedded <style>
+          below) since a visible native scrollbar has no place in a
+          broadcast overlay -- scrolling here is entirely programmatic
+          (recomputeScroll sets scrollLeft directly), never something a
+          viewer is meant to interact with. */}
+      <style>{HIDE_SCROLLBAR_CSS}</style>
       <div
-        ref={panRef}
-        style={{
-          ...cardStyle,
-          transform: `translateX(${panX}px)`,
-          transition: "transform 1.2s ease",
-        }}
+        ref={viewportRef}
+        className={HIDE_SCROLLBAR_CLASS}
+        style={scrollContainerStyle}
       >
-        {/* A plain `style` prop can't express @font-face -- see
-            local-fonts.ts's own comment on this. */}
-        <style>{LOCAL_FONT_FACE_CSS}</style>
+        <div ref={panRef} style={cardStyle}>
+          {/* A plain `style` prop can't express @font-face -- see
+              local-fonts.ts's own comment on this. */}
+          <style>{LOCAL_FONT_FACE_CSS}</style>
       <div style={cardContentStyle}>
-        {/* Same header-bar treatment as schedule.tsx's own title panel
-            (solid COLORS.panel fill, 3px white border, TITLE_FONT_FAMILY
-            at the same 44px size) -- this overlay had no title/header of
-            its own before, just the "Winners"/"Losers" section labels
-            straight into the grid, the biggest remaining visible gap
-            against Schedule's "one branded panel" look when both sit on
-            stream together. */}
-        <div
-          style={{
-            ...titleBarStyle,
-            // Counter-transform, explicit user request ("make the
-            // header of the overlay and the headers of both winners and
-            // losers also scroll along with the pools correctly") --
-            // without this, the title bar sits at a fixed x-position in
-            // the WIDE panned content (near its own left edge), so once
-            // the auto-pan camera (see panX's own useLayoutEffect)
-            // shifts deep into the bracket to follow a later pool, the
-            // title scrolls off-screen along with everything else and
-            // never comes back. Negating the parent's own translateX
-            // here cancels it out exactly (transforms compose/add for
-            // final screen position -- parent's panX plus this
-            // element's own -panX nets to 0), so the title stays
-            // pinned at its original on-screen spot regardless of how
-            // far the camera has panned. Same transition as the parent
-            // pan itself so the two animate in perfect lockstep (net
-            // stays exactly 0 at every frame, not just at rest).
-            transform: `translateX(${-panX}px)`,
-            transition: "transform 1.2s ease",
-          }}
-        >
-          {/* Optional, same "no icon means don't show one" idea as an
-              empty title -- see schedule.tsx's own icon rendering. */}
-          {icon && (
-            <img
-              src={icon}
-              alt=""
-              style={{
-                height: 100,
-                width: "auto",
-                maxWidth: 200,
-                objectFit: "contain",
-                borderRadius: 10,
-                flexShrink: 0,
-              }}
-            />
-          )}
-          {/* 56px, up from 36 -- see cardStyle's own comment on why this
-              file's sizes were rechecked against a true 1920x1080
-              viewport instead of the small preview used most of this
-              file's development. */}
-          <div style={{ fontFamily: TITLE_FONT_FAMILY, fontSize: 56 }}>
-            {title || "Gauntlet Pools"}
-          </div>
-        </div>
         <div style={gridStyle(allNumbers.length, totalRows)}>
+          {/* Same header-bar treatment as schedule.tsx's own title panel
+              (solid COLORS.panel fill, 3px white border, TITLE_FONT_FAMILY
+              at the same 44px size) -- this overlay had no title/header
+              of its own before, just the "Winners"/"Losers" section
+              labels straight into the grid, the biggest remaining
+              visible gap against Schedule's "one branded panel" look
+              when both sit on stream together. A real GRID ITEM of this
+              same grid now (gridRow 1, same as the Winners label just
+              below it used to be alone), not a separate sibling in its
+              own outer flex/grid wrapper -- found the hard way, after
+              two failed attempts (a flex column with alignSelf:
+              "flex-start", then converting that SAME outer wrapper to
+              its own separate CSS Grid with justifySelf: "start") that
+              `position: sticky` only reliably activated for an element
+              genuinely INSIDE gridStyle's own grid, not just any CSS
+              Grid/Flex ancestor with the "don't stretch" fix applied --
+              the exact mechanism was never conclusively pinned down
+              (isolated reproductions outside this component couldn't
+              reproduce either failure), so this uses the one structure
+              actually proven to work by direct measurement instead of
+              continuing to chase it. Even with this exact structure,
+              the title bar SPECIFICALLY still needed one more fix past
+              this point: measured live, sticky's `left: 40` was landing
+              70px too far left (-70px instead of 0, relative to where
+              it should sit) -- traced to its own `border`/`padding`
+              (3px border + 32px horizontal padding on each side, 6 + 64
+              = exactly 70), isolated by directly stripping them via
+              DOM manipulation and watching the offset correct itself
+              precisely. The section labels below don't carry either
+              property, which is presumably why they never hit this.
+              Never got to the bottom of the exact mechanism (box-sizing
+              was already border-box, the expected fix, and changing it
+              further did nothing) -- worked around it structurally
+              instead: split into two nested elements. The OUTER one
+              (this div) carries ONLY grid placement + the sticky
+              positioning itself, no border/padding/background at all;
+              the INNER one (right below) carries all of the actual bar
+              chrome. Splitting the two DID measurably help (the
+              remaining offset shrank), but didn't fully close it --
+              border/padding anywhere in this element's own subtree
+              still throws off the sticky offset by roughly their own
+              size, even nested two levels down on a child that isn't
+              itself the sticky element. Never got to the bottom of the
+              exact mechanism despite extensive isolated testing (couldn't
+              reproduce it outside this component at all) -- see
+              titleBarNudgeRef's own comment (GauntletPoolsOverlay) for
+              the small, measured, non-animated correction that closes
+              the remaining gap. */}
+          <div
+            ref={titleBarNudgeRef}
+            style={{
+              gridColumn: "1 / -1",
+              gridRow: 1,
+              justifySelf: "start",
+              position: "sticky",
+              left: 40,
+              transform: `translateX(${titleBarNudge}px)`,
+            }}
+          >
+            <div style={titleBarStyle}>
+              {/* Optional, same "no icon means don't show one" idea as
+                  an empty title -- see schedule.tsx's own icon
+                  rendering. */}
+              {icon && (
+                <img
+                  src={icon}
+                  alt=""
+                  style={{
+                    height: 100,
+                    width: "auto",
+                    maxWidth: 200,
+                    objectFit: "contain",
+                    borderRadius: 10,
+                    flexShrink: 0,
+                  }}
+                />
+              )}
+              {/* 56px, up from 36 -- see cardStyle's own comment on why
+                  this file's sizes were rechecked against a true
+                  1920x1080 viewport instead of the small preview used
+                  most of this file's development. */}
+              <div style={{ fontFamily: TITLE_FONT_FAMILY, fontSize: 56 }}>
+                {title || "Gauntlet Pools"}
+              </div>
+            </div>
+          </div>
           {/* Explicit Winners/Losers section labels -- same idea as
               start.gg's own bracket page, and this app's own
               bracket-tree.tsx overlay, which already renders a label
@@ -641,17 +830,42 @@ export function GauntletPoolsOverlay() {
               ...sectionLabelStyle,
               color: COLORS.mint,
               gridColumn: "1 / -1",
-              gridRow: 1,
-              // Counter-transform, same fix/reasoning as titleBarStyle's
-              // own call site above -- without it this label's text
-              // (which sits at this box's own left edge, not centered
-              // across its full `1 / -1` grid span) scrolls off-screen
-              // once the auto-pan camera shifts deep into the Winners
-              // row, same explicit user request ("...headers of both
-              // winners and losers also scroll along with the pools
-              // correctly").
-              transform: `translateX(${-panX}px)`,
-              transition: "transform 1.2s ease",
+              // Row 2, not 1 -- the title bar (see just above) took row
+              // 1 once it moved into this same grid. marginTop gives
+              // this label some breathing room below the title bar
+              // beyond the grid's own tight rowGap (8px, tuned for pool
+              // rows, not a section break) -- same technique the Losers
+              // label already uses for its own gap from the Winners
+              // pools above it.
+              gridRow: 2,
+              // cardContentStyle used to provide this gap on its own
+              // (gap: 128, back when it was a flex column with the
+              // title bar and the pool grid as two stacked siblings) --
+              // now that both live in the SAME grid (gridStyle's own
+              // rowGap is 2px, tuned for pool rows, not a section
+              // break), this label supplies that same amount itself.
+              marginTop: 128,
+              // position: sticky, not a counter-transform -- same
+              // fix/reasoning as titleBarStyle's own call site above.
+              // justifySelf: "start" is load-bearing here, found the
+              // hard way: a grid item with no explicit width defaults to
+              // `justify-self: stretch`, so without this override the
+              // label's own box was stretching to fill its ENTIRE
+              // `1 / -1` grid area (thousands of pixels, the full width
+              // of the wide scrollable card) -- an element that's
+              // already as wide as its own containing block has no
+              // meaningful room left for a sticky offset to apply within
+              // (confirmed live: sticky silently stopped working the
+              // moment an explicit width wasn't set, isolated in a
+              // minimal reproduction outside this component entirely).
+              // With this, the label's own box sizes to its actual text
+              // content instead, same as it visually always looked like
+              // it was doing -- sticky's `left: 40` then pins THAT
+              // narrow box, matching the grid's own left-aligned pool
+              // content.
+              justifySelf: "start",
+              position: "sticky",
+              left: 40,
             }}
           >
             Winners Side Bracket
@@ -663,7 +877,7 @@ export function GauntletPoolsOverlay() {
                 title={pool.title}
                 pool={pool}
                 col={columnFor(pool)}
-                row={2 + gi}
+                row={3 + gi}
                 colors={colors}
                 headerColors={headerColors}
                 allPools={pools}
@@ -677,7 +891,7 @@ export function GauntletPoolsOverlay() {
               <ArrowCell
                 key={`arrow-${pool.title}`}
                 col={columnFor(pool) + 1}
-                row={2 + gi}
+                row={3 + gi}
                 count={advancingCount(pool, colors)}
               />
             )),
@@ -690,7 +904,7 @@ export function GauntletPoolsOverlay() {
                   : "Winner's Side"
               }
               col={destCol}
-              row={`2 / span ${winnerGroups.length}`}
+              row={`3 / span ${winnerGroups.length}`}
               advancing={winnerFinalAdvancing}
             />
           )}
@@ -709,10 +923,17 @@ export function GauntletPoolsOverlay() {
               // everything else. A top margin on this specific label
               // adds extra space only here, on top of the existing gap.
               marginTop: 128,
-              // Counter-transform -- same fix/reasoning as the Winners
-              // label above and titleBarStyle's own call site.
-              transform: `translateX(${-panX}px)`,
-              transition: "transform 1.2s ease",
+              // position: sticky, not a counter-transform -- same
+              // fix/reasoning as the Winners label above and
+              // titleBarStyle's own call site. justifySelf: "start" is
+              // load-bearing here too -- see the Winners label's own
+              // comment for the full diagnosis (a grid item with no
+              // explicit width defaults to `justify-self: stretch`,
+              // which silently breaks sticky by leaving it no room to
+              // offset within).
+              justifySelf: "start",
+              position: "sticky",
+              left: 40,
             }}
           >
             Losers Side Bracket
@@ -794,6 +1015,7 @@ export function GauntletPoolsOverlay() {
           ))}
         </div>
       </div>
+        </div>
       </div>
     </div>
   );
@@ -1116,7 +1338,7 @@ function poolStatus(
 const STATUS_LABELS: Record<PoolStatus, string> = {
   final: "Final",
   live: "Live",
-  upcoming: "Upcoming",
+  upcoming: "On Deck",
 };
 
 // Solid, high-contrast fills -- not Blueprint's Tag `intent`/`minimal`
@@ -1481,46 +1703,54 @@ function ArrowCell({
   );
 }
 
-// The fixed-size window the wide card (cardStyle below) pans within --
-// explicit user request for an auto-scrolling camera that follows
-// whichever pool is currently Live (see GauntletPoolsOverlay's own panX
-// useLayoutEffect for how the pan target is computed). Sized to whatever
-// the OBS Browser Source's own canvas is (100vw, same "fills the
-// viewport" convention every overlay in this file already follows)
-// rather than a fixed pixel width. Also now the banner's own direct
-// parent (explicit user follow-up: the background should stay fixed to
-// the screen, not pan along with the pools) -- `overflow: hidden`
-// (both axes now, was `overflowX` only) clips the banner's own
-// `inset: -20px` blur-bleed on every side, not just left/right. This
-// doesn't reintroduce any vertical-cropping risk for the pool content
-// itself: this element has no explicit height (grows to fit panRef's
-// own natural height, an ordinary normal-flow child), so the only thing
-// that can ever exceed that auto-established box vertically is the
-// banner's own deliberate bleed, which is exactly what should get clipped.
-//
-// Real bug, found and fixed: this element's own CSS auto-height was
-// landing a few pixels (measured live: 4px, reproducible on a fresh
-// reload) TALLER than panRef's real content height -- explicit user
-// report: "a tiny line at the bottom not affected by background
-// filters," exactly what that stray gap would look like (the banner,
-// this element's own child sized to match ITS box, nominally covers it,
-// but any sub-pixel/paint mismatch in that extra sliver reveals the raw
-// page background underneath instead, which -- unlike the banner -- has
-// no blur/brightness filter on it at all). The `<main>` route wrapper's
-// flex stretch was the obvious first suspect, but ruled out live: that
-// container is `flex-direction: column`, where align-items/self governs
-// WIDTH, not height, so it was never the actual mechanism, and the exact
-// CSS cause couldn't be pinned down for certain through remote DOM
-// probing alone. Fixed at the call site instead (GauntletPoolsOverlay's
-// own render) by setting `height` explicitly from a MEASURED value
-// (`contentHeight`, panRef's own true `offsetHeight`) rather than
-// trusting this element's CSS auto-sizing to match it -- guaranteed
-// zero gap regardless of whatever was actually causing the mismatch.
-const viewportStyle: React.CSSProperties = {
+// Outer, non-scrolling wrapper -- exists purely to host the banner
+// backdrop as a static layer (see its own JSX comment: explicit user
+// request to keep the background fixed to the screen, not panning along
+// with the pools) and to apply the JS-measured contentHeight safety net
+// (see that state's own comment). Sized to whatever the OBS Browser
+// Source's own canvas is (100vw, same "fills the viewport" convention
+// every overlay in this file already follows) rather than a fixed pixel
+// width. `overflow: hidden` clips the banner's own `inset: -20px`
+// blur-bleed on every side. Doesn't reintroduce any vertical-cropping
+// risk for the pool content itself: this element has no explicit height
+// of its own beyond the measured contentHeight override applied at its
+// call site, which itself tracks panRef's own real content height.
+const outerWrapperStyle: React.CSSProperties = {
   width: "100vw",
   overflow: "hidden",
   position: "relative",
 };
+
+// The actual scrolling element (real native horizontal scroll, not a
+// CSS transform -- see recomputeScroll's own comment for the full
+// reasoning/history). `scrollBehavior: "smooth"` means a plain
+// `scrollEl.scrollLeft = x` assignment animates on its own, no JS-driven
+// transition/RAF loop needed the way the old transform version required.
+// `overflowY: "hidden"` -- horizontal scroll only, vertical sizing stays
+// exactly as before (grows to fit its content). See HIDE_SCROLLBAR_CSS
+// for why the native scrollbar itself is hidden (a visible one has no
+// place in a broadcast overlay -- this scrolling is purely programmatic,
+// never meant for a viewer to grab).
+const scrollContainerStyle: React.CSSProperties = {
+  width: "100%",
+  overflowX: "auto",
+  overflowY: "hidden",
+  scrollBehavior: "smooth",
+  scrollbarWidth: "none",
+  msOverflowStyle: "none",
+};
+
+// Hides the scrollbar scrollContainerStyle's own overflowX would
+// otherwise render -- a real, visible native scrollbar has no place in
+// a broadcast overlay whose scrolling is entirely programmatic
+// (recomputeScroll), never something a viewer interacts with directly.
+// `scrollbarWidth`/`msOverflowStyle` are real, standard-ish CSS
+// properties (Firefox / old Edge) settable inline, but WebKit/Chromium's
+// own `::-webkit-scrollbar` is a pseudo-element, which inline styles
+// can't target at all -- needs a real `<style>` tag, scoped to this
+// one class rather than touching every scrollable element on the page.
+const HIDE_SCROLLBAR_CLASS = "gauntlet-pools-scroll-container";
+const HIDE_SCROLLBAR_CSS = `.${HIDE_SCROLLBAR_CLASS}::-webkit-scrollbar { display: none; }`;
 
 // One cohesive card, same outer treatment as schedule.tsx (rgba(17, 20,
 // 24, 0.92) fill, 20px radius, inline-block so it sizes to its own
@@ -1592,7 +1822,23 @@ const cardStyle: React.CSSProperties = {
   // covers edge-to-edge with no seam.
   borderRadius: 0,
   position: "relative",
-  overflow: "hidden",
+  // Real bug, found and fixed: `overflow: "hidden"` here (kept for
+  // corner-clipping when this box still had rounded corners -- no
+  // longer needed now that borderRadius is 0, see its own comment just
+  // above) was silently breaking `position: sticky` on the title bar
+  // and Winners/Losers section labels nested inside it. Any ancestor
+  // with an `overflow` value other than `visible` counts as a
+  // "scrolling ancestor" for CSS's own sticky-positioning algorithm --
+  // this box (sized exactly to its own content via `width: max-content`
+  // below, so nothing ever actually overflows ITS OWN bounds) was the
+  // NEARER such ancestor over the real one (the scroll container two
+  // levels up), so sticky positioning was computing itself relative to
+  // a box that never scrolls at all, meaning it never activated --
+  // confirmed live, the title bar was measured sitting at its plain
+  // un-stuck flow position (`left: -5197px`, matching the page's own
+  // current horizontal scroll) instead of pinned at its sticky `left:
+  // 40`. Removed -- nothing here needs clipping anymore with square
+  // corners and the banner already living outside this box entirely.
   display: "inline-block",
   // Confirmed as the real cause of a genuine bug: text (long player
   // names, e.g. real sheet data like "Sambruh12345678") visibly running
@@ -1624,26 +1870,42 @@ const cardStyle: React.CSSProperties = {
 // cardStyle's own box is what overflow:hidden clips the banner against
 // -- padding on that same box would shrink the banner's visible area
 // along with the real content instead of only the latter.
+// display: "grid" (single implicit column, auto-placed rows), not the
+// flex column this used to be -- real bug, found and fixed: `position:
+// sticky` on the title bar (its own direct child, see titleBarStyle's
+// own call site) wasn't activating despite `align-self: "flex-start"`
+// already correctly preventing it from stretching (confirmed live: its
+// own measured width, ~1082px, matched its real content, not some
+// stretched value) -- isolated flex reproductions outside this
+// component couldn't reproduce the failure either, so the exact
+// mechanism was never pinned down for certain. The Winners/Losers
+// section labels, which sit in gridStyle's OWN CSS Grid a level deeper,
+// had an analogous stretch problem but responded correctly to
+// `justify-self: "start"` once diagnosed -- switching this container
+// from flex to grid too let the title bar use that same proven-working
+// mechanism instead of continuing to chase whatever the flex-specific
+// difference was.
+// Just a padded wrapper now -- used to be a flex column laying out the
+// title bar and the pool grid as two stacked siblings, but the title bar
+// moved to be a genuine grid item INSIDE gridStyle's own grid instead
+// (see its own call site's comment for why), so this only ever wraps
+// that one child now.
 const cardContentStyle: React.CSSProperties = {
   position: "relative",
   padding: 40,
-  display: "flex",
-  flexDirection: "column",
-  gap: 128,
 };
 
 // This overlay's own title bar -- same solid-panel treatment as
 // schedule.tsx's header (COLORS.panel fill, 3px solid white border,
 // 14px radius) but without that overlay's day/clock/status-badge
-// column, since nothing here plays quite that role. `alignSelf:
-// "flex-start"` -- explicit user request: this used to stretch to match
-// however wide the grid below it rendered (cardContentStyle's flex
-// column defaults every child to `stretch`), reading as a full-width
-// strip rather than a bar that hugs just its own icon+title content.
+// column, since nothing here plays quite that role.
 const titleBarStyle: React.CSSProperties = {
+  // display/alignItems here lay out THIS bar's own children (icon +
+  // title text) -- unrelated to how the bar itself sits within
+  // gridStyle's own grid, which is `justifySelf: "start"` now, set at
+  // this style's own call site.
   display: "flex",
   alignItems: "center",
-  alignSelf: "flex-start",
   gap: 24,
   background: COLORS.panel,
   border: "3px solid rgb(255, 255, 255)",
