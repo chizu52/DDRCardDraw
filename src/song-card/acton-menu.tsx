@@ -50,6 +50,7 @@ export function ActionMenu(props: Props) {
   } = props;
   const { t } = useIntl();
   const getMetaString = useGetMetaString();
+
   return (
     <Menu>
       {onProtect && (
