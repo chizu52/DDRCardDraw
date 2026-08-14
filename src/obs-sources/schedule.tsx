@@ -331,12 +331,8 @@ function currentLocalTimeString(ms: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-// Automatic mode caps the overlay to "whatever's happening now, plus
-// the next few" rather than showing the whole day at once.
-const MAX_AUTO_VISIBLE_ITEMS = 4;
-
-/** Automatic mode's own row selection, adapted from a sibling fork's
- * own automatic-scheduling PR (github.com/vlnguyen/
+/** Automatic mode's own current/completed derivation, adapted from a
+ * sibling fork's own automatic-scheduling PR (github.com/vlnguyen/
  * DDRCardDraw-Storm-2026#45) -- ported the logic, not the code verbatim
  * (that version hardcoded America/New_York; see currentLocalTimeString
  * above for why this uses local time instead), and wired into THIS
@@ -344,33 +340,28 @@ const MAX_AUTO_VISIBLE_ITEMS = 4;
  * than a separate visual treatment, so automatic mode still looks like
  * the rest of this overlay's established design language.
  *
- * `rows` must already be sorted by time ascending. Walks the list and
- * remembers the LAST row whose time has already arrived (<= `now`) --
- * that's where the visible window starts, sliced to
- * MAX_AUTO_VISIBLE_ITEMS. A row before that point (already finished) is
- * simply not in the slice at all, rather than shown dimmed the way
- * manual mode's own `completed` rows are -- "drop off the list" is the
- * whole point of automatic mode, not a dimmed leftover.
- * `isFirstRowCurrent` is false only when NOTHING has started yet (the
- * whole day is still ahead) -- in that case this shows from the very
- * first row with nothing marked current, same as an event that hasn't
- * begun should read. */
-function visibleRows(
+ * `rows` must already be sorted by time ascending, and the full list is
+ * always shown -- no fixed row-count cap, and a row whose time has
+ * already passed stays in the list marked `completed` (dimmed, same
+ * treatment manual mode's own `completed` rows get) rather than being
+ * removed. Walks the list and remembers the index of the LAST row whose
+ * time has already arrived (<= `now`) -- that's the currently-active
+ * row; every row before it is completed. `started` is false only when
+ * NOTHING has started yet (the whole day is still ahead), in which case
+ * no row is current or completed. */
+function autoRowStatus(
   rows: ScheduleItem[],
   now: string,
-): { rows: ScheduleItem[]; isFirstRowCurrent: boolean } {
-  let start = 0;
+): { currentIndex: number; started: boolean } {
+  let currentIndex = 0;
   let started = false;
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].time && rows[i].time! <= now) {
-      start = i;
+      currentIndex = i;
       started = true;
     }
   }
-  return {
-    rows: rows.slice(start, start + MAX_AUTO_VISIBLE_ITEMS),
-    isFirstRowCurrent: started,
-  };
+  return { currentIndex, started };
 }
 
 // Train-station-board-style status, bottom-right of the header (see the
@@ -536,11 +527,10 @@ function displayTimeEqual(a: DisplayTime | null, b: DisplayTime | null) {
 // `current`/`completed` are passed in explicitly now, not read off
 // `row` directly -- manual mode passes exactly `row.current`/
 // `row.completed` (unchanged behavior), automatic mode instead derives
-// them from comparing `row.time` against the real clock (see
-// Schedule's own visibleRows call). This component doesn't need to
-// know which mode produced them, so both modes share the identical
-// rendering below rather than automatic mode needing its own separate
-// row treatment.
+// them from comparing `row.time` against the real clock (see Schedule's
+// own autoRowStatus call). This component doesn't need to know which
+// mode produced them, so both modes share the identical rendering below
+// rather than automatic mode needing its own separate row treatment.
 function ScheduleRow({
   row,
   index,
@@ -918,15 +908,16 @@ export function Schedule() {
     (statusDelta
       ? shiftTimeString(currentLocalTimeString(nowMs), -statusDelta)
       : currentLocalTimeString(nowMs)) ?? currentLocalTimeString(nowMs);
-  // Manual mode: show everything for the day, unchanged. Automatic
-  // mode: slice down to "current plus the next few" via visibleRows,
-  // comparing each row's own time against the real clock (nowMs, this
-  // component's own existing ticking clock -- no separate poll timer
-  // needed, this already updates once a second), adjusted for any live
-  // Ahead/Delayed status above.
-  const { rows, isFirstRowCurrent } = isAutomatic
-    ? visibleRows(sorted, nowForComparison)
-    : { rows: sorted, isFirstRowCurrent: false };
+  // Both modes always show the full day's rows -- automatic mode just
+  // derives current/completed per row (autoRowStatus) by comparing each
+  // row's own time against the real clock (nowMs, this component's own
+  // existing ticking clock -- no separate poll timer needed, this
+  // already updates once a second), adjusted for any live Ahead/Delayed
+  // status above, instead of reading the operator-set flags.
+  const rows = sorted;
+  const autoStatus = isAutomatic
+    ? autoRowStatus(sorted, nowForComparison)
+    : { currentIndex: -1, started: false };
   // Derived from `renderedStatus` (this badge's own lagged value), NOT
   // the live `scheduleStatus` -- it keeps showing the OLD state/minutes
   // until fully invisible, then swaps, so the label/color here must lag
@@ -1224,14 +1215,12 @@ export function Schedule() {
                   scheduleStatus={scheduleStatus}
                   entranceSettled={entranceSettled}
                   // Manual: exactly row.current/row.completed, same as
-                  // always. Automatic: only the first VISIBLE row can
-                  // read as current (and only if visibleRows actually
-                  // found a started item) -- completed is always false
-                  // here, since a genuinely finished row is already
-                  // excluded from `rows` entirely rather than shown
-                  // dimmed (see visibleRows' own doc).
-                  current={isAutomatic ? i === 0 && isFirstRowCurrent : !!row.current}
-                  completed={isAutomatic ? false : !!row.completed}
+                  // always. Automatic: the row at autoStatus.currentIndex
+                  // reads as current (only once something has actually
+                  // started); every row before it reads as completed
+                  // instead of being removed from the list.
+                  current={isAutomatic ? i === autoStatus.currentIndex && autoStatus.started : !!row.current}
+                  completed={isAutomatic ? autoStatus.started && i < autoStatus.currentIndex : !!row.completed}
                 />
               ))}
             </div>

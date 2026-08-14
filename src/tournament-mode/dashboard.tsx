@@ -1398,12 +1398,12 @@ function ScheduleSettingsSection() {
             ...SCHEDULE_DAYS.map(({ id, label }) => ({ label, value: id })),
           ]}
         />
-        {/* Explicit user request: a way to switch the whole overlay
-            between the original manual current/completed control (each
-            day's own editor below, untouched) and automatic mode, which
-            derives them live from the clock instead -- see
-            event.slice.ts's own doc on scheduleMode and schedule.tsx's
-            visibleRows for how automatic mode actually works. */}
+        {/* Switches the whole overlay between the original manual
+            current/completed control (each day's own editor below,
+            untouched) and automatic mode, which derives them live from
+            the clock instead -- see event.slice.ts's own doc on
+            scheduleMode and schedule.tsx's autoRowStatus for how
+            automatic mode actually works. */}
         <RadioGroup
           label="Scheduling mode"
           inline

@@ -139,14 +139,14 @@ interface EventState {
   /** "manual" (default) keeps the schedule overlay's original behavior
    * -- current/completed per row are exactly whatever the operator set
    * by hand in dashboard.tsx's ScheduleDayEditor. "automatic" instead
-   * derives current/upcoming live by comparing each row's own stored
-   * `time` against the real clock (see schedule.tsx's visibleRows),
-   * capping the overlay to the current item plus the next few and
-   * dropping items off the list once their time has passed -- no
-   * manual clicking through the schedule during the event. Global, not
-   * per-day (same as scheduleSubtitle/scheduleIcon) -- this is how the
-   * WHOLE overlay behaves, not a per-day choice. Adapted from a sibling
-   * fork's own automatic-mode PR (github.com/vlnguyen/
+   * derives current/completed live by comparing each row's own stored
+   * `time` against the real clock (see schedule.tsx's autoRowStatus) --
+   * no manual clicking through the schedule during the event. The full
+   * day's rows always stay visible in both modes; a row whose time has
+   * passed is marked completed (dimmed), never removed from the list.
+   * Global, not per-day (same as scheduleSubtitle/scheduleIcon) -- this
+   * is how the WHOLE overlay behaves, not a per-day choice. Adapted
+   * from a sibling fork's own automatic-mode PR (github.com/vlnguyen/
    * DDRCardDraw-Storm-2026#45). */
   scheduleMode: "manual" | "automatic";
   /** A free-text title shown on the gauntlet-pools overlay's own header
