@@ -100,15 +100,19 @@ const ANIMATIONS_CSS = `
    instance -- only animation-duration and the --marquee-distance custom
    property vary per row, so a longer overflow gets a proportionally
    longer cycle at a roughly constant scroll speed. Loops via a fade,
-   not a scroll back the way it came -- the "snap" at 86%/87% happens
+   not a scroll back the way it came -- the "snap" at 82%/83% happens
    while opacity is already 0, so it's invisible rather than a visible
-   jump. */
+   jump. The fade out/in spans (78->82%, 83->87%) are half the width of
+   the pauses either side of them -- twice the speed -- so the reset
+   between loops reads as quick rather than lingering; the time that
+   frees up rolls into the final pause (87->100%) instead of shortening
+   the cycle's own total duration. */
 @keyframes scheduleMarqueeScroll {
   0%, 10% { transform: translateX(0); opacity: 1; }
   70%, 78% { transform: translateX(var(--marquee-distance, 0px)); opacity: 1; }
-  86% { transform: translateX(var(--marquee-distance, 0px)); opacity: 0; }
-  87% { transform: translateX(0); opacity: 0; }
-  95%, 100% { transform: translateX(0); opacity: 1; }
+  82% { transform: translateX(var(--marquee-distance, 0px)); opacity: 0; }
+  83% { transform: translateX(0); opacity: 0; }
+  87%, 100% { transform: translateX(0); opacity: 1; }
 }
 `;
 // Values that change WITHOUT the whole panel re-entering -- the day
@@ -697,6 +701,23 @@ function ScheduleRow({
     MARQUEE_BASE_DURATION_S +
     Math.max(eventDistance, descDistance) / MARQUEE_SPEED_PX_PER_S;
 
+  // Captured once, from this row's own first render, and frozen from
+  // then on -- picking the entrance keyframe (below) from the live
+  // `completed` value instead would mean any later flip WHILE the
+  // entrance is still playing -- an automatic-mode clock tick crossing
+  // this row's time, or an operator toggling scheduleMode -- changes
+  // the `animation` value mid-flight. CSS treats a changed animation-
+  // name as a brand new instance, restarting it from its own
+  // animationDelay all over again, which is exactly the kind of
+  // refresh-from-an-unrelated-value this entrance isn't supposed to
+  // have (and can leave it torn off mid-flight, never reaching full
+  // opacity, once entranceSettled's own fixed timer fires and removes
+  // `animation` before the restarted instance finished). Once settled,
+  // this is unused -- the animation property is dropped entirely and
+  // the LIVE `completed` value takes over via the plain opacity/
+  // transition below instead, same as any other post-settle change.
+  const [entranceIsCompleted] = useState(completed);
+
   // completed wins over current if both are somehow true -- manual
   // mode's editor never produces that combination itself, but
   // "already happened" is the more definitive of the two claims if it
@@ -807,6 +828,21 @@ function ScheduleRow({
         // value) wins until it finishes, so there's no visible seam at
         // the handoff either way.
         opacity: isCompleted ? 0.9 : 1,
+        // Permanently present, not removed once entranceSettled -- it's
+        // the exact value the entrance keyframes' own `to` state already
+        // ends on, so this changes nothing about where the row actually
+        // sits. What it avoids is the handoff itself: an element under
+        // an active CSS animation typically gets its own compositor
+        // layer with independently-rounded subpixel positioning, and
+        // dropping the `transform` property entirely (rather than
+        // leaving this SAME value in place) hands it back to plain,
+        // non-composited layout rasterization -- a different rounding
+        // path that can land a hair off the animated one. That's the
+        // "very subtle shift" some rows still had even after the
+        // font-metrics fix above: not a layout bug, a rendering-path
+        // handoff. Keeping this set at all times means there's no
+        // handoff left to cause it.
+        transform: "translateY(0)",
         // Only active in practice once entranceSettled -- while the
         // entrance animation is still playing, it owns these same
         // properties outright. Once settled, this is what makes a
@@ -819,7 +855,7 @@ function ScheduleRow({
         ...(entranceSettled
           ? {}
           : {
-              animation: isCompleted
+              animation: entranceIsCompleted
                 ? "scheduleSlideDownFade 0.5s ease both"
                 : "scheduleSlideDown 0.5s ease both",
               animationDelay: `${0.3 + index * 0.05}s`,
@@ -972,37 +1008,104 @@ export function Schedule() {
   // see event.slice.ts's own doc on scheduleMode.
   const scheduleMode = useAppState((s) => s.event.scheduleMode);
 
-  // Same ticking pattern as bracket-tree.tsx's ElapsedTimerPill --
-  // Date.now() has to live inside the effect, not called directly in
-  // the render body (React's purity rule), and starts at 0 for the same
-  // reason: the effect sets the real value on mount, a render or two
-  // before that would otherwise show a bogus 1970 clock briefly. The
-  // synchronous setState here is deliberate, not the "derive state from
-  // props in an effect" antipattern set-state-in-effect normally warns
-  // about -- there's no prop/state this is derived from, it's a genuine
-  // external clock this component has to poll.
-  const [nowMs, setNowMs] = useState(0);
+  // A lazy initializer (not useState(0) + an effect setting the real
+  // value on mount) -- this used to start at 0 and get corrected a
+  // render or two later, on the theory that Date.now() can't be called
+  // directly in the render body. That's true for a value that has to
+  // stay in sync with re-renders, but an initial STATE value is exactly
+  // what lazy initializers are for (React calls this once, at mount,
+  // same as any other one-time impure read). Starting at the real time
+  // immediately -- rather than a bogus 0 that self-corrects moments
+  // later -- matters here beyond just the clock text: automatic mode's
+  // current/completed (autoRowStatus below) are derived from nowMs, so
+  // the old 0-then-corrected sequence meant every row briefly computed
+  // as "not started yet" on mount, then flipped for real an instant
+  // later -- exactly the kind of unrelated-value-triggered animation
+  // restart entranceIsCompleted (ScheduleRow, below) now also guards
+  // against directly.
+  const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
-    // eslint-disable-next-line react-hooks-js/set-state-in-effect
-    setNowMs(Date.now());
     const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // The row entrance (below) slides/fades using a CSS transform, which
+  // doesn't itself affect layout -- but the TEXT it's animating in
+  // (TITLE_FONT_FAMILY/BODY_FONT_FAMILY, see FONT_FACE_CSS) does, once
+  // its real @font-face file finishes loading and swaps in for whatever
+  // fallback system font it rendered with initially. That swap changes
+  // glyph metrics -- a row's real height/width -- out from under an
+  // entrance that's already mid-flight (or worse, already finished and
+  // handed off to plain layout), which is what read as "final position/
+  // sizing off compared to the animation": the row wasn't actually
+  // animating to the wrong place, the place itself moved right after.
+  // Gating the entrance on document.fonts.ready (same signal
+  // useMarqueeDistances below already waits on for its own measurements)
+  // means every row's very first entrance paint already has its real,
+  // final text metrics, so there's nothing left to reflow out from
+  // under it.
+  //
+  // Always starts false and is only ever confirmed from the effect, NOT
+  // a synchronous document.fonts.status check up front (a version that
+  // did try that) -- FONT_FACE_CSS's own <style> tag registering the
+  // @font-face rules is written by THIS SAME component, in THIS SAME
+  // render, so on the very first render ever there's a real chance the
+  // browser hasn't even registered/started loading them yet, and
+  // document.fonts.status reads "loaded" vacuously (nothing pending to
+  // wait on) rather than truthfully. That false positive let the
+  // entrance start immediately on a fresh load, before the swap, which
+  // is exactly the residual "very subtle shift" still being seen -- a
+  // smaller version of the same bug, now down to just the initial load
+  // instead of every day switch too. The effect below only ever runs
+  // after commit, by which point that <style> tag is definitely in the
+  // DOM, so document.fonts.ready reflects the real state. The one-frame
+  // delay this costs on a fully-cached font is well within
+  // ROW_ENTRANCE_BASE_DELAY_S's own 0.3s head start and isn't visible.
+  const [fontsReady, setFontsReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts.ready.then(() => {
+      if (!cancelled) setFontsReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Rows only get their staggered slide-in entrance (scheduleSlideDown/
   // scheduleSlideDownFade below) while this is false -- true for the
-  // brief window right after the panel (re)mounts on a day change, then
-  // flips permanently true until the next one. Once settled, a row's
-  // background/border/opacity are plain inline styles with a CSS
-  // `transition` instead (see the row's style below) -- current/
-  // completed toggling smoothly crossfades between those two resting
-  // looks rather than replaying an entrance meant for "this row is
-  // appearing for the first time." Keyed on `day` (not e.g. items.length)
-  // since a day change is the only thing that still remounts the panel
-  // -- see the outer key's own comment.
-  const [entranceSettled, setEntranceSettled] = useState(false);
-  useEffect(() => {
+  // brief window right after a day is first selected/switched to (and
+  // fonts are ready, see above), then flips permanently true until the
+  // next switch. Once settled, a row's background/border/opacity are
+  // plain inline styles with a CSS `transition` instead (see the row's
+  // style below) -- current/completed toggling smoothly crossfades
+  // between those two resting looks rather than replaying an entrance
+  // meant for "this row is appearing for the first time."
+  //
+  // Started SYNCHRONOUSLY, during render (the `if` below), not from an
+  // effect -- an effect-based version lands one whole commit behind: the
+  // FIRST paint of the new day's rows (or of fonts finishing load) would
+  // still see the OLD entranceSettled (true, left over from already
+  // having settled), so every row would render instantly at its resting
+  // opacity/position with no entrance at all. Only a moment later would
+  // the effect fire and flip it false, attaching the animation -- which,
+  // because fill:both applies its `from` state the instant it attaches,
+  // snaps every row backward (invisible, offset) before playing forward
+  // again. That flash-then-correct is exactly the reported bug: rows
+  // briefly showing their final content/position, then visibly re-
+  // hiding and sliding back in. Comparing against a tracked
+  // `entrancedDay` during render -- a React-supported pattern for
+  // resetting state when a prop changes -- means the very first commit
+  // for the new day already has entranceSettled=false, so the entrance
+  // plays cleanly from the start instead of flashing first.
+  const [entranceSettled, setEntranceSettled] = useState(true);
+  const [entrancedDay, setEntrancedDay] = useState<ScheduleDay | null>(null);
+  if (fontsReady && day !== entrancedDay) {
+    setEntrancedDay(day);
     setEntranceSettled(false);
+  }
+  useEffect(() => {
+    if (entrancedDay === null) return; // fonts not ready yet -- hasn't started
     // matches the row stagger formula below (ROW_ENTRANCE_BASE_DELAY_S
     // + ROW_ENTRANCE_STAGGER_S/row) plus that row's own
     // ROW_ENTRANCE_DURATION_S, with a little slack so the handoff to
@@ -1015,8 +1118,8 @@ export function Schedule() {
       (maxDelaySec + ROW_ENTRANCE_DURATION_S) * 1000 + 100,
     );
     return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately day-only, see comment above
-  }, [day]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately entrancedDay-only: the settle timer should only ever (re)schedule for an entrance that actually just started
+  }, [entrancedDay]);
 
   // Two independent crossfades, one per header element -- see
   // useCrossfade's own doc for why not one shared clock. Each fades only
@@ -1197,10 +1300,6 @@ export function Schedule() {
               of two different treatments stitched together. */}
           <div
             style={{
-              // Anchors the on-time/delayed badge below to this panel's
-              // own bottom-right corner, not the outer card's -- see
-              // that badge's own comment.
-              position: "relative",
               background: COLORS.panel,
               border: `3px solid rgb(255, 255, 255)`,
               borderRadius: 14,
@@ -1208,14 +1307,12 @@ export function Schedule() {
               // header carries the title, the single biggest thing on
               // the overlay, so the panel itself reads as a clear step
               // up from the rows below it, not the same size box with
-              // bigger text inside an identically-sized shell. Extra
-              // bottom padding for the status badge below -- its
-              // position:absolute (anchored to this panel, not the
-              // outer card) would otherwise sit ON TOP of the day/clock
-              // column instead of below it, since the panel's own
-              // height is normally just tall enough for that column's
-              // own content with no badge-sized gap left under it.
-              padding: "32px 32px 60px",
+              // bigger text inside an identically-sized shell. Uniform
+              // now that the status badge is a normal flex child in the
+              // day/clock column (see its own comment) instead of
+              // position:absolute -- no extra bottom padding needed to
+              // reserve room for it anymore.
+              padding: 32,
               display: "flex",
               alignItems: "flex-start",
               justifyContent: "space-between",
@@ -1262,7 +1359,7 @@ export function Schedule() {
                 style={{
                   fontFamily: TITLE_FONT_FAMILY,
                   color: COLORS.text,
-                  fontSize: 44,
+                  fontSize: 50,
                   animation: "scheduleFadeIn 0.4s ease both",
                   animationDelay: "0.1s",
                 }}
@@ -1333,47 +1430,58 @@ export function Schedule() {
               >
                 {formatClock(nowMs)}
               </div>
-            </div>
-            {/* Train-station-board-style status, bottom-right of the
-                header panel -- operator-set (see scheduleStatus/
-                SCHEDULE_STATUS_LABELS above), always shown once a day's
-                selected. Has to be a CHILD of the header panel (not a
-                sibling after it closes) so its position:absolute
-                anchors to that panel's own position:relative, not the
-                outer card's. */}
-            <div
-              style={{
-                position: "absolute",
-                bottom: 16,
-                right: 16,
-                padding: "6px 16px",
-                borderRadius: 999,
-                // statusLabel/statusColor are both already derived from
-                // renderedStatus above, not the live value -- an
-                // operator flipping ahead/on-time/delayed, editing the
-                // minutes, or switching days (this badge shows a
-                // different day's status even when it coincidentally
-                // has the same state/minutes as the last one) fades
-                // this fully out, THEN swaps text+color, THEN fades it
-                // back in. See this badge's own useCrossfade call above.
-                border: `3px solid ${statusColor}`,
-                background: blendOverPanel(statusColor, 0.15),
-                color: statusColor,
-                fontSize: 16,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase",
-                opacity: statusOpacity,
-                transition: `opacity ${VALUE_FADE_MS}ms ease`,
-              }}
-            >
-              {statusLabel}
+              {/* Train-station-board-style status -- operator-set (see
+                  scheduleStatus/SCHEDULE_STATUS_LABELS above), always
+                  shown once a day's selected. A normal flex child now,
+                  directly below the clock in the same right-aligned
+                  column, not position:absolute pinned to the header
+                  panel's own bottom-right corner. */}
+              <div
+                style={{
+                  padding: "6px 16px",
+                  borderRadius: 999,
+                  // statusLabel/statusColor are both already derived from
+                  // renderedStatus above, not the live value -- an
+                  // operator flipping ahead/on-time/delayed, editing the
+                  // minutes, or switching days (this badge shows a
+                  // different day's status even when it coincidentally
+                  // has the same state/minutes as the last one) fades
+                  // this fully out, THEN swaps text+color, THEN fades it
+                  // back in. See this badge's own useCrossfade call above.
+                  border: `3px solid ${statusColor}`,
+                  background: blendOverPanel(statusColor, 0.15),
+                  color: statusColor,
+                  fontSize: 16,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  opacity: statusOpacity,
+                  transition: `opacity ${VALUE_FADE_MS}ms ease`,
+                }}
+              >
+                {statusLabel}
+              </div>
             </div>
           </div>
           {rows.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               {rows.map((row, i) => (
                 <ScheduleRow
-                  key={i}
+                  // Prefixed with `day`, not just the index -- otherwise
+                  // switching days doesn't remount a row at an index
+                  // that existed under the OLD day too, it just updates
+                  // it in place with the new day's data. That split rows
+                  // into two groups with different, inconsistent
+                  // behavior: an index reused across the switch treated
+                  // it as a live update (its own time crossfade firing
+                  // independently of, and out of sync with, the row's
+                  // outer entrance animation), while only a genuinely
+                  // new index (the new day having more rows than the
+                  // old one had) got a clean fresh mount. Keying on the
+                  // day makes every row a fresh mount on every switch,
+                  // uniformly, so all of them play the exact same
+                  // entrance with nothing left over from the previous
+                  // day's instance.
+                  key={`${day}-${i}`}
                   row={row}
                   index={i}
                   scheduleStatus={scheduleStatus}
