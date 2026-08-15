@@ -54,13 +54,14 @@ import {
   sheetsTokenAtom,
   spreadsheetIdAtom,
   SheetsAuthError,
+  SheetsRangeError,
   CellColor,
   batchUpdateValues,
 } from "../sheets/sheets-export";
 import {
   parsePoolsFromRows,
-  parsePendingRows,
-  mergePendingIntoPool,
+  mergeCaptureIntoPool,
+  CaptureResultRow,
   ParsedSheet,
   colIndexToLetter,
   sumScores,
@@ -91,38 +92,26 @@ import styles from "./dashboard.css";
 import { iconLabel, localIcons } from "../obs-sources/local-icons";
 
 // Score Scope (the Python CV score reader) runs a small local HTTP
-// server so this button can trigger a fresh capture before importing,
-// instead of importing whatever Pending happened to already contain.
-// Only reachable if that app is running on the same machine as the
-// browser -- if it's not, we fall back to importing existing Pending
-// data as-is (see triggerCvCapture's null case).
+// server so this button can trigger a fresh capture and get the read
+// scores back directly in the same response -- no Google Sheets
+// "Pending" tab in between anymore. Only reachable if that app is
+// running on the same machine as the browser -- if it's not, there's
+// nothing to import (see triggerCvCapture's null case).
 const CV_READER_TRIGGER_URL = "http://localhost:8765/capture";
 const CV_READER_TRIGGER_TIMEOUT_MS = 35000;
-
-// The "Pending" tab is a single fixed 4-row staging block, not a
-// per-pool reserved range: header on row 1, then exactly 4 data rows
-// (2-5), reused/overwritten by whatever was captured most recently.
-// start_row is where Score Scope should start writing captured songs --
-// see its src/read_scores.py -- always the Pending tab's first data
-// row, never pool.rows[*].rowIndex (a different tab's row numbering).
-const PENDING_START_ROW = 2;
 
 interface CvCaptureResult {
   ok: boolean;
   reason?: string;
-  written?: number;
-  dry_run?: boolean;
+  read_count?: number;
   archived?: number;
+  results?: CaptureResultRow[];
 }
 
-/** Returns null if the CV reader isn't running/reachable -- that's not an
- * error, just means we import whatever Pending already has. `pool` is
+/** Returns null if the CV reader isn't running/reachable. `pool` is
  * passed through so the CV reader can archive uncropped per-player source
  * screenshots under Matches/<pool>/ -- purely for building up reference
- * material, it has no effect on which sheet rows get written to.
- * start_row (PENDING_START_ROW) is what actually does: without it, Score
- * Scope reads and logs scores but doesn't know where to write them, so
- * it skips writing to the sheet entirely. */
+ * material, it has no effect on the returned results. */
 async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -133,7 +122,7 @@ async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
     const res = await fetch(CV_READER_TRIGGER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pool, start_row: PENDING_START_ROW }),
+      body: JSON.stringify({ pool }),
       signal: controller.signal,
     });
     if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
@@ -147,18 +136,15 @@ async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
 
 function describeCaptureResult(result: CvCaptureResult | null): string {
   if (result === null) {
-    return "CV reader isn't running -- imported existing Pending data.";
+    return "CV reader isn't running -- nothing to import.";
   }
   const archivedNote = result.archived
     ? ` Archived ${result.archived} source screenshot(s).`
     : "";
   if (!result.ok) {
-    return `CV reader capture failed (${result.reason ?? "unknown error"}) -- imported existing Pending data.${archivedNote}`;
+    return `CV reader capture failed (${result.reason ?? "unknown error"}).${archivedNote}`;
   }
-  if (result.dry_run) {
-    return `CV reader captured in dry-run mode (nothing new written) -- imported existing Pending data.${archivedNote}`;
-  }
-  return `CV reader captured fresh scores (${result.written ?? 0} cell(s) written) before importing.${archivedNote}`;
+  return `CV reader captured ${result.read_count ?? 0} confident score(s).${archivedNote}`;
 }
 
 type DashboardTabId = "obs-text-sources" | "matches" | "matches-settings";
@@ -227,9 +213,7 @@ function MatchesImportPanel() {
   // Final Ranking column's own cell colors -- same automatic,
   // color-driven advancement gauntlet-pools.tsx uses (see
   // finalRankingStatusByName), rather than a manually configured count.
-  const [rankingColors, setRankingColors] = useState<(CellColor | null)[]>(
-    [],
-  );
+  const [rankingColors, setRankingColors] = useState<(CellColor | null)[]>([]);
   const [status, setStatus] = useState<ExportStatus | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [importingPool, setImportingPool] = useState<string | null>(null);
@@ -271,6 +255,10 @@ function MatchesImportPanel() {
         setStatus({ type: "danger", message: "Session expired." });
         return;
       }
+      if (err instanceof SheetsRangeError) {
+        setStatus({ type: "danger", message: err.message });
+        return;
+      }
       setStatus({
         type: "danger",
         message: err instanceof Error ? err.message : "Read failed.",
@@ -285,43 +273,44 @@ function MatchesImportPanel() {
     void loadPools();
   }, [loadPools]);
 
-  const importPoolFromPending = async (
+  // Renamed from importPoolFromPending -- there's no Google Sheets
+  // "Pending" tab in this flow anymore. Score Scope's HTTP response
+  // carries the actual read scores now (see triggerCvCapture), merged
+  // directly into this pool's local, still-editable rows (updateCell
+  // below adjusts them from there) -- no separate Sheets read needed to
+  // pick the capture back up, so this doesn't touch token/spreadsheetId
+  // at all.
+  const importPoolFromCapture = async (
     poolIdx: number,
     pool: ParsedSheet["pools"][number],
   ) => {
-    if (!token || !spreadsheetId) return;
     setImportingPool(pool.title);
     try {
       const captureResult = await triggerCvCapture(pool.title);
       const captureNote = describeCaptureResult(captureResult);
 
-      const rows = await readSheetValues(token, spreadsheetId, "Pending");
-      const pending = parsePendingRows(rows);
-      const { pool: mergedPool, mergedCount } = mergePendingIntoPool(
+      if (!captureResult?.ok || !captureResult.results?.length) {
+        setStatus({
+          type: "danger",
+          message: `No scores captured. ${captureNote}`,
+        });
+        return;
+      }
+
+      const { pool: mergedPool, mergedCount } = mergeCaptureIntoPool(
         pool,
-        pending,
+        captureResult.results,
       );
 
       setSheet((prev) => ({
         pools: prev.pools.map((p, pi) => (pi === poolIdx ? mergedPool : p)),
       }));
 
-      if (!pending.length) {
-        setStatus({
-          type: "danger",
-          message: `Pending tab has no rows with any scores filled in. ${captureNote}`,
-        });
-      } else {
-        setStatus({
-          type: "success",
-          message: `Merged ${mergedCount} row(s) from Pending into ${pool.title}, in order. ${captureNote}`,
-        });
-      }
+      setStatus({
+        type: "success",
+        message: `Merged ${mergedCount} row(s) from Score Scope into ${pool.title}, in order. ${captureNote}`,
+      });
     } catch (err) {
-      if (err instanceof SheetsAuthError) {
-        setStatus({ type: "danger", message: "Session expired." });
-        return;
-      }
       setStatus({
         type: "danger",
         message: err instanceof Error ? err.message : "Import failed.",
@@ -512,7 +501,7 @@ function MatchesImportPanel() {
                     small
                     icon={<Import />}
                     loading={importingPool === pool.title}
-                    onClick={() => importPoolFromPending(poolIdx, pool)}
+                    onClick={() => importPoolFromCapture(poolIdx, pool)}
                   >
                     Capture
                   </Button>
@@ -1023,7 +1012,6 @@ interface DividerRow {
 function emptyDividerRow(): DividerRow {
   return { id: nanoid(5), beforeSetNumber: 1, label: "" };
 }
-
 
 /** Same URL-embedded-Sheets-credentials pattern as Pool Results' own
  * CopyOverlayUrlButton above (see its comment) -- this overlay reads
@@ -1855,9 +1843,7 @@ function ObsTextSources() {
               label={label}
               value={value}
               onEdit={() => setCurrentEdit(id)}
-              onDelete={() =>
-                dispatch(eventSlice.actions.removeLabel({ id }))
-              }
+              onDelete={() => dispatch(eventSlice.actions.removeLabel({ id }))}
             />
           ))}
         </CardList>

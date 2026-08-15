@@ -327,7 +327,7 @@ export function classifyRankingColor(
   const delta = max - min;
   if (delta < 0.06) return null; // too gray/pale/white to have a real hue
   let hue: number;
-  if (max === r) hue = (((g - b) / delta) % 6 + 6) % 6;
+  if (max === r) hue = ((((g - b) / delta) % 6) + 6) % 6;
   else if (max === g) hue = (b - r) / delta + 2;
   else hue = (r - g) / delta + 4;
   hue *= 60;
@@ -379,27 +379,15 @@ export function colIndexToLetter(col: number): string {
   return letter;
 }
 
-export interface PendingRow {
-  songs: string[];
-  rowIndex: number;
-}
-
-/**
- * Parses the "Pending" tab -- the CV score-reader's staging area. Header is
- * Seed | Pool | Song 1 | Song 2 | Song 3 | Song 4. Rows are returned in
- * sheet order with no identity matching (no Seed/Pool lookup) -- merging
- * is purely positional, see mergePendingIntoPool. Fully blank rows are
- * skipped so they don't consume a slot.
- */
-export function parsePendingRows(rows: string[][]): PendingRow[] {
-  const result: PendingRow[] = [];
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    const songs = [2, 3, 4, 5].map((c) => (row[c] || "").trim());
-    if (songs.every((s) => !s)) continue;
-    result.push({ songs, rowIndex: i });
-  }
-  return result;
+/** One on-screen player column's read from a Score Scope capture -- see
+ * that app's src/read_scores.py's results_to_payload. `column` is which
+ * player box (0-3) this came from, not a sheet row -- there's no sheet
+ * involved at all anymore. `songs` entries are null for a low-confidence
+ * read Score Scope chose not to report, same "better a blank than a
+ * wrong-but-plausible score" idea the old Pending tab used. */
+export interface CaptureResultRow {
+  column: number;
+  songs: (string | null)[];
 }
 
 export interface MergeResult {
@@ -408,25 +396,26 @@ export interface MergeResult {
 }
 
 /**
- * Overlays Pending rows onto a single already-parsed pool purely by
- * position: the 1st Pending row -> the pool's 1st row, 2nd -> 2nd, and so
- * on -- no Seed/name lookup. Only fills song slots that Pending actually
- * has a value for; blanks fall back to whatever was already in the pool's
- * row, so a partial CV read never clobbers a good manually-entered score.
- * Extra Pending rows beyond the pool's row count are ignored.
+ * Overlays a Score Scope capture's results onto a single already-parsed
+ * pool purely by position: on-screen column N -> the pool's row N, no
+ * Seed/name lookup. Only fills song slots the capture actually has a
+ * confident value for; blanks/nulls fall back to whatever was already in
+ * the pool's row, so a partial CV read never clobbers a good manually-
+ * entered score. Extra result columns beyond the pool's row count are
+ * ignored.
  */
-export function mergePendingIntoPool(
+export function mergeCaptureIntoPool(
   pool: ParsedPool,
-  pending: PendingRow[],
+  results: CaptureResultRow[],
 ): MergeResult {
   let mergedCount = 0;
 
   const rows = pool.rows.map((row, idx) => {
-    const p = pending[idx];
-    if (!p) return row;
+    const r = results.find((result) => result.column === idx);
+    if (!r) return row;
     mergedCount++;
     const songs = row.songs.map(
-      (existing, songIdx) => p.songs[songIdx] || existing,
+      (existing, songIdx) => r.songs[songIdx] || existing,
     );
     return { ...row, songs };
   });
