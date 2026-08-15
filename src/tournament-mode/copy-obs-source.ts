@@ -1,5 +1,6 @@
 import { copyPlainTextToClipboard } from "../utils/share";
 import { encodeSheetsConnection } from "../sheets/sheets-connection-param";
+import { encodeStartggConnection } from "../startgg-gql/startgg-connection-param";
 
 export const routableGlobalSourcePath = (labelId: string) =>
   `../obs-globals/${labelId}`;
@@ -29,9 +30,12 @@ export const routablePoolResultsPath = (
 // Same stable-URL-plus-URL-embedded-credentials pattern as
 // routablePoolResultsPath above -- which phase to show is room-synced
 // state (event.selectedBracketPhase), only the start.gg API key comes
-// from the URL. See bracket-tree.tsx.
+// from the URL. Packed into one opaque `src` param via
+// encodeStartggConnection rather than left as a plain, immediately-
+// readable `apiKey` param, same reasoning as routablePoolResultsPath's
+// own `src` packing. See bracket-tree.tsx.
 export const routableBracketTreePath = (apiKey: string) =>
-  `../bracket-tree?${new URLSearchParams({ apiKey }).toString()}`;
+  `../bracket-tree?${new URLSearchParams({ src: encodeStartggConnection(apiKey) }).toString()}`;
 
 // Same stable-URL, room-synced-content pattern as routableBracketTreePath
 // above -- which day to show is event.selectedScheduleDay, switched live

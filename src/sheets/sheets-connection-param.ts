@@ -11,10 +11,11 @@
  * restricting it in Google Cloud Console (read-only, Sheets API only) --
  * this is a cheap layer on top of that, not a replacement for it.
  *
- * Deliberately only covers the PUBLIC Sheets read credentials
- * (apiKey/spreadsheetId/sheet) used by gauntlet-pools.tsx/
- * pool-results.tsx -- NOT bracket-tree.tsx's start.gg key, a different
- * credential for a different API that was never part of this ask.
+ * Covers the PUBLIC Sheets read credentials (apiKey/spreadsheetId/sheet)
+ * used by gauntlet-pools.tsx/pool-results.tsx specifically -- NOT
+ * bracket-tree.tsx's start.gg key, a different credential for a
+ * different API with its own single-value encoder, same base64url
+ * technique (see startgg-gql/startgg-connection-param.ts).
  *
  * Pipe-delimited + base64url, not JSON + plain base64 (the first version
  * of this file) -- explicit user request to shorten the URL, and JSON's
@@ -34,24 +35,14 @@
  * change already discussed and deliberately not pursued.
  */
 
+import { fromBase64Url, toBase64Url } from "../utils/base64url";
+
 export interface SheetsConnectionParams {
   apiKey: string;
   spreadsheetId: string;
   /** Sheet tab name -- optional, callers that omit it fall back to
    * "Pools" the same way the old separate `sheet` query param did. */
   sheet?: string;
-}
-
-// btoa/atob only produce/accept standard base64 (+, /, = padding) --
-// query-string-safe base64url swaps those for -, _, and drops padding
-// (recoverable on decode: padding is always inferable from length).
-function toBase64Url(standardB64: string): string {
-  return standardB64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-function fromBase64Url(urlB64: string): string {
-  const withSlashes = urlB64.replace(/-/g, "+").replace(/_/g, "/");
-  const paddingNeeded = (4 - (withSlashes.length % 4)) % 4;
-  return withSlashes + "=".repeat(paddingNeeded);
 }
 
 export function encodeSheetsConnection(

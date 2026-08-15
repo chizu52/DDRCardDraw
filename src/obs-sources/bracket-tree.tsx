@@ -8,6 +8,7 @@ import {
   useClient,
 } from "urql";
 import { useStartggPhaseBracket, StartggSet } from "../startgg-gql";
+import { decodeStartggConnection } from "../startgg-gql/startgg-connection-param";
 import {
   layoutBracket,
   computeSideGeometry,
@@ -90,7 +91,10 @@ const FONT_FAMILY = "Roboto, Helvetica, Arial, sans-serif";
 
 export function BracketTreeOverlay() {
   const [params] = useSearchParams();
-  const apiKey = params.get("apiKey");
+  // Credentials travel as one opaque `src` param (see
+  // startgg-connection-param.ts), falling back to the plain `apiKey`
+  // param for an OBS source configured with the old URL.
+  const apiKey = decodeStartggConnection(params.get("src")) ?? params.get("apiKey");
 
   // A dedicated client scoped to this key, independent of the app's own
   // startgg-gql/index.ts urqlClient -- credentials are baked into the

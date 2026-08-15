@@ -95,6 +95,21 @@ const ANIMATIONS_CSS = `
   from { opacity: 0; transform: translateY(-10px) scale(0.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/* One fixed-shape cycle (pause at start / scroll out / pause at end /
+   fade out / snap back to start / fade in) shared by every MarqueeText
+   instance -- only animation-duration and the --marquee-distance custom
+   property vary per row, so a longer overflow gets a proportionally
+   longer cycle at a roughly constant scroll speed. Loops via a fade,
+   not a scroll back the way it came -- the "snap" at 86%/87% happens
+   while opacity is already 0, so it's invisible rather than a visible
+   jump. */
+@keyframes scheduleMarqueeScroll {
+  0%, 10% { transform: translateX(0); opacity: 1; }
+  70%, 78% { transform: translateX(var(--marquee-distance, 0px)); opacity: 1; }
+  86% { transform: translateX(var(--marquee-distance, 0px)); opacity: 0; }
+  87% { transform: translateX(0); opacity: 0; }
+  95%, 100% { transform: translateX(0); opacity: 1; }
+}
 `;
 // Values that change WITHOUT the whole panel re-entering -- the day
 // label, the schedule status badge, and every row's displayed time --
@@ -507,6 +522,121 @@ function CenteredTimeText({
   );
 }
 
+// Constant-ish scroll speed across rows -- a longer overflow takes
+// proportionally longer to cross, rather than every row racing by (or
+// crawling) at the same fixed duration regardless of how much text
+// there actually is. MARQUEE_BASE_DURATION_S covers the pauses/fade
+// baked into scheduleMarqueeScroll's own keyframe shape.
+const MARQUEE_SPEED_PX_PER_S = 70;
+const MARQUEE_BASE_DURATION_S = 3;
+
+/** Single-line, overflow:hidden text that scrolls only when its content
+ * is actually too wide for the row -- left completely static otherwise,
+ * so a short event/description never animates for no reason. Loops via
+ * a fade (see scheduleMarqueeScroll's own comment), not a scroll back
+ * the way it came.
+ *
+ * Measurement (boxRef/contentRef/distance) and the animation's own
+ * `duration` are owned by the CALLER (ScheduleRow), not this component
+ * -- a row's event and description each have their own natural overflow
+ * distance, so computing duration independently per instance would loop
+ * them out of sync with each other. ScheduleRow measures both and
+ * shares ONE duration (from whichever needs more time) between them, so
+ * their scroll/fade cycles restart together. */
+function MarqueeText({
+  boxRef,
+  contentRef,
+  distance,
+  duration,
+  children,
+  style,
+}: {
+  boxRef: React.RefObject<HTMLDivElement | null>;
+  contentRef: React.RefObject<HTMLDivElement | null>;
+  distance: number;
+  duration: number;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div ref={boxRef} style={{ overflow: "hidden", whiteSpace: "nowrap" }}>
+      <div
+        ref={contentRef}
+        style={{
+          display: "inline-block",
+          ...(distance > 0
+            ? ({
+                "--marquee-distance": `-${distance}px`,
+                animation: `scheduleMarqueeScroll ${duration}s ease-in-out infinite`,
+              } as React.CSSProperties)
+            : null),
+          ...style,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Measures scrollWidth against clientWidth for however many boxes are
+ * given, keyed by whatever key the caller wants back (ScheduleRow uses
+ * "event"/"description") -- shared by every MarqueeText in one row so
+ * their durations can be derived from the SAME max-distance instead of
+ * each computing its own independently (see MarqueeText's own doc).
+ * Re-measures on resize and once every @font-face has actually finished
+ * loading, same font-load re-measure concern as CenteredTimeText's own
+ * comment explains. */
+function useMarqueeDistances(
+  boxes: {
+    key: string;
+    boxRef: React.RefObject<HTMLDivElement | null>;
+    contentRef: React.RefObject<HTMLDivElement | null>;
+  }[],
+  deps: unknown[],
+): Map<string, number> {
+  const [distances, setDistances] = useState<Map<string, number>>(new Map());
+
+  useLayoutEffect(() => {
+    // `.current` read HERE, inside the effect body -- not while building
+    // the `boxes` array up in the render body above, where refs haven't
+    // attached to their real DOM nodes yet (a real bug, found live: every
+    // row's own marquee silently never animated, since that render-time
+    // read always saw null and this effect's deps never gave it a
+    // reason to re-run once text stopped changing).
+    const present = boxes
+      .map(({ key, boxRef, contentRef }) => ({
+        key,
+        box: boxRef.current,
+        content: contentRef.current,
+      }))
+      .filter(
+        (b): b is { key: string; box: HTMLDivElement; content: HTMLDivElement } =>
+          !!b.box && !!b.content,
+      );
+    if (!present.length) return;
+    const measure = () => {
+      const next = new Map<string, number>();
+      for (const { key, box, content } of present) {
+        const overflow = content.scrollWidth - box.clientWidth;
+        next.set(key, overflow > 0 ? overflow : 0);
+      }
+      // eslint-disable-next-line react-hooks-js/set-state-in-effect
+      setDistances(next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const { box } of present) observer.observe(box);
+    void document.fonts.ready.then(measure);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `boxes` is
+    // a fresh array/refs every render by construction; `deps` is the
+    // caller's own stand-in for "the actual text content changed."
+  }, deps);
+
+  return distances;
+}
+
 /** Compares two possibly-null DisplayTimes by their rendered text, not
  * object identity -- formatDisplayTime returns a fresh object every
  * call even when its input didn't actually change. */
@@ -546,6 +676,27 @@ function ScheduleRow({
   current: boolean;
   completed: boolean;
 }) {
+  // Event and description each get their own box/content refs, but
+  // share ONE measurement pass (useMarqueeDistances) and ONE derived
+  // duration below, so their marquees -- if either needs one -- restart
+  // together instead of drifting out of sync.
+  const eventBoxRef = useRef<HTMLDivElement>(null);
+  const eventContentRef = useRef<HTMLDivElement>(null);
+  const descBoxRef = useRef<HTMLDivElement>(null);
+  const descContentRef = useRef<HTMLDivElement>(null);
+  const marqueeDistances = useMarqueeDistances(
+    [
+      { key: "event", boxRef: eventBoxRef, contentRef: eventContentRef },
+      { key: "description", boxRef: descBoxRef, contentRef: descContentRef },
+    ],
+    [row.event, row.description],
+  );
+  const eventDistance = marqueeDistances.get("event") ?? 0;
+  const descDistance = marqueeDistances.get("description") ?? 0;
+  const marqueeDuration =
+    MARQUEE_BASE_DURATION_S +
+    Math.max(eventDistance, descDistance) / MARQUEE_SPEED_PX_PER_S;
+
   // completed wins over current if both are somehow true -- manual
   // mode's editor never produces that combination itself, but
   // "already happened" is the more definitive of the two claims if it
@@ -740,7 +891,7 @@ function ScheduleRow({
                 schedule status instead takes THAT status's color, so
                 the shifted value is visibly flagged as adjusted rather
                 than looking like an unchanged, directly-entered time. */}
-            <span style={{ color: colorToShow, fontSize: 30 }}>
+            <span style={{ color: colorToShow, fontSize: 40 }}>
               {timeToShow.numeral}
             </span>
             <span
@@ -756,12 +907,21 @@ function ScheduleRow({
           </CenteredTimeText>
         )}
       </div>
-      <div style={{ padding: "18px 24px" }}>
-        <div
+      {/* flex: 1 + minWidth: 0 -- without minWidth:0, a flex item's
+          default min-width:auto floors it at its own content's natural
+          width, so it would never actually shrink small enough for
+          MarqueeText's own overflow:hidden below to have anything to
+          clip/measure against. */}
+      <div style={{ flex: 1, minWidth: 0, padding: "18px 24px" }}>
+        <MarqueeText
+          boxRef={eventBoxRef}
+          contentRef={eventContentRef}
+          distance={eventDistance}
+          duration={marqueeDuration}
           style={{
             fontFamily: TITLE_FONT_FAMILY,
             color: isCompleted ? COLORS.muted : COLORS.text,
-            fontSize: 24,
+            fontSize: 36,
             // Matches the row's own background/border transition
             // above, so completing a row reads as one smooth crossfade
             // rather than the panel drifting to its new color while
@@ -770,17 +930,21 @@ function ScheduleRow({
           }}
         >
           {row.event}
-        </div>
+        </MarqueeText>
         {row.description && (
-          <div
+          <MarqueeText
+            boxRef={descBoxRef}
+            contentRef={descContentRef}
+            distance={descDistance}
+            duration={marqueeDuration}
             style={{
               fontFamily: BODY_FONT_FAMILY,
               color: COLORS.muted,
-              fontSize: 16,
+              fontSize: 20,
             }}
           >
             {row.description}
-          </div>
+          </MarqueeText>
         )}
       </div>
     </div>

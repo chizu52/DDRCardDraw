@@ -73,6 +73,19 @@ export function requestSheetsToken(
 
 export class SheetsAuthError extends Error {}
 
+// Thrown instead of the generic "Sheets read failed" Error when the
+// spreadsheet simply doesn't have a tab named `range` -- Google's own
+// 400 body for this ({"error":{"message":"Unable to parse range: X"}})
+// read as an opaque JSON dump to an operator ("Sheets read failed: 400
+// {...}"), not an actionable message, even though the actual problem
+// (missing tab, easy to fix by adding one) is common and easy to name
+// plainly.
+export class SheetsRangeError extends Error {
+  constructor(public range: string) {
+    super(`This spreadsheet has no "${range}" tab.`);
+  }
+}
+
 export async function readSheetValues(
   token: string,
   spreadsheetId: string,
@@ -84,6 +97,13 @@ export async function readSheetValues(
   });
   if (res.status === 401) {
     throw new SheetsAuthError("Token expired");
+  }
+  if (res.status === 400) {
+    const body = await res.text();
+    if (body.includes("Unable to parse range")) {
+      throw new SheetsRangeError(range);
+    }
+    throw new Error(`Sheets read failed: ${res.status} ${body}`);
   }
   if (!res.ok) {
     throw new Error(`Sheets read failed: ${res.status} ${await res.text()}`);
