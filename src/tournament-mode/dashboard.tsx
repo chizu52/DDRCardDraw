@@ -82,7 +82,6 @@ import { useAppDispatch, useAppState } from "../state/store";
 import { useTheme } from "../theme-toggle";
 import {
   copyObsSource,
-  routableBracketTreePath,
   routableGauntletPoolsPath,
   routableGlobalSourcePath,
   routablePoolResultsPath,
@@ -713,16 +712,17 @@ function MatchesSettingsPanel() {
         <div
           style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}
         >
+          <GauntletPoolsSettingsSection />
           <Card elevation={1} className={styles.settingsSection}>
-            {/* Same minimal-icon-in-the-heading treatment as the other two
-                settings sections below -- see BracketSettingsSection's own
-                comment on this. Icon sits right next to the heading text
+            {/* Same minimal-icon-in-the-heading treatment as the other
+                settings sections below -- see GauntletPoolsSettingsSection's
+                own comment on this. Icon sits right next to the heading text
                 (small gap, no space-between) rather than pushed out to the
                 card's far edge. */}
             <h3
               style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
             >
-              Pool Results Overlay
+              Gauntlet Pool Tables
               <CopyOverlayUrlButton />
             </h3>
             <Checkbox
@@ -763,8 +763,6 @@ function MatchesSettingsPanel() {
               />
             </div>
           </Card>
-          <GauntletPoolsSettingsSection />
-          <BracketSettingsSection />
         </div>
       </Card>
       <ScheduleSettingsSection />
@@ -783,6 +781,62 @@ function MatchesSettingsPanel() {
  * bundled-icon-or-custom-upload picker rather than a second one-off. */
 function GauntletPoolsSettingsSection() {
   const dispatch = useAppDispatch();
+
+  // The combined "Now showing" dropdown below -- one option for the
+  // pools diagram itself, plus one per start.gg phase (same phases
+  // query the old standalone bracket section used) -- see
+  // event.gauntletPoolsShowsBracket's own doc for why this is two
+  // separate pieces of state (whether bracket mode is on at all, and
+  // separately which phase) rather than one.
+  const showsBracket = useAppState((s) => s.event.gauntletPoolsShowsBracket);
+  const selectedPhase = useAppState((s) => s.event.selectedBracketPhase);
+  // Unlike bracket-tree.tsx's own dedicated client (deliberately built
+  // with NO cache exchange, see its own comment on why), this hook runs
+  // through the app's shared urqlClient (startgg-gql/index.ts), which
+  // DOES cache -- so a phase created on start.gg after this query's
+  // first fetch (e.g. mid-event) never appears here on its own, no
+  // matter how long you wait: confirmed live, a freshly-added phase's
+  // OWN bracket data loaded fine (that query has no cache to go stale)
+  // while this dropdown kept showing it as unavailable. refetchPhases
+  // is wired into the heading's Refresh button below specifically to
+  // give this cache a manual bust, rather than dropping the cache
+  // exchange entirely -- unlike bracket-tree.tsx's data (large,
+  // read-once-per-view), this is a small list worth not re-fetching on
+  // every render, just not indefinitely.
+  const [phasesResult, refetchPhases] = useStartggPhases();
+  const phases = phasesResult.data?.event?.phases || [];
+  // "" is the pools-diagram sentinel -- never a real start.gg phase id,
+  // so it can't collide with one. showsBracket with no matching phase
+  // (selectedPhase itself null, or set to an id that isn't in the
+  // CURRENT phases list -- start.gg data still loading, or the phase
+  // got deleted) needs its own sentinel too, distinct from "" -- a
+  // naive `selectedPhase ?? ""` collapsed that case down to the exact
+  // same value as "pools," so the dropdown silently showed "Gauntlet
+  // Pools" selected even while the overlay itself was actually still
+  // showing (or erroring on) the bracket half, a real, confirmed-live
+  // mismatch between what this control displayed and what was actually
+  // on stream.
+  const PENDING_BRACKET_VALUE = "__bracket_pending__";
+  // String(...) on both sides, not a bare `===` -- start.gg's schema
+  // declares Phase.id as the GraphQL ID scalar, which graphql-codegen
+  // types as `string` here, but this compares against a value that
+  // ROUND-TRIPPED through an HTML <select>'s own `value` (always a
+  // string already) AND through Redux/room-sync (JSON, which preserves
+  // whatever type actually got dispatched) -- if start.gg's own JSON
+  // response for THIS query ever sends an unquoted numeric id (schema
+  // types don't guarantee actual wire format), a bare `===` would
+  // silently and permanently fail to match even though the two values
+  // "are" the same phase, exactly the kind of stuck-on-pending mismatch
+  // reported live. Coercing both sides costs nothing when they're
+  // already strings.
+  const phaseStillListed = phases.some(
+    (p) => p?.id != null && String(p.id) === String(selectedPhase),
+  );
+  const nowShowingValue = !showsBracket
+    ? ""
+    : phaseStillListed
+      ? selectedPhase!
+      : PENDING_BRACKET_VALUE;
 
   // Same bundled-icon-dropdown-with-a-Custom-upload-option pattern as
   // ScheduleSettingsSection's own icon picker -- see its comments for
@@ -829,12 +883,34 @@ function GauntletPoolsSettingsSection() {
 
   return (
     <Card elevation={1} className={styles.settingsSection}>
-      {/* Same minimal-icon-in-the-heading treatment as the other three
-          settings sections -- see BracketSettingsSection's own comment
-          on this. */}
+      {/* Same minimal-icon-in-the-heading treatment as the other two
+          settings sections -- see ScheduleSettingsSection's own comment
+          on this. Refresh only matters for the bracket half of this
+          overlay (the pools half already polls on its own, see
+          FALLBACK_POLL_INTERVAL_MS in gauntlet-pools.tsx) -- kept here
+          rather than gated on showsBracket so it's always in the same
+          place regardless of which view is currently live. Busts BOTH
+          start.gg caches at once, not just the live overlay's own bracket
+          data (signalBracketRefresh, room-synced -- see bracket-tree.tsx)
+          but also this dropdown's own phases list (refetchPhases, local
+          to this component -- see its own comment above on why that one
+          needs a manual bust at all). One click, not two separate
+          refresh controls for what looks like one "start.gg data" concept
+          to an operator. */}
       <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        Gauntlet Pools Overlay
-        <CopyGauntletPoolsUrlButton />
+        Bracket Overlay
+        <div style={{ display: "flex", gap: "0.25rem" }}>
+          <Button
+            icon={<Refresh />}
+            minimal
+            title="Refresh start.gg data"
+            onClick={() => {
+              refetchPhases({ requestPolicy: "network-only" });
+              dispatch(eventSlice.actions.signalBracketRefresh());
+            }}
+          />
+          <CopyGauntletPoolsUrlButton />
+        </div>
       </h3>
       {/* Same "immediately live" tint as ScheduleSettingsSection's own
           liveControls group -- a title/icon change here goes straight
@@ -901,6 +977,44 @@ function GauntletPoolsSettingsSection() {
             />
           </div>
         </FormGroup>
+        <FormGroup label="Now showing" inline>
+          <HTMLSelect
+            value={nowShowingValue}
+            onChange={(e) => {
+              const value = e.currentTarget.value;
+              if (value === "") {
+                dispatch(eventSlice.actions.setGauntletPoolsShowsBracket(false));
+                return;
+              }
+              // Picking the pending-bracket placeholder itself (see its
+              // own option below) is a no-op -- it's not a real
+              // selectable target, just what keeps this control
+              // accurate while there's genuinely nothing else to pick.
+              if (value === PENDING_BRACKET_VALUE) {
+                return;
+              }
+              dispatch(eventSlice.actions.setGauntletPoolsShowsBracket(true));
+              dispatch(eventSlice.actions.setSelectedBracketPhase(value));
+            }}
+          >
+            <option value="">Gauntlet Pools (Spreadsheet)</option>
+            {/* Only rendered while genuinely needed (see
+                nowShowingValue's own comment) -- keeps this control
+                honest about "showing a bracket, but not one of the
+                phases currently listed" instead of silently rendering
+                as if "Gauntlet Pools" were selected. */}
+            {showsBracket && !phaseStillListed && (
+              <option value={PENDING_BRACKET_VALUE}>
+                Bracket (phase loading or unavailable) (start.gg)
+              </option>
+            )}
+            {phases.map((phase) => (
+              <option key={phase?.id} value={phase?.id ?? undefined}>
+                {phase?.name} (start.gg)
+              </option>
+            ))}
+          </HTMLSelect>
+        </FormGroup>
       </div>
       <Divider style={{ margin: "1rem 0" }} />
       <GauntletPoolsDividerEditor />
@@ -944,7 +1058,7 @@ function GauntletPoolsDividerEditor() {
   }
 
   return (
-    <FormGroup label="Dividers">
+    <FormGroup label="Gauntlet Pool Dividers">
       {dividers.length > 0 && (
         <div
           style={{
@@ -1015,13 +1129,23 @@ function emptyDividerRow(): DividerRow {
 
 /** Same URL-embedded-Sheets-credentials pattern as Pool Results' own
  * CopyOverlayUrlButton above (see its comment) -- this overlay reads
- * the exact same "Pools" tab, so it's gated on the same credentials. */
+ * the exact same "Pools" tab, so it's gated on the same credentials.
+ * Still gated on Sheets creds ONLY, not also a start.gg key -- this
+ * overlay's pools half works fine on its own, and routableGauntletPoolsPath
+ * just omits the bracket half of the URL when there's no start.gg key
+ * saved (the overlay itself shows a clear error if the "Now showing"
+ * dropdown below ever picks a bracket phase without one). */
 function CopyGauntletPoolsUrlButton() {
   const apiKey = useAtomValue(sheetsApiKeyAtom);
   const spreadsheetId = useAtomValue(spreadsheetIdAtom);
+  const startggApiKey = useAtomValue(startggKeyAtom);
   const ready = !!apiKey && !!spreadsheetId;
   const href = useHref(
-    routableGauntletPoolsPath(apiKey || "", spreadsheetId || ""),
+    routableGauntletPoolsPath(
+      apiKey || "",
+      spreadsheetId || "",
+      startggApiKey || undefined,
+    ),
   );
   return (
     <Button
@@ -1030,81 +1154,11 @@ function CopyGauntletPoolsUrlButton() {
       disabled={!ready}
       title={
         ready
-          ? "Copy Gauntlet Pools overlay URL"
+          ? "Copy Bracket overlay URL"
           : "Save a Sheets API key in Google Sheets settings first (see the Sheets connection panel)"
       }
       onClick={() => copyObsSource(new URL(href, document.location.href).href)}
     />
-  );
-}
-
-/** Controls for the bracket-tree OBS overlay (see
- * obs-sources/bracket-tree.tsx) -- which start.gg phase it shows is
- * room-synced state (event.selectedBracketPhase), same "pick it here,
- * not a new OBS URL" pattern as the pool-results overlay's pool
- * selection. Phase list reuses the same GauntletDivisions query the
- * Matches tab's own start.gg picker already depends on
- * (useStartggPhases, in startgg-gql/index.ts) -- no new query for that
- * part. */
-function BracketSettingsSection() {
-  const dispatch = useAppDispatch();
-  const selectedPhase = useAppState((s) => s.event.selectedBracketPhase);
-  const [phasesResult] = useStartggPhases();
-  const phases = phasesResult.data?.event?.phases || [];
-  const startggApiKey = useAtomValue(startggKeyAtom);
-  const ready = !!startggApiKey;
-  const href = useHref(routableBracketTreePath(startggApiKey || ""));
-
-  return (
-    <Card elevation={1} className={styles.settingsSection}>
-      {/* minimal, icon-only Refresh + copy-URL right next to the heading
-          text itself -- same treatment as the Pool Results tab's own
-          "Pools" heading (see its Button minimal above), rather than
-          labeled buttons lost among the other controls below. */}
-      <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-        Start.gg Bracket Tree
-        <div style={{ display: "flex", gap: "0.25rem" }}>
-          <Button
-            icon={<Refresh />}
-            minimal
-            title="Refresh bracket data"
-            onClick={() => dispatch(eventSlice.actions.signalBracketRefresh())}
-          />
-          <Button
-            icon={<Clipboard />}
-            minimal
-            disabled={!ready}
-            title={
-              ready
-                ? "Copy bracket overlay URL"
-                : "Save a start.gg API key first (see the start.gg connection panel)"
-            }
-            onClick={() =>
-              copyObsSource(new URL(href, document.location.href).href)
-            }
-          />
-        </div>
-      </h3>
-      <FormGroup label="Bracket to display" inline>
-        <HTMLSelect
-          value={selectedPhase ?? ""}
-          onChange={(e) =>
-            dispatch(
-              eventSlice.actions.setSelectedBracketPhase(
-                e.currentTarget.value || null,
-              ),
-            )
-          }
-        >
-          <option value="">None selected</option>
-          {phases.map((phase) => (
-            <option key={phase?.id} value={phase?.id ?? undefined}>
-              {phase?.name}
-            </option>
-          ))}
-        </HTMLSelect>
-      </FormGroup>
-    </Card>
   );
 }
 
@@ -1193,8 +1247,9 @@ function readIconFile(file: File): Promise<string> {
 /** Controls for the schedule OBS overlay (see obs-sources/schedule.tsx)
  * -- one stable overlay URL, which day it currently shows is room-synced
  * state (event.selectedScheduleDay) picked here via radio buttons, same
- * live-picker idea as BracketSettingsSection's phase dropdown above (just
- * radios instead of a dropdown, since there are only ever three options).
+ * live-picker idea as GauntletPoolsSettingsSection's "Now showing" dropdown
+ * above (just radios instead of a dropdown, since there are only ever three
+ * options).
  * The day TABS below are a separate concern -- editing each day's own
  * content, independent of which one is currently live on stream. */
 function ScheduleSettingsSection() {
@@ -1283,9 +1338,9 @@ function ScheduleSettingsSection() {
       elevation={1}
       className={`${styles.settingsSection} ${styles.scheduleSettingsSection}`}
     >
-      {/* Same minimal-icon-in-the-heading treatment as the other two
-          settings sections above -- see BracketSettingsSection's own
-          comment on this. */}
+      {/* Same minimal-icon-in-the-heading treatment as the other
+          settings sections above -- see GauntletPoolsSettingsSection's
+          own comment on this. */}
       <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
         Schedule Overlay
         <Button
@@ -1765,7 +1820,7 @@ function CopyOverlayUrlButton() {
       disabled={!ready}
       title={
         ready
-          ? "Copy pool results overlay URL"
+          ? "Copy Gauntlet Pool Table Results URL"
           : "Save a Sheets API key in Google Sheets settings first (see the Sheets connection panel)"
       }
       onClick={() => copyObsSource(new URL(href, document.location.href).href)}

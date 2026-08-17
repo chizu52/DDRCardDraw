@@ -267,29 +267,7 @@ const router = createBrowserRouter([
     ],
   },
   {
-    // Same room-synced-state pattern as pool-results above (stable URL,
-    // which bracket/phase to show lives in event.selectedBracketPhase,
-    // set from the Matches Settings tab). The start.gg API key still
-    // comes from the URL -- see bracket-tree.tsx, which sets up its own
-    // urql client/Provider scoped to that key, independent of this app's
-    // own startgg-gql/index.ts client (which reads its token from this
-    // device's localStorage, not available inside an isolated OBS
-    // browser profile).
-    path: "e/:roomName/bracket-tree",
-    element: <ObsSource />,
-    children: [
-      {
-        index: true,
-        lazy: async () => {
-          const { BracketTreeOverlay } =
-            await import("./obs-sources/bracket-tree");
-          return { Component: BracketTreeOverlay };
-        },
-      },
-    ],
-  },
-  {
-    // Same room-synced-state pattern as bracket-tree above -- which day
+    // Same room-synced-state pattern as pool-results above -- which day
     // to show (event.selectedScheduleDay) and the content itself (event.
     // schedules) are both room-synced, edited from the dashboard's
     // Settings tab. One stable overlay URL, not one per day.
@@ -307,9 +285,14 @@ const router = createBrowserRouter([
   },
   {
     // Same URL-embedded-Sheets-credentials pattern as pool-results above,
-    // but no room-synced "which pool" selector -- this overlay always
-    // shows the whole Gauntlet Pools diagram (every pool in the sheet at
-    // once), not one pool at a time. See gauntlet-pools.tsx.
+    // but no room-synced "which pool" selector -- the pools diagram
+    // itself always shows every pool in the sheet at once, not one pool
+    // at a time. Also carries an optional start.gg apiKey (see
+    // gauntlet-pools.tsx's own GauntletPoolsOverlay) -- this one stable
+    // URL now covers the start.gg bracket tree too
+    // (event.gauntletPoolsShowsBracket switches which of the two shows,
+    // picked from dashboard.tsx's GauntletPoolsSettingsSection), no
+    // separate bracket-tree route anymore.
     path: "e/:roomName/gauntlet-pools",
     element: <ObsSource />,
     children: [

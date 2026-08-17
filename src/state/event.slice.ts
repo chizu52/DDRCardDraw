@@ -173,6 +173,18 @@ interface EventState {
     beforeSetNumber: number;
     label: string;
   }[];
+  /** The gauntlet-pools OBS overlay (obs-sources/gauntlet-pools.tsx)
+   * shows one of two things -- the spreadsheet-based pools diagram
+   * (false, the default) or the start.gg bracket tree for whichever
+   * phase is selected (true, see selectedBracketPhase above) -- picked
+   * from ONE combined dropdown in dashboard.tsx's
+   * GauntletPoolsSettingsSection that lists the pools diagram alongside
+   * every start.gg phase. A separate field from selectedBracketPhase
+   * rather than inferring "showing bracket" from it being non-null, so
+   * switching back to the pools diagram doesn't require also clearing
+   * which phase was last selected (picking a phase again later should
+   * still remember it). */
+  gauntletPoolsShowsBracket: boolean;
 }
 
 const initialState: EventState = {
@@ -205,6 +217,7 @@ const initialState: EventState = {
   gauntletPoolsIcon: null,
   gauntletPoolsUpcoming: {},
   gauntletPoolsDividers: [],
+  gauntletPoolsShowsBracket: false,
 };
 
 export const eventSlice = createSlice({
@@ -391,6 +404,9 @@ export const eventSlice = createSlice({
     ) {
       state.gauntletPoolsDividers = action.payload;
     },
+    setGauntletPoolsShowsBracket(state, action: PayloadAction<boolean>) {
+      state.gauntletPoolsShowsBracket = action.payload;
+    },
     // Per-day (see scheduleStatus's own doc) -- staged alongside that
     // day's own rows in dashboard.tsx's ScheduleDayEditor and sent by
     // the same Submit click, not dispatched live the instant the
@@ -512,5 +528,8 @@ export function addOverlaySettings(state: EventState) {
   }
   if (!state.gauntletPoolsDividers) {
     state.gauntletPoolsDividers = [];
+  }
+  if (state.gauntletPoolsShowsBracket === undefined) {
+    state.gauntletPoolsShowsBracket = false;
   }
 }

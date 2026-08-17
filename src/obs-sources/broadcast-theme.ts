@@ -15,6 +15,21 @@ export const BROADCAST_COLORS = {
   coral: "#f0a868",
 };
 
+// The rendered size of a player's name in gauntlet-pools.tsx's own
+// PoolBox rows (cardStyle's base fontSize of 28 * poolRowListStyle's own
+// "0.9em" -- kept as one literal number here, not re-derived, since
+// gauntlet-pools.tsx's own em-relative styling doesn't need to change at
+// all for this). Exported specifically so bracket-tree.tsx's own
+// MatchBox names can be scaled to match it exactly (see that file's own
+// SVG_SCALE) -- the two views were tuned independently before, to two
+// "looks about right" sizes that didn't actually match (15px fixed SVG
+// text vs this), so switching the "Now showing" dropdown between them
+// made every name suddenly jump ~68% larger or smaller. Lives here, not
+// imported directly from one file into the other, since gauntlet-pools.tsx
+// already imports FROM bracket-tree.tsx (BracketTreeWithApiKey) -- a
+// reverse import back into it would be circular.
+export const POOL_PLAYER_ROW_FONT_SIZE = 28 * 0.9;
+
 // Solid, high-contrast status pill -- shared by gauntlet-pools.tsx and
 // pool-results.tsx, byte-identical between the two.
 export const statusPillStyle: React.CSSProperties = {

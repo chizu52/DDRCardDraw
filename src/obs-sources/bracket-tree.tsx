@@ -1,5 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Callout } from "@blueprintjs/core";
 import {
   Client,
@@ -8,7 +7,6 @@ import {
   useClient,
 } from "urql";
 import { useStartggPhaseBracket, StartggSet } from "../startgg-gql";
-import { decodeStartggConnection } from "../startgg-gql/startgg-connection-param";
 import {
   layoutBracket,
   computeSideGeometry,
@@ -31,21 +29,24 @@ import {
   PhantomSetsById,
 } from "../startgg-gql/bracket-layout";
 import { useAppState } from "../state/store";
+import { BODY_FONT_FAMILY, LOCAL_FONT_FACE_CSS } from "./local-fonts";
+import { BROADCAST_COLORS, POOL_PLAYER_ROW_FONT_SIZE } from "./broadcast-theme";
+import { BroadcastTitleBar } from "./broadcast-title-bar";
+import Banner from "../other-assets/backgrounds/bg.png";
 
 // Long fallback poll, same rationale as pool-results.tsx's
-// FALLBACK_POLL_INTERVAL_MS -- the Matches Settings tab's refresh button
+// FALLBACK_POLL_INTERVAL_MS -- the Settings tab's refresh button
 // (bracketRefreshedAt) is the fast path, this just covers the overlay
 // being left running with nobody around to trigger that.
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
-// Now the follow-up promised when this was first built to match
-// start.gg's own look exactly (see the git history for that version) --
-// this app's own dark broadcast palette (same tokens as pool-results.tsx:
-// panel #1c2127, border #30343c, text #f6f7f9, green advance/winner
-// accent), sized up and higher-contrast than a website's own text, since
-// a stream viewer reads this from further away and at lower effective
-// resolution than someone actively browsing start.gg. Specific choices
-// aimed at "keeping up," not just legibility:
+// This app's own dark broadcast palette (BROADCAST_COLORS -- same
+// tokens as gauntlet-pools.tsx/pool-results.tsx/schedule.tsx, so all
+// four overlays read as one broadcast package), sized up and
+// higher-contrast than a website's own text, since a stream viewer
+// reads this from further away and at lower effective resolution than
+// someone actively browsing start.gg. Specific choices aimed at
+// "keeping up," not just legibility:
 //  - an opaque panel per match (not just floating text) so it stays
 //    readable over arbitrary, moving video instead of a plain website
 //    background
@@ -60,42 +61,65 @@ const FALLBACK_POLL_INTERVAL_MS = 60_000;
 //    several rounds out) are dimmed, so attention goes to what's
 //    actually happening now instead of the whole tree competing equally
 const COLORS = {
-  panel: "#1c2127",
-  border: "#30343c",
-  text: "#f6f7f9",
+  ...BROADCAST_COLORS,
+  // This file's own additions, layered on top -- each a distinct role
+  // with its own independently-tuned value, not a re-declaration of
+  // anything already identical above.
   textLoser: "#9aa1ab",
   textTbd: "#5c636c",
-  muted: "#8a919c",
-  accent: "#2d72d2",
-  winnerScore: "#3dcc91",
-  loserScore: "#3a3f47",
-  dq: "#cd4246",
   identifier: "#454b54",
   connector: "#3a3f47",
-  // Live match outline (and the elapsed-timer pill's fill) -- same green
-  // as winnerScore/checkmark, not a separate color. Outline only, no box
-  // fill tint (see the match box's own rect below).
-  live: "#3dcc91",
-  // Called (assigned a station, not yet started) -- an outline only too,
-  // same treatment as Live, just yellow.
-  called: "#e6c02e",
+  loserScore: "#3a3f47",
   // A player's clan/sponsor tag (start.gg's "prefix") -- deliberately a
   // hue nothing else in this palette uses (every other color already
-  // carries a meaning: green=live/winner, yellow=called, red=DQ,
-  // blue=header accent), so a tag reads as its own distinct category at
-  // a glance instead of blending into or being confused with a status
-  // color.
+  // carries a meaning: green=live/winner, gold=called, red=DQ), so a
+  // tag reads as its own distinct category at a glance instead of
+  // blending into or being confused with a status color.
   prefix: "#a78bfa",
+  // Same red gauntlet-pools.tsx/pool-results.tsx already added on top
+  // of BROADCAST_COLORS for their own danger-adjacent uses -- was this
+  // file's own private, slightly different red (#cd4246) before.
+  dq: "#ef4444",
+  // Live match outline (and the elapsed-timer pill's fill) -- the same
+  // green ("current"/live) the other three overlays already use, not
+  // this file's own separate near-identical green. Outline only, no box
+  // fill tint (see the match box's own rect below).
+  live: BROADCAST_COLORS.mint,
+  // Same token as `live` -- a winner's checkmark/score pill used its own
+  // literally-identical green before splitting it into a second name.
+  winnerScore: BROADCAST_COLORS.mint,
+  // Called (assigned a station, not yet started) -- an outline only too,
+  // same treatment as Live, now the same gold schedule.tsx/pool-
+  // results.tsx already use for a "needs attention" pill instead of
+  // this file's own separate yellow.
+  called: BROADCAST_COLORS.gold,
 };
-const FONT_FAMILY = "Roboto, Helvetica, Arial, sans-serif";
 
-export function BracketTreeOverlay() {
-  const [params] = useSearchParams();
-  // Credentials travel as one opaque `src` param (see
-  // startgg-connection-param.ts), falling back to the plain `apiKey`
-  // param for an OBS source configured with the old URL.
-  const apiKey = decodeStartggConnection(params.get("src")) ?? params.get("apiKey");
-
+/** Takes a resolved start.gg apiKey directly, rather than reading a
+ * `src`/`apiKey` query param itself -- this overlay no longer has a
+ * standalone route of its own (folded into gauntlet-pools.tsx's own
+ * overlay, see GauntletPoolsOverlay's own doc for why), so it's always
+ * rendered by a caller that already resolved credentials some other
+ * way. (An earlier version of this WAS the standalone route's own
+ * component, decoding `src` via useSearchParams() itself -- kept as
+ * plain props instead of, say, that caller nesting a second <Router>
+ * with a synthetic location just to satisfy this reading it that way,
+ * which React Router hard-errors on ("You cannot render a <Router>
+ * inside another <Router>") -- see git history.) */
+export function BracketTreeWithApiKey({
+  apiKey,
+  title,
+  icon,
+}: {
+  apiKey: string;
+  /** Shares the caller's own branding rather than having its own
+   * separate title/icon fields -- this view no longer has its own
+   * settings section (folded into the merged overlay's, see
+   * dashboard.tsx's GauntletPoolsSettingsSection), so there's nowhere
+   * left to set a bracket-specific one anyway. */
+  title: string;
+  icon: string | null;
+}) {
   // A dedicated client scoped to this key, independent of the app's own
   // startgg-gql/index.ts urqlClient -- credentials are baked into the
   // URL rather than relied on from local storage (an OBS browser source
@@ -103,54 +127,76 @@ export function BracketTreeOverlay() {
   // doesn't request __typename on every object, so a normalized cache
   // silently resolved a response as "phase not found" instead of
   // erroring loudly.
-  const client = useMemo(() => {
-    if (!apiKey) return null;
-    return new Client({
-      url: "https://api.start.gg/gql/alpha",
-      fetchOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
-      exchanges: [fetchExchange],
-    });
-  }, [apiKey]);
+  const client = useMemo(
+    () =>
+      new Client({
+        url: "https://api.start.gg/gql/alpha",
+        fetchOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
+        exchanges: [fetchExchange],
+      }),
+    [apiKey],
+  );
 
   const phaseId = useAppState((s) => s.event.selectedBracketPhase);
 
-  if (!apiKey) {
-    return (
-      <Callout intent="danger" style={{ maxWidth: 480 }}>
-        Missing "apiKey" query parameter. Use the "Copy Overlay URL" button in
-        the Matches Settings tab rather than building this URL by hand.
-      </Callout>
-    );
-  }
   if (!phaseId) {
     return (
       <Callout intent="warning" style={{ maxWidth: 480 }}>
-        No bracket selected. Pick one from the Matches Settings tab.
+        No bracket selected. Pick one from the Settings tab.
       </Callout>
     );
   }
 
   return (
-    <UrqlProvider value={client!}>
-      <BracketTreeInner phaseId={phaseId} />
+    <UrqlProvider value={client}>
+      <BracketTreeInner phaseId={phaseId} title={title} icon={icon} />
     </UrqlProvider>
   );
 }
 
-function BracketTreeInner({ phaseId }: { phaseId: string }) {
+function BracketTreeInner({
+  phaseId,
+  title,
+  icon,
+}: {
+  phaseId: string;
+  title: string;
+  icon: string | null;
+}) {
   const refreshedAt = useAppState((s) => s.event.bracketRefreshedAt);
   const [result, reexecuteQuery] = useStartggPhaseBracket(phaseId);
-  // Ticks once a second so ElapsedTimerPill's mm:ss actually counts up on
-  // screen. Date.now() has to live inside the effect below, not called
-  // directly during render (React's purity rule -- an impure call in the
-  // render body can produce inconsistent results across renders of the
-  // same state; an effect is explicitly the sanctioned place for this).
-  // Starts at 0 rather than Date.now() for the same reason -- the effect
-  // sets the real value on mount, a render or two before that just shows
-  // 0:00 briefly.
-  const [nowMs, setNowMs] = useState(0);
+  // A lazy initializer, not useState(0) + an effect setting the real
+  // value on mount -- see schedule.tsx's own nowMs for the fuller
+  // writeup of why that version is a real bug, not just a style choice
+  // (it self-corrects a render or two after mount, which is enough for
+  // date-derived UI read off it to briefly show wrong/inconsistent
+  // values). Nothing here is as failure-prone as schedule.tsx's own
+  // entrance animation was, but ElapsedTimerPill's elapsed-time math
+  // (nowMs / 1000 - startedAt) would still flash a bogus ~55-year
+  // "elapsed" time on the very first paint of any live match with this
+  // started at 0, clamped to a visible "0:00" by its own Math.max(0, …)
+  // -- correct a moment later, but a real, avoidable flash regardless.
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
+  // Only reruns reexecuteQuery for a GENUINE refreshedAt change (the
+  // Settings tab's "Refresh bracket data" button, see dashboard.tsx) --
+  // a plain `useEffect(..., [refreshedAt])` also fires once on mount
+  // regardless of whether refreshedAt "changed," which forced a second,
+  // fully redundant network-only fetch immediately after
+  // useStartggPhaseBracket's own automatic on-mount fetch (urql's
+  // useQuery already fetches once on mount/variable-change for free).
+  // Doubling every fetch on first load -- and on every subsequent mount,
+  // i.e. every time the "Now showing" dropdown switches into the
+  // bracket view -- is exactly the kind of avoidable extra traffic that
+  // trips start.gg's own rate limiting under real tournament load,
+  // surfacing as intermittent failures that have nothing to do with the
+  // bracket data itself.
+  const isFirstRefreshRef = useRef(true);
   useEffect(() => {
+    if (isFirstRefreshRef.current) {
+      isFirstRefreshRef.current = false;
+      return;
+    }
     reexecuteQuery({ requestPolicy: "network-only" });
     // refreshedAt is the only reason to rerun this effect -- see
     // dashboard.tsx's Bracket settings "Refresh" button.
@@ -165,7 +211,6 @@ function BracketTreeInner({ phaseId }: { phaseId: string }) {
   }, [reexecuteQuery]);
 
   useEffect(() => {
-    setNowMs(Date.now());
     const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
@@ -186,81 +231,161 @@ function BracketTreeInner({ phaseId }: { phaseId: string }) {
   const setsById = useMemo(() => indexSetsById(sets), [sets]);
   const phantomSetsById = usePhantomSets(sets, setsById);
 
+  // The chrome (banner, title bar) below is now ALWAYS rendered, not
+  // gated behind these checks the way a plain early `return null`/
+  // `return <Callout>` used to be -- title/icon are already known (came
+  // in as props, not from this query), so there's no reason the operator
+  // should stare at a completely blank overlay for however long
+  // start.gg's own API takes to respond (independently known to be
+  // slow, sometimes several seconds, for bracket-shaped queries) --
+  // only the BODY below the title bar needs to reflect fetching/error/
+  // not-found/ready, not the whole card disappearing and reappearing
+  // around it. Computed as a value here, not a nested early-return,
+  // specifically so the chrome JSX further down stays single-sourced
+  // rather than duplicated across every branch.
+  let body: React.ReactNode;
   if (result.fetching && !result.data) {
-    return null; // avoid a flash of an empty/error box on first load
-  }
-  if (result.error) {
-    return (
+    body = (
+      <div style={{ color: COLORS.muted, fontSize: 20, padding: "8px 4px" }}>
+        Loading bracket…
+      </div>
+    );
+  } else if (result.error) {
+    body = (
       <Callout intent="danger" style={{ maxWidth: 480 }}>
         {result.error.message}
       </Callout>
     );
-  }
-  const phase = result.data?.phase;
-  if (!phase) {
-    return (
+  } else if (!result.data?.phase) {
+    body = (
       <Callout intent="warning" style={{ maxWidth: 480 }}>
         That phase wasn't found -- it may have been deleted, or the API key
         doesn't have access to it.
       </Callout>
     );
-  }
-
-  const layout = layoutBracket(sets);
-  const winnersEntrantIds = indexWinnersEntrantIds(layout.winners);
-  const seedProgressionById = indexSeedProgressionById(
-    phase.seeds?.nodes || [],
-  );
-
-  return (
-    <div
-      style={{
-        fontFamily: FONT_FAMILY,
-        background: "#111418",
-        padding: 20,
-        borderRadius: 8,
-        display: "inline-block",
-      }}
-    >
-      <div
-        style={{
-          color: COLORS.text,
-          fontWeight: 700,
-          fontSize: 40,
-          marginBottom: 20,
-          textAlign: "center",
-        }}
-      >
-        {phase.name}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-        <BracketTree
-          label="Winners"
-          side={layout.winners}
-          setsById={setsById}
-          currentPhaseId={phase.id}
-          nowMs={nowMs}
-          seedProgressionById={seedProgressionById}
-          phantomSetsById={phantomSetsById}
-        />
-        {layout.losers && (
+  } else {
+    const phase = result.data.phase;
+    const layout = layoutBracket(sets);
+    const winnersEntrantIds = indexWinnersEntrantIds(layout.winners);
+    const seedProgressionById = indexSeedProgressionById(
+      phase.seeds?.nodes || [],
+    );
+    body = (
+      <>
+        <div
+          style={{
+            fontFamily: BODY_FONT_FAMILY,
+            fontSize: 20,
+            color: COLORS.muted,
+            marginTop: -8,
+          }}
+        >
+          {phase.name}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
           <BracketTree
-            label="Losers"
-            side={layout.losers}
+            label="Winners"
+            side={layout.winners}
             setsById={setsById}
             currentPhaseId={phase.id}
             nowMs={nowMs}
-            // Only the losers side needs this -- a winners-round-1
-            // entrant trivially "appears in winners" via this exact
-            // set, so passing it there too would wrongly suppress its
-            // own legitimate pill. See indexWinnersEntrantIds's doc.
-            winnersEntrantIds={winnersEntrantIds}
             seedProgressionById={seedProgressionById}
             phantomSetsById={phantomSetsById}
           />
-        )}
+          {layout.losers && (
+            <BracketTree
+              label="Losers"
+              side={layout.losers}
+              setsById={setsById}
+              currentPhaseId={phase.id}
+              nowMs={nowMs}
+              // Only the losers side needs this -- a winners-round-1
+              // entrant trivially "appears in winners" via this exact
+              // set, so passing it there too would wrongly suppress
+              // its own legitimate pill. See indexWinnersEntrantIds's
+              // doc.
+              winnersEntrantIds={winnersEntrantIds}
+              seedProgressionById={seedProgressionById}
+              phantomSetsById={phantomSetsById}
+            />
+          )}
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {/* A plain `style` prop can't express @font-face -- see
+          local-fonts.ts's own comment on this. Shared with gauntlet-
+          pools.tsx/schedule.tsx, not a local redeclaration. */}
+      <style>{LOCAL_FONT_FACE_CSS}</style>
+      <div
+        style={{
+          // The card's base is the BODY font -- most of its text (match
+          // names, round headers) is body content. The title bar
+          // overrides to TITLE_FONT_FAMILY individually, below.
+          fontFamily: BODY_FONT_FAMILY,
+          // local-fonts.ts's @font-face only ever registers ONE weight
+          // (400) regardless of the supplied file's own native weight --
+          // without this, elements asking for 700/600 (round headers,
+          // winner names, the title bar) get a synthesized fake bold,
+          // which makes a custom display font look blurry instead of
+          // crisp. Inherited, so this reaches the SVG text below too.
+          fontSynthesis: "none",
+          // A fallback fill only -- the content wrapper below (its own
+          // sibling-of-the-banner, painted after it) is what actually
+          // hides the banner in steady state.
+          background: "rgb(17, 20, 24)",
+          borderRadius: 20,
+          overflow: "hidden",
+          display: "inline-block",
+          position: "relative",
+          color: COLORS.text,
+        }}
+      >
+        {/* Same soft out-of-focus banner backdrop as gauntlet-pools.tsx/
+            schedule.tsx -- isolated on its own absolutely-positioned
+            layer so `filter: blur()` never touches the sharp bracket
+            tree stacked on top of it. `inset: -20px` gives the blur room
+            to bleed past the card's own edges. */}
+        <div
+          style={{
+            position: "absolute",
+            inset: -20,
+            background: `url(${Banner}) center/cover no-repeat`,
+            filter: "blur(3px) brightness(0.55)",
+          }}
+        />
+        <div
+          style={{
+            // Opaque, same color as the outer wrapper's own fallback
+            // fill above -- this is what actually hides the banner:
+            // this div sits ON TOP of the blurred banner layer (a
+            // preceding sibling) in paint order and exactly matches its
+            // parent's own content box, so a solid fill here covers the
+            // banner completely, including the gaps between the title
+            // bar and the bracket below that would otherwise let it
+            // bleed through.
+            position: "relative",
+            background: "rgb(17, 20, 24)",
+            padding: 24,
+            display: "flex",
+            flexDirection: "column",
+            gap: 20,
+          }}
+        >
+          {/* Shared with gauntlet-pools.tsx's own title bar (same
+              component, not just similarly-styled). No subtitle here
+              (unlike before) -- phase.name only exists once `body`
+              above has real phase data, and moved down into `body`
+              itself for that reason, so the title bar can render
+              immediately without waiting on it. */}
+          <BroadcastTitleBar icon={icon} title={title || "Bracket"} />
+          {body}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -277,7 +402,20 @@ const MAX_PHANTOM_HOPS = 5;
  * deeper structural rounds are only reachable one `set(id:)` lookup at a
  * time. Loops via collectUnresolvedSetPrereqIds, since a freshly-fetched
  * phantom set can itself reference another, deeper phantom id, bounded
- * by MAX_PHANTOM_HOPS so a pathological chain can't loop forever. */
+ * by MAX_PHANTOM_HOPS so a pathological chain can't loop forever.
+ *
+ * Each hop is its own full round-trip, sequential (hop N+1's ids aren't
+ * known until hop N's response arrives) -- combined with start.gg's own
+ * latency for this kind of lookup, a multi-hop chain can add several
+ * real seconds on top of the main bracket query. cacheRef exists
+ * specifically to keep that cost from being paid AGAIN on every single
+ * refetch (the 60s poll, a manual Refresh, a phase switch while staying
+ * in bracket view) -- a bye-collapse chain's own shape is structural,
+ * fixed once a bracket is generated, not something that changes as an
+ * event progresses, so once an id is resolved it never needs
+ * re-fetching for the lifetime of this component instance. Confirmed
+ * live: this was a real, measurable contributor to "the bracket takes
+ * forever to load" on every poll/refresh, not just the first one. */
 function usePhantomSets(
   sets: (StartggSet | null)[],
   setsById: SetsById,
@@ -286,11 +424,22 @@ function usePhantomSets(
   const [phantomSetsById, setPhantomSetsById] = useState<PhantomSetsById>(
     () => new Map(),
   );
+  // The actual accumulating cache -- a ref, not phantomSetsById itself,
+  // so the effect below can read+write it synchronously across hops
+  // without waiting on a re-render each time. phantomSetsById (state)
+  // stays what's exposed to callers; this is the source of truth the
+  // effect accumulates into and seeds every future run from.
+  const cacheRef = useRef<PhantomSetsById>(new Map());
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const collected: PhantomSetsById = new Map();
+      // Seeded from the accumulated cache, not a fresh empty Map --
+      // see this hook's own doc above for why that's safe.
+      // collectUnresolvedSetPrereqIds already treats anything in here
+      // as resolved, so a cache hit costs nothing more than the Map
+      // lookup it already does.
+      const collected: PhantomSetsById = new Map(cacheRef.current);
       let idsToFetch = collectUnresolvedSetPrereqIds(sets, setsById, collected);
       let hops = 0;
       while (idsToFetch.length && hops < MAX_PHANTOM_HOPS && !cancelled) {
@@ -303,7 +452,10 @@ function usePhantomSets(
         );
         hops++;
       }
-      if (!cancelled) setPhantomSetsById(new Map(collected));
+      if (!cancelled) {
+        cacheRef.current = collected;
+        setPhantomSetsById(new Map(collected));
+      }
     })();
     return () => {
       cancelled = true;
@@ -343,6 +495,29 @@ async function fetchPhantomSets(
   });
   return map;
 }
+
+// This file's own un-scaled baseline text size for a player's name (see
+// MatchBox's own fontSize prop, further down, which reads this same
+// constant) -- SVG_SCALE below is computed against it, not a re-tuned
+// literal, so the two can never quietly drift apart from each other.
+const PLAYER_NAME_FONT_SIZE = 15;
+// The whole bracket <svg> renders at this many times its own natural
+// width/height (viewBox stays at the ORIGINAL, unscaled coordinate
+// space) -- standard SVG technique, scales every child (text, strokes,
+// pills, connectors, everything) proportionally for free. Exists so this
+// view's player names visually match gauntlet-pools.tsx's own PoolBox
+// rows exactly (POOL_PLAYER_ROW_FONT_SIZE, see its own doc in
+// broadcast-theme.ts) -- the two views were tuned independently before,
+// to two "looks about right" sizes that didn't actually match, so
+// switching the "Now showing" dropdown between them made every name
+// suddenly jump ~68% larger or smaller. Deliberately NOT hand-retuning
+// BOX_WIDTH/ROW_HEIGHT/every other constant below by this same ratio
+// instead -- they're already carefully tuned relative to EACH OTHER (see
+// this component's own "tightened toward start.gg's own compact
+// proportions" comment just below), and re-deriving a dozen of them by
+// hand risks quietly missing one; scaling the rendered SVG uniformly
+// can't miss anything since there's nothing left to individually retune.
+const SVG_SCALE = POOL_PLAYER_ROW_FONT_SIZE / PLAYER_NAME_FONT_SIZE;
 
 // Tightened up from this component's first "readability" pass to read
 // closer to start.gg's own, more compact proportions -- this is a spacing
@@ -433,20 +608,19 @@ function BracketTree({
   const totalHeight = geo.height + BASE_PADDING * 2 + HEADER_HEIGHT;
   return (
     <div>
-      <div
-        style={{
-          color: COLORS.muted,
-          fontWeight: 700,
-          fontSize: 30,
-          marginBottom: 4,
-        }}
-      >
-        {label}
-      </div>
+      {/* No visible "Winners"/"Losers" text header above the tree
+          itself -- `label` still flows into the SVG's own <title>
+          below (screen readers/accessibility), just not rendered as
+          its own standalone heading here. */}
       <svg
         role="img"
-        width={totalWidth}
-        height={totalHeight}
+        // Rendered size is SVG_SCALE times the natural geometry below --
+        // viewBox stays at the true, unscaled totalWidth/totalHeight, so
+        // every child renders at its own normal coordinates and the
+        // browser scales the whole result uniformly to fit. See
+        // SVG_SCALE's own doc for why this exists.
+        width={totalWidth * SVG_SCALE}
+        height={totalHeight * SVG_SCALE}
         viewBox={`0 0 ${totalWidth} ${totalHeight}`}
       >
         <title>{label} bracket</title>
@@ -569,6 +743,31 @@ const NAME_INSET_X = 16;
 const SCORE_PILL_WIDTH = 30;
 const SCORE_PILL_MARGIN = 8;
 const LIVE_TIMER_WIDTH = 58;
+
+// A name row's real available width, before the score pill starts: from
+// NAME_INSET_X (16) to BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN
+// (200 - 30 - 8 = 162) is 146px -- confirmed directly against a real
+// rendered bracket (getBBox() on the live SVG text/tspan elements), not
+// assumed. That same live check is what caught this budget being wrong
+// in the first place: a real entrant ("Bhop Goomba Roomba", 18 chars,
+// under the old 20-char cap) measured 162.89px wide, 17px past the pill.
+// Real per-character widths in this custom BODY_FONT_FAMILY (which is
+// user-supplied and gitignored, see local-fonts.ts -- not something this
+// comment's numbers can be re-derived from without a live render) ranged
+// 8.3-9.05px/char across several real names depending on weight/letters;
+// MAX_NAME_ROW_CHARS below uses 9px/char (the widest observed, i.e. the
+// safe direction to round) against 140px (146 minus a few px of margin,
+// not the exact flush edge) -- 140/9 = 15.5, floored to 15.
+const MAX_NAME_ROW_CHARS = 15;
+// Tightened from 10 -- with MAX_NAME_ROW_CHARS now much smaller than the
+// old 20, a 10-char prefix could still eat 2/3 of the entire budget by
+// itself. 8 keeps a genuinely long tag readable while leaving more room
+// for MIN_NAME_ROW_CHARS below.
+const MAX_PREFIX_CHARS = 8;
+// The name's own floor even when a maxed-out prefix eats the rest of
+// MAX_NAME_ROW_CHARS -- worst case (8-char prefix + 1 space + 6-char
+// name = 15 chars) still lands exactly at budget, not over it.
+const MIN_NAME_ROW_CHARS = 6;
 
 function MatchBox({
   match,
@@ -746,10 +945,15 @@ function MatchBox({
         // score pill area on the row's right edge.
         const prefix = slot?.entrant?.participants?.[0]?.prefix || null;
         const displayPrefix =
-          prefix && prefix.length > 10 ? prefix.slice(0, 9) + "…" : prefix;
+          prefix && prefix.length > MAX_PREFIX_CHARS
+            ? prefix.slice(0, MAX_PREFIX_CHARS - 1) + "…"
+            : prefix;
         const nameBudget = displayPrefix
-          ? Math.max(8, 20 - displayPrefix.length - 1)
-          : 20;
+          ? Math.max(
+              MIN_NAME_ROW_CHARS,
+              MAX_NAME_ROW_CHARS - displayPrefix.length - 1,
+            )
+          : MAX_NAME_ROW_CHARS;
         const displayName =
           name.length > nameBudget ? name.slice(0, nameBudget - 1) + "…" : name;
         return (
@@ -759,7 +963,7 @@ function MatchBox({
                 x={NAME_INSET_X}
                 y={ROW_HEIGHT / 2 + 5}
                 fill={nameColor}
-                fontSize={15}
+                fontSize={PLAYER_NAME_FONT_SIZE}
                 fontWeight={isWinner ? 700 : 400}
                 fontStyle={slot?.entrant ? "normal" : "italic"}
               >

@@ -218,6 +218,26 @@ export function indexSetsById(sets: (StartggSet | null)[]): SetsById {
   );
 }
 
+/** Strips start.gg's own "Prefix | GamerTag" embedding out of an
+ * entrant's raw `name` -- confirmed live: `entrant.name` already bakes
+ * the clan/sponsor prefix in this format (same field, same format
+ * controls/player-names.tsx's own inferShortname strips for other UI),
+ * but bracket-tree.tsx's MatchBox ALSO renders that same prefix
+ * separately, in its own color, from `entrant.participants[0].prefix`
+ * (see index.ts's own comment on that field for why). Leaving it baked
+ * into this string too showed the tag TWICE on every real entrant --
+ * once from that separate colored tspan, once again right after it as
+ * plain text. Deliberately a small local duplicate of inferShortname's
+ * own split-on-" | " logic rather than importing it: that function
+ * lives in controls/, which pulls in Blueprint UI components this data
+ * layer has no business depending on. Null-safe (returns "" for a null
+ * name) so every call site can keep its own `|| "TBD"` fallback. */
+function stripEntrantPrefix(name: string | null): string {
+  if (!name) return "";
+  const pieces = name.split(" | ");
+  return pieces[pieces.length - 1];
+}
+
 /** Describes an empty slot the way start.gg's own bracket page does --
  * "winner of A" / "loser of A" (the prereq set's own identifier letter,
  * lowercase leading word, matching their exact casing) for a same-phase
@@ -247,9 +267,11 @@ export function describeEmptySlot(
   seedProgressionById?: SeedProgressionById,
   phantomSetsById?: PhantomSetsById,
 ): string {
-  if (slot?.entrant) return slot.entrant.name || "TBD";
+  if (slot?.entrant) return stripEntrantPrefix(slot.entrant.name) || "TBD";
   const effective = resolveThroughByes(slot, setsById, phantomSetsById);
-  if (effective?.entrant) return effective.entrant.name || "TBD";
+  if (effective?.entrant) {
+    return stripEntrantPrefix(effective.entrant.name) || "TBD";
+  }
   if (effective?.prereqType === "set" && effective.prereqId) {
     const prereqLabel =
       setsById.get(effective.prereqId)?.identifier ??

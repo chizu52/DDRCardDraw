@@ -23,6 +23,7 @@ import {
 } from "../sheets/sheets-public-read";
 import { decodeSheetsConnection } from "../sheets/sheets-connection-param";
 import { CellColor, colorToCss } from "../sheets/sheets-export";
+import { decodeStartggConnection } from "../startgg-gql/startgg-connection-param";
 import { useAppState } from "../state/store";
 import {
   BODY_FONT_FAMILY,
@@ -30,6 +31,8 @@ import {
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
 import { BROADCAST_COLORS, statusPillStyle } from "./broadcast-theme";
+import { BroadcastTitleBar } from "./broadcast-title-bar";
+import { BracketTreeWithApiKey } from "./bracket-tree";
 import Banner from "../other-assets/backgrounds/bg.png";
 
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
@@ -134,6 +137,17 @@ const EMPTY_POOLS: ParsedPool[] = [];
 const EMPTY_COLORS: (CellColor | null)[] = [];
 const EMPTY_HEADER_COLORS: (CellColor | null)[] = [];
 
+// One stable overlay for the whole pools-then-bracket arc of an event --
+// event.gauntletPoolsShowsBracket (room-synced, picked from dashboard.tsx's
+// GauntletPoolsSettingsSection's combined dropdown) switches between the
+// pools diagram below and the start.gg bracket tree for whichever phase is
+// selected (event.selectedBracketPhase), instead of a separate bracket-tree
+// OBS source that needed swapping in once pool play wrapped up. Both
+// credential sets travel in this one URL (`src` for Sheets, `bracketSrc`
+// for start.gg -- two distinctly-named opaque params, not one shared `src`,
+// since each decodes a differently-shaped connection) so either view is
+// ready the instant the toggle flips live, not fetched fresh from a URL
+// that was never actually copied into OBS.
 export function GauntletPoolsOverlay() {
   const [params] = useSearchParams();
   // Credentials travel as one opaque `src` param (see
@@ -143,7 +157,61 @@ export function GauntletPoolsOverlay() {
   const apiKey = decoded.apiKey ?? params.get("apiKey");
   const spreadsheetId = decoded.spreadsheetId ?? params.get("spreadsheetId");
   const sheetName = decoded.sheet ?? params.get("sheet") ?? "Pools";
+  const bracketApiKey = decodeStartggConnection(params.get("bracketSrc"));
+  const showsBracket = useAppState((s) => s.event.gauntletPoolsShowsBracket);
+  // Shared with the pools view below -- the bracket view no longer has
+  // its own separate title/icon fields (see BracketTreeWithApiKey's own
+  // doc), both views brand themselves the same way regardless of which
+  // is currently showing.
+  const title = useAppState((s) => s.event.gauntletPoolsTitle);
+  const icon = useAppState((s) => s.event.gauntletPoolsIcon);
 
+  if (showsBracket) {
+    if (!bracketApiKey) {
+      return (
+        <Callout intent="danger" style={{ maxWidth: 480 }}>
+          Missing start.gg credentials for this overlay. Use the "Copy
+          Bracket overlay URL" button in the Settings tab rather than
+          building this URL by hand -- it fills this in automatically from
+          your saved start.gg settings (if you've saved one).
+        </Callout>
+      );
+    }
+    return (
+      <BracketTreeWithApiKey apiKey={bracketApiKey} title={title} icon={icon} />
+    );
+  }
+
+  return (
+    <GauntletPoolsWithCreds
+      apiKey={apiKey}
+      spreadsheetId={spreadsheetId}
+      sheetName={sheetName}
+    />
+  );
+}
+
+/** Everything that only needs resolved credentials, not specifically
+ * the URL they came from -- split out so another overlay wanting to
+ * embed the pools diagram (e.g. a future combined pools+bracket view)
+ * can render this directly with credentials it decoded some other way,
+ * without needing a second nested <Router> just to satisfy
+ * GauntletPoolsOverlay's own useSearchParams() call (React Router
+ * hard-errors on a nested Router -- a real approach tried first here,
+ * see git history). Kept the SAME `string | null` types (rather than
+ * requiring non-null and hoisting the missing-param Callout up into
+ * the thin wrapper above) specifically so this function's own body
+ * below -- including its existing missing-param Callout further down
+ * -- doesn't need to change at all. */
+export function GauntletPoolsWithCreds({
+  apiKey,
+  spreadsheetId,
+  sheetName,
+}: {
+  apiKey: string | null;
+  spreadsheetId: string | null;
+  sheetName: string;
+}) {
   // Unlike pool-results.tsx, this overlay always shows every pool at
   // once -- selectedPool isn't used to filter which pools render here,
   // only to know WHICH one the operator has actually put on Pool
@@ -358,8 +426,8 @@ export function GauntletPoolsOverlay() {
       .join(", ");
     return (
       <Callout intent="danger" style={{ maxWidth: 480 }}>
-        Missing query parameter(s): {missing}. Use the "Copy Overlay URL"
-        button in the Gauntlet Pools Overlay settings section rather than
+        Missing query parameter(s): {missing}. Use the "Copy Bracket overlay
+        URL" button in the Bracket Overlay settings section rather than
         building this URL by hand -- it fills these in automatically from
         your saved Sheets settings.
       </Callout>
@@ -535,25 +603,13 @@ export function GauntletPoolsOverlay() {
               transform: `translateX(${titleBarNudge}px)`,
             }}
           >
-            <div style={titleBarStyle}>
-              {icon && (
-                <img
-                  src={icon}
-                  alt=""
-                  style={{
-                    height: 100,
-                    width: "auto",
-                    maxWidth: 200,
-                    objectFit: "contain",
-                    borderRadius: 10,
-                    flexShrink: 0,
-                  }}
-                />
-              )}
-              <div style={{ fontFamily: TITLE_FONT_FAMILY, fontSize: 56 }}>
-                {title || "Gauntlet Pools"}
-              </div>
-            </div>
+            {/* Shared with bracket-tree.tsx's own title bar (same
+                component, not just similarly-styled) -- see
+                BroadcastTitleBar's own doc for why. No subtitle here,
+                unlike that one's phase.name -- this view has no
+                equivalent "live, dynamic" info the title itself can't
+                already express. */}
+            <BroadcastTitleBar icon={icon} title={title || "Gauntlet Pools"} />
           </div>
           <div
             style={{
@@ -811,6 +867,32 @@ function ordinal(rank: number): string {
 // parse-pools.ts's own `slotIndex < 4` cap (parsePoolsFromRows).
 const POOL_SLOT_COUNT = 4;
 
+// A pool box's own column deliberately GROWS to fit whatever's in it
+// (gridStyle's own minmax(380px, max-content) pool-column tracks, see
+// its own comment) rather than truncating like bracket-tree.tsx's fixed-
+// width MatchBox does -- confirmed live this works correctly, right up
+// until a genuinely long name (a long team tag plus a long gamer tag,
+// not uncommon for a real roster) balloons that column, and every OTHER
+// pool sharing it (same set number, different letter-row), well past
+// what a normal browser tab would need to scroll for. That's fine in a
+// resizable tab -- overflowX:auto plus the auto-pan camera's own
+// programmatic scrollLeft assignment (recomputeScroll) handles it -- but
+// this overlay is captured by OBS as a browser SOURCE at a FIXED canvas
+// size, with no viewer able to drag a scrollbar the way a real browser
+// tab allows; the auto-pan camera only centers WHICH pool is on screen,
+// it can't shrink a single pool box that's already wider than the whole
+// canvas. This budget keeps the "grow to fit" comfort for any normal-
+// length name (chosen generously past minmax's own 380px floor) while
+// still guaranteeing one outlier name can't blow out an entire pool
+// column -- and by extension every pool sharing it, and the whole card
+// -- past what actually fits on screen.
+const MAX_POOL_NAME_CHARS = 30;
+function truncatePoolName(name: string): string {
+  return name.length > MAX_POOL_NAME_CHARS
+    ? name.slice(0, MAX_POOL_NAME_CHARS - 1) + "…"
+    : name;
+}
+
 /** One rendered slot in a PoolBox: a real, already-in-the-sheet player;
  * a predicted player resolved from a Progression code naming an exact
  * rank in an already-finished source pool (real name, but not yet an
@@ -1027,7 +1109,9 @@ function PoolRowList({
           // placeholder text sits inline where a real name would go.
           return (
             <div key={idx} style={{ ...poolRowStyle, ...placeholderRowStyle }}>
-              <span style={poolPlayerNameStyle}>{slot.label}</span>
+              <span style={poolPlayerNameStyle}>
+                {truncatePoolName(slot.label)}
+              </span>
               {/* Empty second cell, purely so this row's gridline
                   (borderBottom, on both cell styles) runs the full row
                   width like every real row's does -- without it, a
@@ -1044,7 +1128,9 @@ function PoolRowList({
           // like a placeholder rather than a confirmed row.
           return (
             <div key={idx} style={{ ...poolRowStyle, ...placeholderRowStyle }}>
-              <span style={poolPlayerNameStyle}>{slot.player}</span>
+              <span style={poolPlayerNameStyle}>
+                {truncatePoolName(slot.player)}
+              </span>
               <span style={playerTotalStyle}>--</span>
             </div>
           );
@@ -1069,7 +1155,9 @@ function PoolRowList({
                 status === "eliminated" ? COLORS.muted : COLORS.text,
             }}
           >
-            <span style={poolPlayerNameStyle}>{playerRow.player}</span>
+            <span style={poolPlayerNameStyle}>
+              {truncatePoolName(playerRow.player)}
+            </span>
             <span style={playerTotalStyle}>{playerRow.total || "--"}</span>
           </div>
         );
@@ -1255,19 +1343,6 @@ const cardContentStyle: React.CSSProperties = {
   padding: 40,
 };
 
-// This overlay's own title bar.
-const titleBarStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 24,
-  background: COLORS.panel,
-  border: "3px solid rgb(255, 255, 255)",
-  borderRadius: 18,
-  padding: "20px 32px",
-  fontFamily: TITLE_FONT_FAMILY,
-  color: COLORS.text,
-};
-
 // `gridTemplateColumns` is built by the caller (GauntletPoolsOverlay's
 // own gridColumnTemplate) -- (pool, arrow) repeated once per distinct
 // set number across both sides, plus one trailing destination column.
@@ -1382,6 +1457,12 @@ const playerRowStyle: React.CSSProperties = {
 // container (via display:contents below) forces every row to share the
 // exact same two column tracks, so the vertical divider is pixel-
 // identical top to bottom regardless of name length.
+//
+// This "0.9em" is the source of truth broadcast-theme.ts's own
+// POOL_PLAYER_ROW_FONT_SIZE mirrors (cardStyle's base 28 * 0.9 = 25.2px)
+// -- bracket-tree.tsx's MatchBox names are scaled to match this exactly.
+// Changing this value without updating that one re-introduces the same
+// "the two views don't actually match" drift this was written to fix.
 const poolRowListStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr auto",

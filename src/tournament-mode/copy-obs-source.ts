@@ -27,33 +27,35 @@ export const routablePoolResultsPath = (
 ) =>
   `../pool-results?${new URLSearchParams({ src: encodeSheetsConnection({ apiKey, spreadsheetId }) }).toString()}`;
 
-// Same stable-URL-plus-URL-embedded-credentials pattern as
-// routablePoolResultsPath above -- which phase to show is room-synced
-// state (event.selectedBracketPhase), only the start.gg API key comes
-// from the URL. Packed into one opaque `src` param via
-// encodeStartggConnection rather than left as a plain, immediately-
-// readable `apiKey` param, same reasoning as routablePoolResultsPath's
-// own `src` packing. See bracket-tree.tsx.
-export const routableBracketTreePath = (apiKey: string) =>
-  `../bracket-tree?${new URLSearchParams({ src: encodeStartggConnection(apiKey) }).toString()}`;
-
-// Same stable-URL, room-synced-content pattern as routableBracketTreePath
+// Same stable-URL, room-synced-content pattern as routablePoolResultsPath
 // above -- which day to show is event.selectedScheduleDay, switched live
 // from the Settings tab's radio buttons, not baked into the URL. One
 // overlay source total, not three. See schedule.tsx.
 export const routableSchedulePath = () => `../schedule`;
 
-// Same URL-embedded-credentials pattern as routablePoolResultsPath --
-// unlike that overlay though, there's no room-synced "which pool"
-// selector here at all: this shows every pool in the sheet at once (the
-// whole Gauntlet Pools diagram), so there's nothing to switch live in
-// the first place. See gauntlet-pools.tsx. Same opaque `src` packing as
-// routablePoolResultsPath above.
+// Same URL-embedded-credentials pattern as routablePoolResultsPath for
+// the Sheets side (`src`) -- unlike that overlay though, there's no
+// room-synced "which pool" selector for the pools diagram itself, it
+// always shows every pool in the sheet at once. This one overlay now
+// covers the start.gg bracket tree too (event.gauntletPoolsShowsBracket
+// picks which of the two actually shows, room-synced, not part of this
+// URL) -- `startggApiKey` is optional since an operator may only ever
+// use the pools half and never save one; when present it's packed the
+// same opaque way (encodeStartggConnection) bracket-tree.tsx's own,
+// now-retired standalone route used to pack it. See gauntlet-pools.tsx.
 export const routableGauntletPoolsPath = (
   apiKey: string,
   spreadsheetId: string,
-) =>
-  `../gauntlet-pools?${new URLSearchParams({ src: encodeSheetsConnection({ apiKey, spreadsheetId }) }).toString()}`;
+  startggApiKey?: string,
+) => {
+  const params = new URLSearchParams({
+    src: encodeSheetsConnection({ apiKey, spreadsheetId }),
+  });
+  if (startggApiKey) {
+    params.set("bracketSrc", encodeStartggConnection(startggApiKey));
+  }
+  return `../gauntlet-pools?${params.toString()}`;
+};
 
 export function copyObsSource(href: string) {
   void copyPlainTextToClipboard(href, "Copied OBS source URL to clipboard");
