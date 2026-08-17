@@ -889,6 +889,40 @@ function truncateToWidth(
   return text.slice(0, lo) + "…";
 }
 
+/** The y (baseline) to draw `text` at so it's ACTUALLY visually centered
+ * at `centerY` -- measured via Canvas2D's real glyph ink extents
+ * (actualBoundingBoxAscent/Descent), not SVG's own
+ * dominantBaseline="central". That was tried first here and looked right
+ * in isolated checks, but confirmed live it still wasn't reliably
+ * centering every pill: "central" trusts this custom BODY_FONT_FAMILY's
+ * own internal baseline-table metrics (see local-fonts.ts's own doc on
+ * this being a user-supplied, never-audited font file), which aren't
+ * guaranteed to describe this specific typeface's actual visual weight
+ * correctly. Measuring the real rendered ink instead -- same "measure,
+ * don't guess" approach truncateToWidth above already uses for
+ * horizontal sizing -- removes that dependency entirely: the returned y
+ * is correct for whatever this font actually draws, not what its own
+ * metadata claims it draws. */
+function verticalCenterBaselineY(
+  text: string,
+  centerY: number,
+  fontSize: number,
+  fontWeight: number,
+): number {
+  const ctx = getMeasureCtx();
+  if (!ctx) return centerY + fontSize * 0.35; // rough fallback, see measureTextWidth's own
+  ctx.font = `${fontWeight} ${fontSize}px ${BODY_FONT_FAMILY}`;
+  const metrics = ctx.measureText(text);
+  // Both default to 0 on a browser that doesn't support the
+  // actualBoundingBox* metrics (all current major engines do) -- falls
+  // through to centerY itself in that case, which is still a reasonable
+  // approximation (alphabetic baseline AT the center) rather than a
+  // crash.
+  const ascent = metrics.actualBoundingBoxAscent || 0;
+  const descent = metrics.actualBoundingBoxDescent || 0;
+  return centerY + (ascent - descent) / 2;
+}
+
 function MatchBox({
   match,
   setsById,
@@ -967,6 +1001,28 @@ function MatchBox({
   // (see isSetCalled's own doc). Both reserve the same STATUS_PILL_WIDTH
   // of right-side room regardless of which is actually showing.
   const hasStatusPill = (live && set.startedAt != null) || called;
+  const outgoingLabel = outgoing.winner || outgoing.loser;
+  // Where a given status pill (by its own width -- the two aren't the
+  // same size) should start so it's actually centered in the real gap
+  // between the match box's edge and the outgoing promotion pill's near
+  // edge -- confirmed live this was a real, visible bug: both pills
+  // previously rendered at a flat BOX_WIDTH + 8, which only "centers"
+  // whichever one happens to exactly fill STATUS_PILL_WIDTH (neither
+  // one always does -- the 58-wide timer sat flush against the box with
+  // all the slack pushed to the far side instead of split evenly, and
+  // neither pill actually centered against the true visual gap -- box
+  // edge to the promotion pill's own near edge -- once that was measured
+  // rather than assumed). promoNearEdgeX mirrors the outgoing
+  // PromotionPill's own edgeX/gap math exactly (see its call site
+  // below) -- independent of the promotion pill's own width, which only
+  // affects where its FAR edge sits, not its near one.
+  function statusPillX(pillWidth: number): number {
+    if (!outgoingLabel) return BOX_WIDTH + 8;
+    const promoNearEdgeX =
+      BOX_WIDTH + 8 + STATUS_PILL_WIDTH + 8 + PROMOTION_PILL_GAP;
+    const gapWidth = promoNearEdgeX - BOX_WIDTH;
+    return BOX_WIDTH + (gapWidth - pillWidth) / 2;
+  }
 
   return (
     <g transform={`translate(${x},${y})`} opacity={isFarOut ? 0.5 : 1}>
@@ -1027,9 +1083,21 @@ function MatchBox({
         <PromotionPill
           label={(outgoing.winner || outgoing.loser)!}
           // Pushed past the status pill (8px gap + its own width) when
-          // both are present, so they don't collide -- see the
-          // ElapsedTimerPill/UpNextPill render below.
+          // both are present, so the PILL itself doesn't collide with
+          // it -- see the ElapsedTimerPill/UpNextPill render below.
           edgeX={BOX_WIDTH + (hasStatusPill ? 8 + STATUS_PILL_WIDTH + 8 : 0)}
+          // boxEdgeX explicitly at the box's own true edge, NOT left to
+          // default to edgeX above -- confirmed live this was a real
+          // bug: on any match with a status pill showing, the connector
+          // line started wherever the PILL itself was pushed to instead
+          // of the box's actual edge, so it visually read as connecting
+          // to the status pill (or floating in the gap after it) rather
+          // than to the match it actually belongs to. The line still
+          // visually passes behind/through the status pill's own opaque
+          // rect where they overlap -- that's fine and expected, same as
+          // how PromotionPill's own far end already stops at the pill's
+          // edge, drawn in front of it.
+          boxEdgeX={BOX_WIDTH}
           y={ROW_DIVIDER_Y}
           side="right"
         />
@@ -1071,7 +1139,7 @@ function MatchBox({
           are mutually exclusive, so only one of these two ever renders. */}
       {live && set.startedAt != null && (
         <ElapsedTimerPill
-          x={BOX_WIDTH + 8}
+          x={statusPillX(LIVE_TIMER_WIDTH)}
           y={ROW_DIVIDER_Y}
           startedAt={set.startedAt}
           nowMs={nowMs}
@@ -1079,7 +1147,11 @@ function MatchBox({
         />
       )}
       {called && (
-        <UpNextPill x={BOX_WIDTH + 8} y={ROW_DIVIDER_Y} color={COLORS.called} />
+        <UpNextPill
+          x={statusPillX(UP_NEXT_PILL_WIDTH)}
+          y={ROW_DIVIDER_Y}
+          color={COLORS.called}
+        />
       )}
       {set.identifier && (
         <IdentifierTag label={set.identifier} y={ROW_DIVIDER_Y} />
@@ -1101,7 +1173,33 @@ function MatchBox({
         // reads as if nothing happened -- a plain checkmark, same as the
         // DQ-opponent's win, covers both causes with one signal.
         const showWinCheck = !isDq && isWinner && score == null;
-        const rowY = ROW_TOP_PAD + i * (ROW_HEIGHT + ROW_GAP);
+        // Shared by all three score-pill variants (DQ/checkmark/number)
+        // below, computed once instead of each branch repeating the same
+        // expression independently.
+        const scorePillX = BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN;
+        // Each player's own "box" within the match -- bounded by the
+        // match's own outer edge on one side and the divider line on the
+        // other, NOT split evenly by ROW_HEIGHT/ROW_GAP/ROW_TOP_PAD/
+        // ROW_BOTTOM_PAD (those only set the OVERALL match box's
+        // proportions -- see MATCH_BOX_HEIGHT/ROW_DIVIDER_Y's own docs --
+        // they were never meant to describe where each individual row's
+        // own visual boundary sits). Row 0's own box is [0,
+        // ROW_DIVIDER_Y], row 1's is [ROW_DIVIDER_Y, MATCH_BOX_HEIGHT] --
+        // confirmed these aren't equal spans (the divider isn't exactly
+        // at the box's own geometric midpoint, ROW_DIVIDER_Y=45 vs
+        // MATCH_BOX_HEIGHT/2=43 with this file's current constants),
+        // which is exactly why centering row content against a flat
+        // ROW_HEIGHT-tall slice (the previous approach) didn't actually
+        // match where the real outer-border-to-divider boundary sits.
+        const rowTop = i === 0 ? 0 : ROW_DIVIDER_Y;
+        const rowBottom = i === 0 ? ROW_DIVIDER_Y : MATCH_BOX_HEIGHT;
+        const rowCenterY = (rowTop + rowBottom) / 2;
+        // Relative to rowCenterY (0 = center, since the row's own <g>
+        // below translates to rowCenterY directly) -- unlike
+        // scorePillX, this can't be a single row-independent constant
+        // anymore, since row 0 and row 1's own boxes aren't the same
+        // height.
+        const scorePillY = -11;
         const name = describeEmptySlot(
           slot,
           setsById,
@@ -1146,10 +1244,26 @@ function MatchBox({
         );
         return (
           <g key={i}>
-            <g transform={`translate(0,${rowY})`}>
+            {/* Translated to rowCenterY directly, not the old top-
+                anchored rowY -- every y coordinate inside this <g> is
+                relative to the row's own real center now (0 = center),
+                not relative to a flat ROW_HEIGHT-tall slice from the
+                row's own top. */}
+            <g transform={`translate(0,${rowCenterY})`}>
+              {/* Baseline measured against just displayName (not the
+                  optional bell emoji prefix, which Canvas2D's own
+                  ascent/descent metrics don't reliably report for --
+                  the prefix tspan shares this same baseline regardless,
+                  same as normal SVG text flow, so measuring the row's
+                  main content is representative enough). */}
               <text
                 x={NAME_INSET_X}
-                y={ROW_HEIGHT / 2 + 5}
+                y={verticalCenterBaselineY(
+                  displayPrefix ? `${displayPrefix} ${displayName}` : displayName,
+                  0,
+                  PLAYER_NAME_FONT_SIZE,
+                  rowFontWeight,
+                )}
                 fill={nameColor}
                 fontSize={PLAYER_NAME_FONT_SIZE}
                 fontWeight={isWinner ? 700 : 400}
@@ -1167,16 +1281,30 @@ function MatchBox({
               {isDq ? (
                 <g>
                   <rect
-                    x={BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN}
-                    y={(ROW_HEIGHT - 22) / 2}
+                    x={scorePillX}
+                    y={scorePillY}
                     width={SCORE_PILL_WIDTH}
                     height={22}
                     rx={4}
                     fill={COLORS.dq}
                   />
+                  {/* Baseline measured via verticalCenterBaselineY at
+                      the pill's own true center (scorePillY + 11, half
+                      its own 22 height) -- scorePillY already centers
+                      this pill ON the row, so centering the text ON the
+                      pill also centers it on the row. See that
+                      function's own doc for why it measures real glyph
+                      ink instead of trusting dominantBaseline="central"
+                      (tried first, confirmed live still not reliable
+                      for this custom font). */}
                   <text
-                    x={BOX_WIDTH - SCORE_PILL_WIDTH / 2 - SCORE_PILL_MARGIN}
-                    y={ROW_HEIGHT / 2 + 5}
+                    x={scorePillX + SCORE_PILL_WIDTH / 2}
+                    y={verticalCenterBaselineY(
+                      "DQ",
+                      scorePillY + 11,
+                      11,
+                      700,
+                    )}
                     textAnchor="middle"
                     fill="#fff"
                     fontSize={11}
@@ -1188,38 +1316,52 @@ function MatchBox({
               ) : showWinCheck ? (
                 <g>
                   <rect
-                    x={BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN}
-                    y={(ROW_HEIGHT - 22) / 2}
+                    x={scorePillX}
+                    y={scorePillY}
                     width={SCORE_PILL_WIDTH}
                     height={22}
                     rx={4}
                     fill={COLORS.winnerScore}
                   />
-                  <text
-                    x={BOX_WIDTH - SCORE_PILL_WIDTH / 2 - SCORE_PILL_MARGIN}
-                    y={ROW_HEIGHT / 2 + 5}
-                    textAnchor="middle"
-                    fill="#fff"
-                    fontSize={13}
-                    fontWeight={700}
-                  >
-                    ✓
-                  </text>
+                  {/* A hand-drawn checkmark, not the "✓" character --
+                      same reasoning gauntlet-pools.tsx's own arrow
+                      triangle already documents: a Unicode glyph's own
+                      ink isn't symmetric within its advance-width box,
+                      so textAnchor="middle" centers by ADVANCE width,
+                      not by visual weight -- confirmed live, "✓" rendered
+                      clearly left-of-center inside this pill. A path's
+                      own bounding box IS its visual weight, so this
+                      centers correctly regardless of font/browser. */}
+                  <path
+                    d={`M${scorePillX + 8},${scorePillY + 11} L${scorePillX + 13},${scorePillY + 16} L${scorePillX + 22},${scorePillY + 6}`}
+                    stroke="#fff"
+                    strokeWidth={2.5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    fill="none"
+                  />
                 </g>
               ) : (
                 score != null && (
                   <g>
                     <rect
-                      x={BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN}
-                      y={(ROW_HEIGHT - 22) / 2}
+                      x={scorePillX}
+                      y={scorePillY}
                       width={SCORE_PILL_WIDTH}
                       height={22}
                       rx={4}
                       fill={isWinner ? COLORS.winnerScore : COLORS.loserScore}
                     />
+                    {/* Same measured-baseline fix as the DQ pill's own
+                        text above. */}
                     <text
-                      x={BOX_WIDTH - SCORE_PILL_WIDTH / 2 - SCORE_PILL_MARGIN}
-                      y={ROW_HEIGHT / 2 + 5}
+                      x={scorePillX + SCORE_PILL_WIDTH / 2}
+                      y={verticalCenterBaselineY(
+                        String(score),
+                        scorePillY + 11,
+                        13,
+                        700,
+                      )}
                       textAnchor="middle"
                       fill="#fff"
                       fontSize={13}
@@ -1259,19 +1401,27 @@ function ElapsedTimerPill({
   const elapsedSec = Math.max(0, Math.round(nowMs / 1000 - startedAt));
   const mm = Math.floor(elapsedSec / 60);
   const ss = elapsedSec % 60;
+  const label = `${mm}:${ss.toString().padStart(2, "0")}`;
   const height = 22;
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
       <rect width={LIVE_TIMER_WIDTH} height={height} rx={4} fill={color} />
+      {/* Baseline measured via verticalCenterBaselineY, not
+          dominantBaseline="central" -- tried that first (matching
+          IdentifierTag's own established pattern), but confirmed live it
+          still wasn't reliably centering every pill in this custom font.
+          See that function's own doc for why measuring the real glyph
+          ink is more robust than trusting the font's own baseline-table
+          metrics. */}
       <text
         x={LIVE_TIMER_WIDTH / 2}
-        y={height / 2 + 5}
+        y={verticalCenterBaselineY(label, height / 2, 12, 700)}
         textAnchor="middle"
         fill="#fff"
         fontWeight={700}
         fontSize={12}
       >
-        {mm}:{ss.toString().padStart(2, "0")}
+        {label}
       </text>
     </g>
   );
@@ -1296,9 +1446,13 @@ function UpNextPill({
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
       <rect width={UP_NEXT_PILL_WIDTH} height={height} rx={4} fill={color} />
+      {/* Measured baseline, not dominantBaseline="central" -- see
+          ElapsedTimerPill's own doc on this same fix, same reasoning
+          applies here (mutually exclusive with it, but otherwise an
+          identical shape). */}
       <text
         x={UP_NEXT_PILL_WIDTH / 2}
-        y={height / 2 + 5}
+        y={verticalCenterBaselineY("Up Next", height / 2, 12, 700)}
         textAnchor="middle"
         fill="#fff"
         fontWeight={700}
@@ -1307,6 +1461,22 @@ function UpNextPill({
         Up Next
       </text>
     </g>
+  );
+}
+
+// Shared between PromotionPill's own rendering below and MatchBox's
+// status-pill centering math, which needs to predict where the outgoing
+// promotion pill's own near edge will actually land -- without this
+// living in one place, MatchBox would have to duplicate the same sizing
+// formula by hand and risk drifting out of sync with it.
+const PROMOTION_PILL_HEIGHT = 22;
+const PROMOTION_PILL_PADDING_X = 14;
+const PROMOTION_PILL_CHAR_WIDTH = 10;
+const PROMOTION_PILL_GAP = 20;
+function promotionPillWidth(label: string): number {
+  return Math.max(
+    56,
+    label.length * PROMOTION_PILL_CHAR_WIDTH + PROMOTION_PILL_PADDING_X * 2,
   );
 }
 
@@ -1345,11 +1515,9 @@ function PromotionPill({
   side: "left" | "right";
   boxEdgeX?: number;
 }) {
-  const height = 22;
-  const paddingX = 14;
-  const charWidth = 10;
-  const width = Math.max(56, label.length * charWidth + paddingX * 2);
-  const gap = 20;
+  const height = PROMOTION_PILL_HEIGHT;
+  const width = promotionPillWidth(label);
+  const gap = PROMOTION_PILL_GAP;
   const pillX = side === "right" ? edgeX + gap : edgeX - gap - width;
   const pillNearEdgeX = side === "right" ? pillX : pillX + width;
   return (
@@ -1372,9 +1540,16 @@ function PromotionPill({
         fill={COLORS.panel}
         stroke={COLORS.border}
       />
+      {/* Measured baseline at the pill's own true y, not
+          dominantBaseline="central" -- same fix as ElapsedTimerPill/
+          UpNextPill's own text, see their doc. This is also the pill
+          the status pills' own connector line runs past/behind (see
+          MatchBox's hasStatusPill) -- keeping this one's own vertical
+          center exact matters doubly here, since a status pill and this
+          pill sit on the same y and visibly need to actually agree. */}
       <text
         x={pillX + width / 2}
-        y={y + 4}
+        y={verticalCenterBaselineY(label, y, 11, 600)}
         textAnchor="middle"
         fill={COLORS.muted}
         fontSize={11}
@@ -1397,11 +1572,15 @@ function IdentifierTag({ label, y }: { label: string; y: number }) {
         d="M4,0 H19 Q20.5,0 21.5,1 L29,10 Q30,10 29,10 L21.5,19 Q20.5,20 19,20 H4 A4,4 0 0 1 0,16 V4 A4,4 0 0 1 4,0 Z"
         fill={COLORS.identifier}
       />
+      {/* Measured baseline, not dominantBaseline="central" -- see
+          verticalCenterBaselineY's own doc for why (every other pill in
+          this file used to follow this same "central" pattern, copied
+          from here originally, before confirming live it wasn't
+          reliably centering in this custom font). */}
       <text
         x={12}
-        y={10}
+        y={verticalCenterBaselineY(label, 10, 11, 700)}
         textAnchor="middle"
-        dominantBaseline="central"
         fill="#fff"
         fontWeight={700}
         fontSize={11}

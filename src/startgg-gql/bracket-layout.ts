@@ -99,6 +99,20 @@ function layoutSide(
 ): LayoutSide {
   const columns: StartggSet[][] = [];
   for (const set of sideSets) {
+    const resetSibling = bracketResetSibling(set, byId);
+    // start.gg creates a bracket-reset SET structurally the moment the
+    // bracket itself is generated, whether or not a reset ever actually
+    // happens -- the winners finalist winning Grand Final outright needs
+    // no reset at all, but the reset set still exists in the data,
+    // permanently empty (both slots still bare "set" prereqs, never
+    // filled with a real entrant). Rendering it unconditionally showed
+    // an empty "Grand Final Reset" column on every double-elim bracket,
+    // including ones that finished cleanly with no reset. Only shows up
+    // here once it's actually populated -- i.e. the loser's finalist
+    // really did force a reset -- not merely "not yet decided" (a still-
+    // in-progress Grand Final's reset slot is equally empty at that
+    // point, and rightly stays hidden until its own outcome is known).
+    if (resetSibling && !hasAnyEntrant(set)) continue;
     // A reset set shares its ROUND with the set that feeds it entirely
     // (see bracketResetSibling) -- grouping strictly by round would put
     // both in the same column, and since the reset's only feeder is
@@ -110,7 +124,7 @@ function layoutSide(
     // past its sibling's own gives it a column of its own, same as any
     // other set fed entirely by an earlier column's match.
     const baseCol = colOf(set.round ?? 0);
-    const col = bracketResetSibling(set, byId) ? baseCol + 1 : baseCol;
+    const col = resetSibling ? baseCol + 1 : baseCol;
     (columns[col] ??= []).push(set);
   }
 
