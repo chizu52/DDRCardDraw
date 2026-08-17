@@ -49198,28 +49198,24 @@
           "style": "single",
           "diffClass": "basic",
           "lvl": 5,
-          "flags": ["unlockable"],
           "extras": ["dx"]
         },
         {
           "style": "single",
           "diffClass": "advanced",
           "lvl": 8.6,
-          "flags": ["unlockable"],
           "extras": ["dx"]
         },
         {
           "style": "single",
           "diffClass": "expert",
           "lvl": 12.9,
-          "flags": ["unlockable"],
           "extras": ["dx"]
         },
         {
           "style": "single",
           "diffClass": "master",
           "lvl": 14.7,
-          "flags": ["unlockable"],
           "extras": ["dx"]
         }
       ]

@@ -23,6 +23,7 @@
     "import:jubeat": "node --experimental-strip-types scripts/import-jubeat.mts",
     "import:pump": "node scripts/import-pump.mjs",
     "import:maimai": "node --experimental-strip-types scripts/import-maimai.mts",
+    "report:maimai-usa-gaps": "node --experimental-strip-types scripts/report-maimai-usa-gaps.mts",
     "import:ongeki": "node --experimental-strip-types scripts/import-ongeki.mts",
     "import:sdvx": "node scripts/import-sdvx.mjs",
     "import:iidx": "node scripts/import-iidx.mjs",
