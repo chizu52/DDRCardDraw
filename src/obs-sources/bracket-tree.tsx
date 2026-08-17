@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Callout } from "@blueprintjs/core";
 import {
+  cacheExchange,
   Client,
   fetchExchange,
   Provider as UrqlProvider,
@@ -96,6 +97,57 @@ const COLORS = {
   called: BROADCAST_COLORS.gold,
 };
 
+// Module-level, not built inside BracketTreeWithApiKey via a plain
+// useMemo -- a component-scoped client used to mean a BRAND NEW Client
+// (and brand-new, empty cache) got constructed every single time the
+// "Now showing" dropdown left bracket view and came back:
+// GauntletPoolsOverlay swaps between two entirely different component
+// trees for that toggle (this component vs GauntletPoolsWithCreds), a
+// real unmount/remount, not just a re-render -- so no client-level
+// cache could ever survive it no matter what exchanges it used.
+// Hoisting the Client itself here means the SAME instance (and
+// whatever cacheExchange has stored on it) survives that toggle for
+// the whole page's lifetime. Keyed by apiKey rather than a single bare
+// client, in case a future caller ever needs a second one with
+// different credentials -- in practice this stays a map of one for
+// the lifetime of a single OBS browser source/tab.
+const bracketClientsByApiKey = new Map<string, Client>();
+
+function getBracketClient(apiKey: string): Client {
+  let client = bracketClientsByApiKey.get(apiKey);
+  if (!client) {
+    client = new Client({
+      url: "https://api.start.gg/gql/alpha",
+      fetchOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
+      // @urql/core's own plain result cache (operation key ->
+      // last response), NOT @urql/exchange-graphcache's NORMALIZED
+      // cache (the app's shared startgg-gql/index.ts urqlClient uses
+      // that one) -- deliberately avoided here: PhaseBracketDoc
+      // doesn't request __typename on every object, and a normalized
+      // cache silently resolved that as "phase not found" instead of
+      // erroring loudly (the reason this client had NO cache exchange
+      // at all before). This plain cache never inspects __typename --
+      // it just remembers "this exact operation already returned this
+      // exact response" (keyed on the query + variables) and replays
+      // it on a cache-first hit. Every requestPolicy: "network-only"
+      // execution (the 60s poll, the Settings tab's Refresh button --
+      // see BracketTreeInner below) still goes to the network as
+      // before, AND writes its fresh response back into this same
+      // cache for the next cache-first hit (confirmed against
+      // @urql/core's own cacheExchange source: it updates its result
+      // cache on every successful query response regardless of which
+      // requestPolicy triggered it, not just cache-first misses) --
+      // so switching back to an already-viewed phase, or toggling the
+      // "Now showing" dropdown away from and back to bracket view, now
+      // renders instantly from cache instead of re-paying start.gg's
+      // own multi-second bracket-query latency every single time.
+      exchanges: [cacheExchange, fetchExchange],
+    });
+    bracketClientsByApiKey.set(apiKey, client);
+  }
+  return client;
+}
+
 /** Takes a resolved start.gg apiKey directly, rather than reading a
  * `src`/`apiKey` query param itself -- this overlay no longer has a
  * standalone route of its own (folded into gauntlet-pools.tsx's own
@@ -121,22 +173,12 @@ export function BracketTreeWithApiKey({
   title: string;
   icon: string | null;
 }) {
-  // A dedicated client scoped to this key, independent of the app's own
-  // startgg-gql/index.ts urqlClient -- credentials are baked into the
-  // URL rather than relied on from local storage (an OBS browser source
-  // is a separate, isolated profile). No cacheExchange: PhaseBracketDoc
-  // doesn't request __typename on every object, so a normalized cache
-  // silently resolved a response as "phase not found" instead of
-  // erroring loudly.
-  const client = useMemo(
-    () =>
-      new Client({
-        url: "https://api.start.gg/gql/alpha",
-        fetchOptions: { headers: { Authorization: `Bearer ${apiKey}` } },
-        exchanges: [fetchExchange],
-      }),
-    [apiKey],
-  );
+  // Scoped to this key, independent of the app's own startgg-gql/
+  // index.ts urqlClient -- credentials are baked into the URL rather
+  // than relied on from local storage (an OBS browser source is a
+  // separate, isolated profile). getBracketClient (above) is what
+  // actually makes this durable across remounts -- see its own doc.
+  const client = useMemo(() => getBracketClient(apiKey), [apiKey]);
 
   const phaseId = useAppState((s) => s.event.selectedBracketPhase);
 
@@ -457,6 +499,21 @@ function BracketTreeInner({
 // pathological/cyclical data shape looping forever.
 const MAX_PHANTOM_HOPS = 5;
 
+// Module-level, not a component-scoped ref -- for the identical reason
+// the urql Client above got hoisted out of BracketTreeWithApiKey:
+// BracketTreeInner (and this hook along with it) fully unmounts every
+// time the "Now showing" dropdown leaves bracket view and returns,
+// which used to wipe a component-scoped cache and force the ENTIRE
+// sequential multi-hop chain below to redo from scratch on every
+// single toggle back into bracket view, not just once per page load.
+// NOT keyed by phaseId -- a resolved set id is safe to reuse across
+// ANY phase that happens to reference it (start.gg set ids are unique
+// across the whole tournament, never reused between phases), so one
+// flat map growing for the lifetime of the page is exactly as correct
+// as the original component-scoped version, just durable across
+// remounts too.
+const phantomSetsCache: PhantomSetsById = new Map();
+
 /** Fetches whatever bye-collapse phantom sets (see PhantomSet's own doc
  * in bracket-layout.ts) this phase's real sets reference via a "set"
  * prereq id that never came back in the main phase.sets query -- start
@@ -469,44 +526,51 @@ const MAX_PHANTOM_HOPS = 5;
  * Each hop is its own full round-trip, sequential (hop N+1's ids aren't
  * known until hop N's response arrives) -- combined with start.gg's own
  * latency for this kind of lookup, a multi-hop chain can add several
- * real seconds on top of the main bracket query. cacheRef exists
+ * real seconds on top of the main bracket query. phantomSetsCache exists
  * specifically to keep that cost from being paid AGAIN on every single
  * refetch (the 60s poll, a manual Refresh, a phase switch while staying
- * in bracket view) -- a bye-collapse chain's own shape is structural,
- * fixed once a bracket is generated, not something that changes as an
- * event progresses, so once an id is resolved it never needs
- * re-fetching for the lifetime of this component instance. Confirmed
- * live: this was a real, measurable contributor to "the bracket takes
- * forever to load" on every poll/refresh, not just the first one. */
+ * in bracket view) OR remount (leaving and returning to bracket view,
+ * see phantomSetsCache's own doc) -- a bye-collapse chain's own shape is
+ * structural, fixed once a bracket is generated, not something that
+ * changes as an event progresses, so once an id is resolved it never
+ * needs re-fetching for the lifetime of the page. Confirmed live: this
+ * was a real, measurable contributor to "the bracket takes forever to
+ * load" on every poll/refresh, not just the first one -- and, before
+ * phantomSetsCache moved to module scope, on every remount too. */
 function usePhantomSets(
   sets: (StartggSet | null)[],
   setsById: SetsById,
 ): PhantomSetsById {
   const client = useClient();
+  // Seeded from the module-level cache, not always-empty -- a remount
+  // into a phase whose phantom chain was already resolved earlier this
+  // page-session starts warm instead of redoing every hop.
   const [phantomSetsById, setPhantomSetsById] = useState<PhantomSetsById>(
-    () => new Map(),
+    () => new Map(phantomSetsCache),
   );
-  // The actual accumulating cache -- a ref, not phantomSetsById itself,
-  // so the effect below can read+write it synchronously across hops
-  // without waiting on a re-render each time. phantomSetsById (state)
-  // stays what's exposed to callers; this is the source of truth the
-  // effect accumulates into and seeds every future run from.
-  const cacheRef = useRef<PhantomSetsById>(new Map());
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      // Seeded from the accumulated cache, not a fresh empty Map --
-      // see this hook's own doc above for why that's safe.
-      // collectUnresolvedSetPrereqIds already treats anything in here
-      // as resolved, so a cache hit costs nothing more than the Map
-      // lookup it already does.
-      const collected: PhantomSetsById = new Map(cacheRef.current);
+      // Seeded from the accumulated module-level cache, not a fresh
+      // empty Map -- see this hook's own doc above for why that's
+      // safe. collectUnresolvedSetPrereqIds already treats anything in
+      // here as resolved, so a cache hit costs nothing more than the
+      // Map lookup it already does.
+      const collected: PhantomSetsById = new Map(phantomSetsCache);
       let idsToFetch = collectUnresolvedSetPrereqIds(sets, setsById, collected);
       let hops = 0;
       while (idsToFetch.length && hops < MAX_PHANTOM_HOPS && !cancelled) {
         const fetched = await fetchPhantomSets(client, idsToFetch);
-        for (const [id, set] of fetched) collected.set(id, set);
+        for (const [id, set] of fetched) {
+          collected.set(id, set);
+          // Written back to the module-level cache incrementally, hop
+          // by hop -- not just once at the very end -- so even a
+          // cancelled effect (this component unmounting mid-chain)
+          // keeps whatever WAS resolved by that point instead of
+          // discarding a mid-flight partial accumulation.
+          phantomSetsCache.set(id, set);
+        }
         idsToFetch = collectUnresolvedSetPrereqIds(
           [...fetched.values()],
           setsById,
@@ -515,7 +579,6 @@ function usePhantomSets(
         hops++;
       }
       if (!cancelled) {
-        cacheRef.current = collected;
         setPhantomSetsById(new Map(collected));
       }
     })();

@@ -929,8 +929,9 @@ type PoolSlotDisplay =
  *    not Final Ranking's color (color only ever says
  *    advancing/eliminated, a 2-way split, never a precise ordinal) --
  *    real name, but not yet an official row in THIS pool's own sheet
- *    data, so PoolBox still renders it in placeholder styling (see its
- *    "predicted" case). */
+ *    data. Still rendered with plain, non-placeholder styling though
+ *    (see PoolBox's own "predicted" case) -- who it is is genuinely
+ *    known at this point, not a guess. */
 function resolveSlotDisplay(
   progressionCode: string,
   allPools: ParsedPool[],
@@ -1137,11 +1138,22 @@ function PoolRowList({
           );
         }
         if (slot.kind === "predicted") {
-          // Real name, resolved from a Progression code -- not yet an
-          // official row in this pool's own sheet data, so still styled
-          // like a placeholder rather than a confirmed row.
+          // Real name, resolved from a Progression code naming an exact
+          // rank in an already-FINISHED source pool -- who's landing in
+          // this seat is genuinely KNOWN at this point, not a guess,
+          // even though there's no official row in THIS pool's own
+          // sheet data yet and so no real score to show. Plain
+          // poolRowStyle, same as a real confirmed row below -- explicit
+          // bug report: this used to also get placeholderRowStyle
+          // (dimmed + italic), the exact same treatment a genuinely
+          // unresolved "TBD" slot gets, which read as "we don't know
+          // who's here yet" for a player who very much was known. Only
+          // the score cell stays a plain "--" (unstyled, same as a real
+          // row's own blank-total fallback below) -- that part really
+          // is still unknown until this pool's sheet has a real row for
+          // them.
           return (
-            <div key={idx} style={{ ...poolRowStyle, ...placeholderRowStyle }}>
+            <div key={idx} style={poolRowStyle}>
               <span style={poolPlayerNameStyle}>
                 {truncatePoolName(slot.player)}
               </span>

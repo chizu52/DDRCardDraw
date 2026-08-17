@@ -466,11 +466,21 @@ function PoolResultRow({
       <td style={{ ...tdStyle, fontWeight: 700 }}>
         {formatSongScore(row.total, scoreFormat) || "--"}
       </td>
+      {/* Red only for a genuine, nonzero gap -- "--" (no score yet /
+          first place) and a diff that rounds to exactly zero (e.g.
+          "-0" in the whole-number ScoreFormat, or "-0.0000%") read the
+          same "nothing meaningfully behind" way, so both get the same
+          plain white as the rest of the row instead of a red that
+          implies a real deficit. parseFloat, not a string-equality
+          check against "-0"/"-0.0000%" -- handles every ScoreFormat's
+          own zero-shape at once (it stops at the first non-numeric
+          char, so the trailing "%" in maimaidx's shape is a no-op),
+          and -0 === 0 is true in JS. */}
       <td
         style={{
           ...tdStyle,
           borderRight: "none",
-          color: COLORS.red,
+          color: !diffText || parseFloat(diffText) === 0 ? COLORS.text : COLORS.red,
           fontWeight: 600,
         }}
       >
