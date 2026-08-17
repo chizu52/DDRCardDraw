@@ -264,32 +264,71 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
   return { pools };
 }
 
-/** Total column is derived, not entered -- sums whatever song scores (each
- * a "DDD.DDDD%" string) are currently filled in, skipping blanks. */
-export function sumScores(songs: string[]): string {
+/** Which of the two display styles a number-shaped value on a
+ * tournament overlay (song scores, pool totals) renders in -- an
+ * operator-picked, room-synced setting (event.overlayScoreFormat, see
+ * event.slice.ts), applied globally rather than per-overlay so a
+ * Google Sheet's raw values always read the same way regardless of
+ * which overlay (or the Matches tab's own editable table) is currently
+ * looking at them. "maimaidx" is this app's original/default style --
+ * a percentage to 4 decimal places, e.g. "98.5000%". "default" rounds
+ * the SAME underlying value to a plain whole number with no "%" --
+ * e.g. for games that score in raw points rather than a percentage.
+ * This only changes how a value is DISPLAYED, never what's actually
+ * stored -- see formatScoreValue below. */
+export type ScoreFormat = "maimaidx" | "default";
+
+export const DEFAULT_SCORE_FORMAT: ScoreFormat = "maimaidx";
+
+/** Renders one already-parsed numeric score value in the given
+ * ScoreFormat -- the single place both sumScores and formatSongScore
+ * (below) hand off to once they've each done their own parsing, so the
+ * two style definitions themselves never drift apart. */
+export function formatScoreValue(value: number, format: ScoreFormat): string {
+  return format === "default" ? `${Math.round(value)}` : `${value.toFixed(4)}%`;
+}
+
+/** Sums whatever song scores (each a "DDD.DDDD%"-shaped string) are
+ * currently filled in, skipping blanks -- the raw numeric total, not a
+ * display string. Kept separate from sumScores below so ranking/diff
+ * math (topScoreRanks, pool-results.tsx's standings sort) always
+ * compares real totals, never a value that's already been rounded off
+ * by a "default" ScoreFormat's own display rounding. */
+export function sumScoreValues(songs: string[]): number {
   const values = songs
     .map((s) => parseFloat(s.replace("%", "")))
     .filter((n) => !Number.isNaN(n));
-  if (!values.length) return "0.000%";
-  const sum = values.reduce((a, b) => a + b, 0);
-  return `${sum.toFixed(4)}%`;
+  return values.reduce((a, b) => a + b, 0);
 }
 
-/** Formats a raw per-song score cell to a consistent "98.5000%" display --
- * always exactly 4 decimal places and a % sign, regardless of how the
- * value was actually typed into the sheet ("98.5", "98.5%", "98.50000%",
- * ...). Blank stays blank -- the caller's own "--" placeholder (see
- * pool-results.tsx) means "not entered yet," a different signal than "a
- * real score of exactly 0," so this doesn't collapse the two. Anything
- * that isn't a real number (a typo, a non-numeric note someone typed
- * instead of a score) is shown exactly as typed rather than silently
- * replaced with a nonsensical "NaN%". */
-export function formatSongScore(raw: string): string {
+/** Total column is derived, not entered -- sums whatever song scores are
+ * currently filled in (see sumScoreValues), rendered in the given
+ * ScoreFormat. */
+export function sumScores(
+  songs: string[],
+  format: ScoreFormat = DEFAULT_SCORE_FORMAT,
+): string {
+  return formatScoreValue(sumScoreValues(songs), format);
+}
+
+/** Formats a raw per-song (or per-total) score cell in the given
+ * ScoreFormat, regardless of how the value was actually typed into the
+ * sheet ("98.5", "98.5%", "98.50000%", ...). Blank stays blank -- the
+ * caller's own "--" placeholder (see pool-results.tsx/gauntlet-pools.tsx)
+ * means "not entered yet," a different signal than "a real score of
+ * exactly 0," so this doesn't collapse the two. Anything that isn't a
+ * real number (a typo, a non-numeric note someone typed instead of a
+ * score) is shown exactly as typed rather than silently replaced with a
+ * nonsensical "NaN%"/"NaN". */
+export function formatSongScore(
+  raw: string,
+  format: ScoreFormat = DEFAULT_SCORE_FORMAT,
+): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   const value = parseFloat(trimmed.replace("%", ""));
   if (Number.isNaN(value)) return trimmed;
-  return `${value.toFixed(4)}%`;
+  return formatScoreValue(value, format);
 }
 
 /** Maps row index (into pool.rows) -> 1-based placement by total score
@@ -301,7 +340,7 @@ export function formatSongScore(raw: string): string {
  * finalRankingStatusByName below) and needs ranks beyond 2nd place too. */
 export function topScoreRanks(pool: ParsedPool): Map<number, number> {
   const ranked = pool.rows
-    .map((row, idx) => ({ idx, total: parseFloat(sumScores(row.songs)) }))
+    .map((row, idx) => ({ idx, total: sumScoreValues(row.songs) }))
     .filter((r) => r.total > 0)
     .sort((a, b) => b.total - a.total);
   return new Map(ranked.map((r, i) => [r.idx, i + 1]));

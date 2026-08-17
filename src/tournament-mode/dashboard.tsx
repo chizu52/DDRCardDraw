@@ -68,6 +68,7 @@ import {
   finalRankingStatusByName,
   formatSongScore,
   topScoreRanks,
+  ScoreFormat,
 } from "../sheets/parse-pools";
 import { rowColorForRank, RowColorTiers } from "../sheets/row-colors";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
@@ -202,6 +203,7 @@ function MatchesImportPanel() {
   // a 1:1 match rather than two designs that can drift apart.
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
+  const scoreFormat = useAppState((s) => s.event.overlayScoreFormat);
   const selectedPool = useAppState((s) => s.event.selectedPool);
   // Which pools currently show "Upcoming" on the gauntlet-pools overlay
   // -- see event.slice.ts's own doc on gauntletPoolsUpcoming for why
@@ -637,12 +639,15 @@ function MatchesImportPanel() {
                                   (an early "9" instantly becoming
                                   "9.0000%" mid-keystroke). onBlur is
                                   where this "reflects the number format"
-                                  -- snaps to the same 0.0000% shape
-                                  pool-results.tsx displays once the cell
-                                  isn't actively being edited, and updates
-                                  the real underlying value (not just what's
-                                  shown), so exportPool below writes the
-                                  normalized form back to the sheet too. */}
+                                  -- snaps to whichever ScoreFormat the
+                                  operator picked below (see scoreFormat),
+                                  the same shape pool-results.tsx/
+                                  gauntlet-pools.tsx display, once the
+                                  cell isn't actively being edited, and
+                                  updates the real underlying value (not
+                                  just what's shown), so exportPool below
+                                  writes the normalized form back to the
+                                  sheet too. */}
                               <input
                                 value={s}
                                 onChange={(e) =>
@@ -653,7 +658,7 @@ function MatchesImportPanel() {
                                     poolIdx,
                                     rowIdx,
                                     j,
-                                    formatSongScore(e.target.value),
+                                    formatSongScore(e.target.value, scoreFormat),
                                   )
                                 }
                                 style={inputStyle}
@@ -667,7 +672,7 @@ function MatchesImportPanel() {
                               fontWeight: 700,
                             }}
                           >
-                            {sumScores(row.songs)}
+                            {sumScores(row.songs, scoreFormat)}
                           </td>
                         </tr>
                       );
@@ -698,6 +703,7 @@ function MatchesImportPanel() {
 function MatchesSettingsPanel() {
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
+  const scoreFormat = useAppState((s) => s.event.overlayScoreFormat);
   const dispatch = useAppDispatch();
 
   return (
@@ -719,6 +725,31 @@ function MatchesSettingsPanel() {
         <div
           style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}
         >
+          {/* Its own card, ahead of the per-overlay sections below --
+              this one setting affects every score number on the
+              Gauntlet Pools diagram, the Pool Results overlay, AND the
+              Matches tab's own editable table at once (see
+              event.overlayScoreFormat's own doc), not just one of
+              them, so it doesn't belong nested inside any single
+              overlay's own section. */}
+          <Card elevation={1} className={styles.settingsSection}>
+            <h3>Score Format</h3>
+            <RadioGroup
+              inline
+              selectedValue={scoreFormat}
+              onChange={(e) =>
+                dispatch(
+                  eventSlice.actions.setOverlayScoreFormat(
+                    e.currentTarget.value as ScoreFormat,
+                  ),
+                )
+              }
+              options={[
+                { label: "Default (whole numbers)", value: "default" },
+                { label: "maimai DX (98.5000%)", value: "maimaidx" },
+              ]}
+            />
+          </Card>
           <GauntletPoolsSettingsSection />
           <Card elevation={1} className={styles.settingsSection}>
             {/* Same minimal-icon-in-the-heading treatment as the other
@@ -1050,16 +1081,29 @@ function GauntletPoolsSettingsSection() {
 function GauntletPoolsDividerEditor() {
   const dispatch = useAppDispatch();
   const savedDividers = useAppState((s) => s.event.gauntletPoolsDividers);
-  const [dividers, setDividers] = useState<DividerRow[]>(savedDividers);
+  const [dividers, setDividers] = useState<DividerRow[]>(
+    sortDividersByPoolNumber(savedDividers),
+  );
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (!dirty) {
       // eslint-disable-next-line react-hooks-js/set-state-in-effect
-      setDividers(savedDividers);
+      setDividers(sortDividersByPoolNumber(savedDividers));
     }
   }, [savedDividers, dirty]);
 
+  // Index-based, not keyed off row.id -- safe only because `dividers`
+  // itself is kept sorted (see sortDividersByPoolNumber's own call
+  // sites below) any time this component's own render could show a
+  // different order than the array `i` was captured from. Deliberately
+  // NOT re-sorted here, unlike addRow/submit below -- resorting on
+  // every keystroke while actively typing a "Before Pool #" value would
+  // yank the row the operator is mid-edit on out from under their
+  // cursor the moment its new value crosses a neighbor's. The list
+  // settles back into sorted order once they hit Submit (dirty flips
+  // false, the resync effect above picks up the freshly-sorted
+  // savedDividers).
   function updateRow(index: number, patch: Partial<DividerRow>) {
     setDividers((prev) =>
       prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
@@ -1068,7 +1112,12 @@ function GauntletPoolsDividerEditor() {
   }
 
   function addRow() {
-    setDividers((prev) => [...prev, emptyDividerRow()]);
+    // Sorted immediately (unlike updateRow) -- adding a row is a single
+    // discrete action, not continuous typing, so there's no keystroke
+    // to fight; a brand-new divider (default beforeSetNumber: 1) lands
+    // straight in its real sorted position instead of always at the
+    // bottom regardless of its value.
+    setDividers((prev) => sortDividersByPoolNumber([...prev, emptyDividerRow()]));
     setDirty(true);
   }
 
@@ -1078,7 +1127,12 @@ function GauntletPoolsDividerEditor() {
   }
 
   function submit() {
-    dispatch(eventSlice.actions.setGauntletPoolsDividers(dividers));
+    // Sorted on the way out -- explicit user request: dividers list in
+    // the settings UI, lowest "Before Pool #" first, regardless of the
+    // order they were added/edited in.
+    const sorted = sortDividersByPoolNumber(dividers);
+    dispatch(eventSlice.actions.setGauntletPoolsDividers(sorted));
+    setDividers(sorted);
     setDirty(false);
   }
 
@@ -1150,6 +1204,18 @@ interface DividerRow {
   id: string;
   beforeSetNumber: number;
   label: string;
+}
+
+// Lowest "Before Pool #" first -- explicit user request, so the
+// settings list always reads top-to-bottom in the same order the
+// dividers actually land in on the overlay, rather than whatever order
+// they happened to be added/loaded in. A plain numeric comparator, not
+// row.id or insertion order -- gauntlet-pools.tsx's own dividerColumns
+// already sorts by resolved pool position independently (see its
+// validDividers), so this only affects how the EDITOR itself displays
+// them, not the overlay.
+function sortDividersByPoolNumber(rows: DividerRow[]): DividerRow[] {
+  return [...rows].sort((a, b) => a.beforeSetNumber - b.beforeSetNumber);
 }
 
 function emptyDividerRow(): DividerRow {

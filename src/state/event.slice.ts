@@ -1,6 +1,7 @@
 import { PayloadAction, createSelector, createSlice } from "@reduxjs/toolkit";
 import { nanoid } from "nanoid";
 import { CompoundSetId } from "../models/Drawing";
+import { DEFAULT_SCORE_FORMAT, ScoreFormat } from "../sheets/parse-pools";
 import { DEFAULT_ROW_COLOR_TIERS, RowColorTiers } from "../sheets/row-colors";
 import { mergeDraws } from "./central";
 
@@ -86,6 +87,14 @@ interface EventState {
    * module doc for why this is independent from whether a row is
    * eligible to be colored at all (that part is always automatic). */
   overlayRowColorTiers: RowColorTiers;
+  /** How every song/total score number renders, across the Gauntlet
+   * Pools diagram, the Pool Results overlay, AND the Matches tab's own
+   * editable table -- one global room-synced setting rather than a
+   * per-overlay one, so a Sheet's raw values always read the same way
+   * no matter which of those three is currently looking at them. See
+   * parse-pools.ts's own ScoreFormat/formatScoreValue doc for what
+   * each style actually looks like. */
+  overlayScoreFormat: ScoreFormat;
   /** Which start.gg phase the bracket-tree OBS overlay
    * (obs-sources/bracket-tree.tsx) currently shows -- a phase id, same
    * room-synced "pick it from the Matches Settings tab, not a new OBS
@@ -208,6 +217,7 @@ const initialState: EventState = {
   poolsRefreshedAt: 0,
   overlayRowColors: true,
   overlayRowColorTiers: DEFAULT_ROW_COLOR_TIERS,
+  overlayScoreFormat: DEFAULT_SCORE_FORMAT,
   selectedBracketPhase: null,
   bracketRefreshedAt: 0,
   schedules: {},
@@ -309,6 +319,9 @@ export const eventSlice = createSlice({
       action: PayloadAction<{ tier: keyof RowColorTiers; value: boolean }>,
     ) {
       state.overlayRowColorTiers[action.payload.tier] = action.payload.value;
+    },
+    setOverlayScoreFormat(state, action: PayloadAction<ScoreFormat>) {
+      state.overlayScoreFormat = action.payload;
     },
     setSelectedBracketPhase(state, action: PayloadAction<string | null>) {
       state.selectedBracketPhase = action.payload;
@@ -488,6 +501,9 @@ export function addOverlaySettings(state: EventState) {
   }
   if (!state.overlayRowColorTiers) {
     state.overlayRowColorTiers = DEFAULT_ROW_COLOR_TIERS;
+  }
+  if (state.overlayScoreFormat === undefined) {
+    state.overlayScoreFormat = DEFAULT_SCORE_FORMAT;
   }
   if (state.selectedBracketPhase === undefined) {
     state.selectedBracketPhase = null;

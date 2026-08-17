@@ -13,8 +13,10 @@ import {
   colIndexToLetter,
   classifyRankingColor,
   finalRankingStatusByName,
+  formatSongScore,
   ParsedPool,
   PoolPlayerRow,
+  ScoreFormat,
 } from "../sheets/parse-pools";
 import {
   fetchPublicSheetValues,
@@ -221,6 +223,7 @@ export function GauntletPoolsWithCreds({
   const selectedPool = useAppState((s) => s.event.selectedPool);
   const upcomingPools = useAppState((s) => s.event.gauntletPoolsUpcoming);
   const dividers = useAppState((s) => s.event.gauntletPoolsDividers);
+  const scoreFormat = useAppState((s) => s.event.overlayScoreFormat);
   const title = useAppState((s) => s.event.gauntletPoolsTitle);
   const icon = useAppState((s) => s.event.gauntletPoolsIcon);
 
@@ -642,6 +645,7 @@ export function GauntletPoolsWithCreds({
                 allPools={pools}
                 selectedPool={selectedPool}
                 upcomingPools={upcomingPools}
+                scoreFormat={scoreFormat}
               />
             )),
           )}
@@ -695,6 +699,7 @@ export function GauntletPoolsWithCreds({
                 allPools={pools}
                 selectedPool={selectedPool}
                 upcomingPools={upcomingPools}
+                scoreFormat={scoreFormat}
               />
             )),
           )}
@@ -1019,6 +1024,7 @@ function PoolBox({
   allPools,
   selectedPool,
   upcomingPools,
+  scoreFormat,
 }: {
   title: string;
   pool: ParsedPool | undefined;
@@ -1032,6 +1038,7 @@ function PoolBox({
   allPools: ParsedPool[];
   selectedPool: string | null;
   upcomingPools: Record<string, boolean>;
+  scoreFormat: ScoreFormat;
 }) {
   // colorToCss(null) would return near-white, wrong for this dark card
   // -- "no sheet color set" falls through to boxHeaderStyle's own
@@ -1083,7 +1090,12 @@ function PoolBox({
       {!pool ? (
         <div style={emptyNoteStyle}>Not yet in sheet</div>
       ) : (
-        <PoolRowList pool={pool} colors={colors} allPools={allPools} />
+        <PoolRowList
+          pool={pool}
+          colors={colors}
+          allPools={allPools}
+          scoreFormat={scoreFormat}
+        />
       )}
     </div>
   );
@@ -1095,10 +1107,12 @@ function PoolRowList({
   pool,
   colors,
   allPools,
+  scoreFormat,
 }: {
   pool: ParsedPool;
   colors: (CellColor | null)[];
   allPools: ParsedPool[];
+  scoreFormat: ScoreFormat;
 }) {
   const statusByName = finalRankingStatusByName(pool, colors);
   return (
@@ -1158,7 +1172,16 @@ function PoolRowList({
             <span style={poolPlayerNameStyle}>
               {truncatePoolName(playerRow.player)}
             </span>
-            <span style={playerTotalStyle}>{playerRow.total || "--"}</span>
+            {/* playerRow.total is the sheet's own Total column cell,
+                read as raw text (see PoolPlayerRow's own doc) -- run
+                through formatSongScore (same helper pool-results.tsx's
+                song/total cells use) so it respects the operator's
+                chosen ScoreFormat instead of always showing whatever
+                percentage shape the Sheet itself happens to format
+                that cell as. */}
+            <span style={playerTotalStyle}>
+              {formatSongScore(playerRow.total, scoreFormat) || "--"}
+            </span>
           </div>
         );
       })}

@@ -6,10 +6,12 @@ import {
   colIndexToLetter,
   finalRankingStatusByName,
   formatSongScore,
-  sumScores,
+  formatScoreValue,
+  sumScoreValues,
   topScoreRanks,
   ParsedPool,
   PoolPlayerRow,
+  ScoreFormat,
 } from "../sheets/parse-pools";
 import {
   fetchPublicCellColors,
@@ -84,6 +86,7 @@ export function PoolResultsOverlay() {
   const poolsRefreshedAt = useAppState((s) => s.event.poolsRefreshedAt);
   const rowColors = useAppState((s) => s.event.overlayRowColors);
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
+  const scoreFormat = useAppState((s) => s.event.overlayScoreFormat);
 
   const [state, setState] = useState<LoadState>({ status: "loading" });
 
@@ -205,6 +208,7 @@ export function PoolResultsOverlay() {
       rankingColors={state.rankingColors}
       rowColors={rowColors}
       rowColorTiers={rowColorTiers}
+      scoreFormat={scoreFormat}
     />
   );
 }
@@ -220,12 +224,14 @@ function PoolTable({
   rankingColors,
   rowColors,
   rowColorTiers,
+  scoreFormat,
 }: {
   pool: ParsedPool;
   headerColor: CellColor | null;
   rankingColors: (CellColor | null)[];
   rowColors: boolean;
   rowColorTiers: RowColorTiers;
+  scoreFormat: ScoreFormat;
 }) {
   // Same name-keyed lookup gauntlet-pools.tsx uses (see
   // finalRankingStatusByName's own doc for why by NAME, not row position)
@@ -255,7 +261,7 @@ function PoolTable({
     .map((row, rowIdx) => ({
       row,
       rowIdx,
-      total: parseFloat(sumScores(row.songs)),
+      total: sumScoreValues(row.songs),
     }))
     .sort((a, b) => b.total - a.total);
 
@@ -366,7 +372,7 @@ function PoolTable({
             const above = displayIdx > 0 ? sortedRows[displayIdx - 1] : null;
             const diffText =
               above && total > 0
-                ? `-${(above.total - total).toFixed(4)}%`
+                ? `-${formatScoreValue(above.total - total, scoreFormat)}`
                 : "";
             return (
               <PoolResultRow
@@ -375,6 +381,7 @@ function PoolTable({
                 backgroundColor={backgroundColor}
                 status={status}
                 diffText={diffText}
+                scoreFormat={scoreFormat}
               />
             );
           })}
@@ -396,11 +403,13 @@ function PoolResultRow({
   backgroundColor,
   status,
   diffText,
+  scoreFormat,
 }: {
   row: PoolPlayerRow;
   backgroundColor: string;
   status: "advancing" | "eliminated" | null;
   diffText: string;
+  scoreFormat: ScoreFormat;
 }) {
   const nameBoxRef = useRef<HTMLDivElement>(null);
   const nameContentRef = useRef<HTMLDivElement>(null);
@@ -445,10 +454,18 @@ function PoolResultRow({
       </td>
       {row.songs.map((s, j) => (
         <td key={j} style={tdStyle}>
-          {formatSongScore(s) || "--"}
+          {formatSongScore(s, scoreFormat) || "--"}
         </td>
       ))}
-      <td style={{ ...tdStyle, fontWeight: 700 }}>{row.total}</td>
+      {/* row.total is the sheet's own Total column cell, read as raw
+          text (see PoolPlayerRow's own doc) -- run through
+          formatSongScore too (same as each song cell above) so it
+          respects the operator's chosen ScoreFormat instead of always
+          showing whatever percentage shape the Sheet itself happens to
+          format that cell as. */}
+      <td style={{ ...tdStyle, fontWeight: 700 }}>
+        {formatSongScore(row.total, scoreFormat) || "--"}
+      </td>
       <td
         style={{
           ...tdStyle,
