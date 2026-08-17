@@ -243,27 +243,29 @@ function BracketTreeInner({
   // around it. Computed as a value here, not a nested early-return,
   // specifically so the chrome JSX further down stays single-sourced
   // rather than duplicated across every branch.
+  //
+  // lastGoodBodyRef persists the last successfully-rendered bracket body
+  // across both refetches (the 60s poll, a manual Refresh) and a
+  // phaseId prop change (BracketTreeInner re-renders in place when the
+  // "Now showing" dropdown picks a different phase -- see
+  // BracketTreeWithApiKey's own JSX -- it doesn't unmount, so a plain
+  // useRef survives that switch too). Preferred over the loading/error/
+  // not-found states below whenever there's nothing FRESH to show yet:
+  // an operator switching phases live, or a routine poll hitting a
+  // transient network hiccup, shouldn't see the whole bracket blank out
+  // for however many seconds start.gg's API takes to respond -- showing
+  // what was last correct until the fresh version lands reads as "the
+  // bracket updates in place," confirmed live to actually matter (a
+  // manual refresh visibly sat on stale data for several real seconds
+  // before this, not the instant swap the loading gate alone implied).
+  const lastGoodBodyRef = useRef<React.ReactNode | null>(null);
   let body: React.ReactNode;
-  if (result.fetching && !result.data) {
-    body = (
-      <div style={{ color: COLORS.muted, fontSize: 20, padding: "8px 4px" }}>
-        Loading bracket…
-      </div>
-    );
-  } else if (result.error) {
-    body = (
-      <Callout intent="danger" style={{ maxWidth: 480 }}>
-        {result.error.message}
-      </Callout>
-    );
-  } else if (!result.data?.phase) {
-    body = (
-      <Callout intent="warning" style={{ maxWidth: 480 }}>
-        That phase wasn't found -- it may have been deleted, or the API key
-        doesn't have access to it.
-      </Callout>
-    );
-  } else {
+  // Only true when `body` is a stale fallback (either the cache, or the
+  // very first "nothing cached yet" loading message) -- drives the small
+  // honest indicator below rather than silently passing off old data as
+  // current.
+  let isStale = false;
+  if (result.data?.phase) {
     const phase = result.data.phase;
     const layout = layoutBracket(sets);
     const winnersEntrantIds = indexWinnersEntrantIds(layout.winners);
@@ -311,6 +313,47 @@ function BracketTreeInner({
           )}
         </div>
       </>
+    );
+    lastGoodBodyRef.current = body;
+  } else if (result.fetching && lastGoodBodyRef.current) {
+    body = lastGoodBodyRef.current;
+    isStale = true;
+  } else if (result.fetching) {
+    // The genuine first-ever load, nothing cached yet -- this message is
+    // already its own self-explanatory loading state, not a stale
+    // fallback standing in for something better, so isStale stays false
+    // here (no redundant "Updating…" subtitle stacked above a body that
+    // already says the same thing).
+    body = (
+      <div style={{ color: COLORS.muted, fontSize: 20, padding: "8px 4px" }}>
+        Loading bracket…
+      </div>
+    );
+  } else if (result.error && lastGoodBodyRef.current) {
+    // Errored, but something's cached -- most likely a transient blip
+    // the next 60s poll (or a manual Refresh) will clear on its own, not
+    // worth replacing a perfectly good bracket with a scary red Callout
+    // over.
+    body = lastGoodBodyRef.current;
+    isStale = true;
+  } else if (result.error) {
+    body = (
+      <Callout intent="danger" style={{ maxWidth: 480 }}>
+        {result.error.message}
+      </Callout>
+    );
+  } else {
+    // Settled (not fetching), no error, and still no phase -- a genuine
+    // "not found" rather than a transient state, so this always
+    // surfaces even when something's cached: unlike a network blip, the
+    // next poll isn't going to fix a deleted/inaccessible phase, and an
+    // operator needs to actually see that instead of staring at a
+    // silently-stale bracket forever.
+    body = (
+      <Callout intent="warning" style={{ maxWidth: 480 }}>
+        That phase wasn't found -- it may have been deleted, or the API key
+        doesn't have access to it.
+      </Callout>
     );
   }
 
@@ -376,12 +419,25 @@ function BracketTreeInner({
           }}
         >
           {/* Shared with gauntlet-pools.tsx's own title bar (same
-              component, not just similarly-styled). No subtitle here
-              (unlike before) -- phase.name only exists once `body`
-              above has real phase data, and moved down into `body`
-              itself for that reason, so the title bar can render
-              immediately without waiting on it. */}
-          <BroadcastTitleBar icon={icon} title={title || "Bracket"} />
+              component, not just similarly-styled). No subtitle in the
+              normal case -- phase.name only exists once `body` above has
+              real phase data, and lives inside `body` itself for that
+              reason, so the title bar can render immediately without
+              waiting on it. Only reused here for isStale's own small,
+              honest "this isn't fresh" indicator, which belongs beside
+              the title rather than stacked above body's own (possibly
+              stale, reused-from-cache) phase.name caption. */}
+          <BroadcastTitleBar
+            icon={icon}
+            title={title || "Bracket"}
+            subtitle={
+              isStale
+                ? result.error
+                  ? "Couldn't refresh — showing the last loaded bracket"
+                  : "Updating…"
+                : undefined
+            }
+          />
           {body}
         </div>
       </div>
@@ -524,9 +580,10 @@ const SVG_SCALE = POOL_PLAYER_ROW_FONT_SIZE / PLAYER_NAME_FONT_SIZE;
 // pass only, the dark broadcast palette/LIVE badge/etc are unchanged
 // (colors are being revisited separately later).
 const BOX_WIDTH = 200;
-// Must comfortably clear a live match's elapsed-timer pill, which
-// extends 8px (gap) + LIVE_TIMER_WIDTH (58px) = 66px past its own box's
-// right edge -- needs real room to spare beyond that 66px.
+// Must comfortably clear a Live/Called match's own right-side status
+// pill, which extends 8px (gap) + STATUS_PILL_WIDTH past its own box's
+// right edge (defined further down, after that constant exists) --
+// needs real room to spare beyond that.
 const COL_GAP = 90;
 // The gap between the header text and a row-0 match's LIVE/NEXT badge is
 // controlled by the two elements' relative y offsets (see the header
@@ -565,11 +622,22 @@ function BracketTree({
     boxWidth: BOX_WIDTH,
     colGap: COL_GAP,
     boxHeight: MATCH_BOX_HEIGHT,
+    // ROW_DIVIDER_Y isn't MATCH_BOX_HEIGHT / 2 (top/bottom row padding
+    // isn't symmetric, see ROW_DIVIDER_Y's own doc) -- without telling
+    // computeSideGeometry that, its connector lines converged on the
+    // box's plain geometric center instead of the divider, landing
+    // visibly off from where the box's own divider line actually is.
+    dividerOffset: ROW_DIVIDER_Y - MATCH_BOX_HEIGHT / 2,
   });
   // Every column with a live match in it -- a Set, not a single index,
   // since more than one match can be live at once in different columns.
-  // Each one's header gets a soft glow so "what round are we in" reads
-  // at a glance.
+  // Only drives the header text's own bold/white-vs-muted color below
+  // now -- this used to ALSO drive a pulsing glow rect behind the whole
+  // column header ("what round are we in" at a glance), removed per
+  // explicit feedback (too distracting running continuously across an
+  // entire column). A much subtler version of that same pulse lives on
+  // each live MATCH's own box instead now -- see MatchBox's own glow,
+  // liveGlowFilterId just below.
   const liveCols = new Set(
     side.columns
       .map((col, i) => (col.some((m) => isSetLive(m.set)) ? i : -1))
@@ -579,8 +647,10 @@ function BracketTree({
   // separate <svg> roots on the same page) -- an SVG filter id has to be
   // unique document-wide for url(#id) to reliably resolve to THIS
   // side's own <filter>, not whichever same-named one happens to appear
-  // first in the DOM.
-  const glowFilterId = `live-col-glow-${useId()}`;
+  // first in the DOM. One shared filter definition for every live match
+  // box on this side, not one per box -- the blur radius is identical
+  // either way, no reason to duplicate the <filter> itself per match.
+  const liveGlowFilterId = `live-match-glow-${useId()}`;
   const hasLeftPill = (side.columns[0] || []).some((m) =>
     (m.set.slots || []).some((s) =>
       incomingProgressionLabel(
@@ -596,10 +666,13 @@ function BracketTree({
   const hasRightPill = side.columns.some((col) =>
     col.some((m) => {
       const prog = outgoingProgression(m.set, setsById);
-      // isSetLive too -- a live match's elapsed-timer pill needs the same
-      // right-side room as an outgoing promotion pill, even on a match
-      // with no promotion pill of its own (see MatchBox's hasTimer).
-      return prog.winner || prog.loser || isSetLive(m.set);
+      // isSetLive/isSetCalled too -- either one's own right-side status
+      // pill (ticking timer / "Up Next") needs the same room as an
+      // outgoing promotion pill, even on a match with no promotion pill
+      // of its own (see MatchBox's hasStatusPill).
+      return (
+        prog.winner || prog.loser || isSetLive(m.set) || isSetCalled(m.set)
+      );
     }),
   );
   const paddingLeft = BASE_PADDING + (hasLeftPill ? PILL_MARGIN : 0);
@@ -625,25 +698,20 @@ function BracketTree({
       >
         <title>{label} bracket</title>
         {liveCols.size > 0 && (
-          // A soft, pulsing green glow -- not the old solid blue accent
-          // tint (blue didn't tie back to anything else in this palette;
-          // the live indicator everywhere else -- box outline, elapsed
-          // timer -- is green, so the header highlight now matches
-          // rather than introducing an unrelated color) and not a
-          // static glow either (tried both white and green static
-          // first; a slow breathing opacity reads as "something is
-          // happening here right now," closer to how a real broadcast
-          // graphic calls out a live segment, without being distracting
-          // at a 2s cycle).
+          // Same soft-blur filter every live match box's own glow uses
+          // (see MatchBox's own comment on it) -- a tighter blur than
+          // this file's old column-header version (stdDeviation 4, not
+          // 7), since it now hugs one match box's own outline rather
+          // than a much wider column-header rect.
           <defs>
             <filter
-              id={glowFilterId}
+              id={liveGlowFilterId}
               x="-80%"
               y="-80%"
               width="260%"
               height="260%"
             >
-              <feGaussianBlur stdDeviation="7" />
+              <feGaussianBlur stdDeviation="4" />
             </filter>
           </defs>
         )}
@@ -653,25 +721,6 @@ function BracketTree({
             const isCurrent = liveCols.has(col);
             return (
               <g key={col}>
-                {isCurrent && (
-                  <rect
-                    x={x - 10}
-                    y={-4}
-                    width={BOX_WIDTH + 20}
-                    height={HEADER_HEIGHT - 16}
-                    rx={6}
-                    fill={COLORS.live}
-                    opacity={0.4}
-                    filter={`url(#${glowFilterId})`}
-                  >
-                    <animate
-                      attributeName="opacity"
-                      values="0.15;0.45;0.15"
-                      dur="2s"
-                      repeatCount="indefinite"
-                    />
-                  </rect>
-                )}
                 {/* y is HEADER_HEIGHT - 26, not just "- 12" -- if both
                     this and the LIVE/NEXT badge's own y (HEADER_HEIGHT -
                     BADGE_HEIGHT/2, see MatchBox) are simple HEADER_HEIGHT
@@ -711,6 +760,7 @@ function BracketTree({
                 winnersEntrantIds={winnersEntrantIds}
                 seedProgressionById={seedProgressionById}
                 phantomSetsById={phantomSetsById}
+                liveGlowFilterId={liveGlowFilterId}
               />
             ))}
           </g>
@@ -743,31 +793,101 @@ const NAME_INSET_X = 16;
 const SCORE_PILL_WIDTH = 30;
 const SCORE_PILL_MARGIN = 8;
 const LIVE_TIMER_WIDTH = 58;
+// Sized to comfortably fit "Up Next" at this pill's own font (12px/700,
+// same as ElapsedTimerPill's mm:ss text) -- a fixed pill for a fixed,
+// known string doesn't need the real Canvas2D measurement player names
+// get further down (that exists because a NAME'S length is unpredictable
+// real-world data; this text never changes), just a hand-picked value
+// with real headroom, same as LIVE_TIMER_WIDTH's own already-established
+// convention.
+const UP_NEXT_PILL_WIDTH = 72;
+// Whichever of the two right-side status pills (Live's ticking timer,
+// Called's static "Up Next") is actually showing on a given match, both
+// need the SAME amount of space reserved beside it (PromotionPill's own
+// edgeX offset, BracketTree's hasRightPill/COL_GAP margin) -- sized to
+// the wider of the two so neither one is ever the surprise case that
+// doesn't quite fit.
+const STATUS_PILL_WIDTH = Math.max(LIVE_TIMER_WIDTH, UP_NEXT_PILL_WIDTH);
 
 // A name row's real available width, before the score pill starts: from
 // NAME_INSET_X (16) to BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN
 // (200 - 30 - 8 = 162) is 146px -- confirmed directly against a real
 // rendered bracket (getBBox() on the live SVG text/tspan elements), not
-// assumed. That same live check is what caught this budget being wrong
-// in the first place: a real entrant ("Bhop Goomba Roomba", 18 chars,
-// under the old 20-char cap) measured 162.89px wide, 17px past the pill.
-// Real per-character widths in this custom BODY_FONT_FAMILY (which is
-// user-supplied and gitignored, see local-fonts.ts -- not something this
-// comment's numbers can be re-derived from without a live render) ranged
-// 8.3-9.05px/char across several real names depending on weight/letters;
-// MAX_NAME_ROW_CHARS below uses 9px/char (the widest observed, i.e. the
-// safe direction to round) against 140px (146 minus a few px of margin,
-// not the exact flush edge) -- 140/9 = 15.5, floored to 15.
-const MAX_NAME_ROW_CHARS = 15;
-// Tightened from 10 -- with MAX_NAME_ROW_CHARS now much smaller than the
-// old 20, a 10-char prefix could still eat 2/3 of the entire budget by
-// itself. 8 keeps a genuinely long tag readable while leaving more room
-// for MIN_NAME_ROW_CHARS below.
-const MAX_PREFIX_CHARS = 8;
-// The name's own floor even when a maxed-out prefix eats the rest of
-// MAX_NAME_ROW_CHARS -- worst case (8-char prefix + 1 space + 6-char
-// name = 15 chars) still lands exactly at budget, not over it.
-const MIN_NAME_ROW_CHARS = 6;
+// assumed.
+const NAME_ROW_AVAILABLE_WIDTH = 146;
+// A separate, smaller cap on just the prefix's own width, so one very
+// long clan tag can't eat most of NAME_ROW_AVAILABLE_WIDTH by itself and
+// squeeze the actual player name down to almost nothing.
+const MAX_PREFIX_WIDTH = 70;
+
+// Was a fixed character-count budget (e.g. "20 chars total, 15 for the
+// name") before this -- confirmed live that doesn't actually work well
+// for a non-monospace font: the SAME character count has to be
+// conservative enough to never overflow for a WIDE-lettered name ("Bhop
+// Goomba Roomba" measured ~9px/char), which made it needlessly tight for
+// a NARROW-lettered one, producing an ugly double-truncation ("DDRIlli…
+// Carte…") on a name that would have fit close to in full. Real per-
+// character widths ranged 7.9-9.05px/char across live names depending on
+// actual letterforms -- no single character count serves both cases
+// well. truncateToWidth below measures the ACTUAL rendered width via
+// Canvas2D instead of guessing, so every name gets exactly as much room
+// as it really needs, no more and no less.
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+function getMeasureCtx(): CanvasRenderingContext2D | null {
+  // Lazy + cached, not created at module load -- created on first real
+  // use so this file has no top-level `document` access (harmless in a
+  // browser, but there's no reason to require one just to define this
+  // function), and one canvas is plenty for every measurement this
+  // component ever needs.
+  if (measureCtx === undefined) {
+    measureCtx = document.createElement("canvas").getContext("2d");
+  }
+  return measureCtx;
+}
+
+/** Real, measured pixel width of `text` at the given size/weight in this
+ * overlay's own BODY_FONT_FAMILY -- not a guessed average px/char (see
+ * this section's own doc above for why that didn't hold up). Falls back
+ * to a rough character-count estimate only if Canvas2D itself somehow
+ * isn't available -- shouldn't happen in a real browser, defensive only,
+ * matching this same font's own worst observed px/char so the fallback
+ * stays on the safe (under, not over) side. */
+function measureTextWidth(
+  text: string,
+  fontSize: number,
+  fontWeight: number,
+): number {
+  const ctx = getMeasureCtx();
+  if (!ctx) return text.length * 9;
+  ctx.font = `${fontWeight} ${fontSize}px ${BODY_FONT_FAMILY}`;
+  return ctx.measureText(text).width;
+}
+
+/** Truncates `text` with a trailing "…" to fit within `maxWidth` real
+ * pixels, binary-searching the longest prefix that fits rather than
+ * guessing a fixed character count. Returns `text` unchanged if it
+ * already fits -- never adds an ellipsis to something that didn't need
+ * one. */
+function truncateToWidth(
+  text: string,
+  maxWidth: number,
+  fontSize: number,
+  fontWeight: number,
+): string {
+  if (measureTextWidth(text, fontSize, fontWeight) <= maxWidth) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const candidate = text.slice(0, mid) + "…";
+    if (measureTextWidth(candidate, fontSize, fontWeight) <= maxWidth) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return text.slice(0, lo) + "…";
+}
 
 function MatchBox({
   match,
@@ -777,6 +897,7 @@ function MatchBox({
   winnersEntrantIds,
   seedProgressionById,
   phantomSetsById,
+  liveGlowFilterId,
 }: {
   match: { set: StartggSet; x: number; y: number; col: number };
   setsById: SetsById;
@@ -785,12 +906,23 @@ function MatchBox({
   winnersEntrantIds?: WinnersEntrantIds;
   seedProgressionById?: SeedProgressionById;
   phantomSetsById?: PhantomSetsById;
+  /** BracketTree's own shared <filter> id for the soft glow below --
+   * only actually referenced when this match is live, but always passed
+   * down regardless (simpler than threading an optional-only-if-live
+   * prop) since the id itself is cheap to pass and BracketTree already
+   * computed it unconditionally. */
+  liveGlowFilterId: string;
 }) {
   const { set, x, y } = match;
   const winIdx = winningSlotIndex(set);
   const slots = set.slots || [];
   const live = isSetLive(set);
   const called = isSetCalled(set);
+  // Both a live and a called match get a thicker outline than a normal
+  // one -- read once here so the outline `<rect>` and the divider
+  // `<line>` below (which needs to stay clear of however thick that
+  // outline actually is, see its own comment) always agree.
+  const boxStrokeWidth = live || called ? 3 : 2;
   // Several rounds out with nothing determined yet -- dim it so the
   // still-active/decided matches read as the focus, not equally-weighted
   // clutter.
@@ -830,10 +962,43 @@ function MatchBox({
   const row0Y = ROW_TOP_PAD + ROW_HEIGHT / 2;
   const row1Y = ROW_TOP_PAD + ROW_HEIGHT + ROW_GAP + ROW_HEIGHT / 2;
 
-  const hasTimer = live && set.startedAt != null;
+  // Either the ticking elapsed timer (Live) or the static "Up Next" pill
+  // (Called) -- never both, isSetLive/isSetCalled are mutually exclusive
+  // (see isSetCalled's own doc). Both reserve the same STATUS_PILL_WIDTH
+  // of right-side room regardless of which is actually showing.
+  const hasStatusPill = (live && set.startedAt != null) || called;
 
   return (
     <g transform={`translate(${x},${y})`} opacity={isFarOut ? 0.5 : 1}>
+      {/* A very subtle, slowly breathing glow behind the box's own solid
+          outline -- confirmed live: rendering this BEFORE the outline
+          rect (not after) is what makes it read as a soft halo peeking
+          out from behind a crisp border, rather than a haze painted on
+          top that would dull the border's own edge. Deliberately a
+          narrow opacity swing (0.06-0.18, not the old column-header
+          glow's 0.15-0.45) and a tighter blur (see BracketTree's own
+          liveGlowFilterId) -- explicit feedback was that the previous
+          column-wide version was too flashy; this is meant to be
+          noticed on a second look, not grab attention on its own. */}
+      {live && (
+        <rect
+          x={-6}
+          y={-6}
+          width={BOX_WIDTH + 12}
+          height={MATCH_BOX_HEIGHT + 12}
+          rx={10}
+          fill={COLORS.live}
+          opacity={0.1}
+          filter={`url(#${liveGlowFilterId})`}
+        >
+          <animate
+            attributeName="opacity"
+            values="0.06;0.18;0.06"
+            dur="2.6s"
+            repeatCount="indefinite"
+          />
+        </rect>
+      )}
       {row0Label && (
         // edgeX (pill positioning) starts past the identifier ribbon
         // (which occupies roughly -16 to +13 at ROW_DIVIDER_Y, see
@@ -861,10 +1026,10 @@ function MatchBox({
       {(outgoing.winner || outgoing.loser) && (
         <PromotionPill
           label={(outgoing.winner || outgoing.loser)!}
-          // Pushed past the elapsed-timer pill (8px gap + its own width)
-          // when both are present, so they don't collide -- see the
-          // ElapsedTimerPill render below.
-          edgeX={BOX_WIDTH + (hasTimer ? 8 + LIVE_TIMER_WIDTH + 8 : 0)}
+          // Pushed past the status pill (8px gap + its own width) when
+          // both are present, so they don't collide -- see the
+          // ElapsedTimerPill/UpNextPill render below.
+          edgeX={BOX_WIDTH + (hasStatusPill ? 8 + STATUS_PILL_WIDTH + 8 : 0)}
           y={ROW_DIVIDER_Y}
           side="right"
         />
@@ -877,22 +1042,33 @@ function MatchBox({
         rx={6}
         fill={COLORS.panel}
         stroke={live ? COLORS.live : called ? COLORS.called : COLORS.border}
-        strokeWidth={live || called ? 3 : 2}
+        strokeWidth={boxStrokeWidth}
       />
+      {/* Inset by half the box's own border stroke, not flush with x=0/
+          BOX_WIDTH -- an SVG stroke is centered on its path, so the
+          outline rect's border already extends boxStrokeWidth/2 inward
+          from those exact coordinates. A divider drawn AT x=0/BOX_WIDTH
+          (after, i.e. on top of, the outline in paint order) painted
+          straight over the inner half of that border stroke -- barely
+          visible against a thin 2px normal border, but a real, confirmed
+          visual glitch against a live/called match's thicker 3px one
+          (the grey divider color showing through/above the green or gold
+          border right at its own left/right ends). */}
       <line
-        x1={0}
+        x1={boxStrokeWidth / 2}
         y1={ROW_DIVIDER_Y}
-        x2={BOX_WIDTH}
+        x2={BOX_WIDTH - boxStrokeWidth / 2}
         y2={ROW_DIVIDER_Y}
         stroke={COLORS.border}
       />
-      {/* Elapsed-since-started clock, not a "LIVE" text badge -- matches
-          start.gg's own report view (compared directly against a live
-          screenshot of it), which uses the timer itself as the live
-          indicator rather than a separate label. No equivalent exists for
-          Called: start.gg doesn't expose a "time since called" timestamp
-          anywhere in the schema (only Set.startedAt), so Called only gets
-          the outline + bell icons below, no pill. */}
+      {/* Elapsed-since-started clock for Live -- matches start.gg's own
+          report view (compared directly against a live screenshot of
+          it), which uses the timer itself as the live indicator rather
+          than a separate label. Called gets a static "Up Next" pill
+          instead (start.gg doesn't expose a "time since called"
+          timestamp anywhere in the schema, only Set.startedAt, so
+          there's no elapsed time to show there) -- isSetLive/isSetCalled
+          are mutually exclusive, so only one of these two ever renders. */}
       {live && set.startedAt != null && (
         <ElapsedTimerPill
           x={BOX_WIDTH + 8}
@@ -901,6 +1077,9 @@ function MatchBox({
           nowMs={nowMs}
           color={COLORS.live}
         />
+      )}
+      {called && (
+        <UpNextPill x={BOX_WIDTH + 8} y={ROW_DIVIDER_Y} color={COLORS.called} />
       )}
       {set.identifier && (
         <IdentifierTag label={set.identifier} y={ROW_DIVIDER_Y} />
@@ -934,28 +1113,37 @@ function MatchBox({
           : isLoser
             ? COLORS.textLoser
             : COLORS.text;
+        // Same weight the <text> below actually renders this row at --
+        // measuring at any other weight would size-check against a
+        // slightly different rendered width than what really shows up.
+        const rowFontWeight = isWinner ? 700 : 400;
         // Only a real, filled slot has a clan tag to show -- a
         // placeholder/TBD row's own "name" text (e.g. "winner of A") has
         // no entrant, so this is naturally null for those already.
-        // Capped short (tags are conventionally a few characters on
-        // start.gg) so a long one can't crowd out the name it's
-        // labeling; the name's own truncation budget shrinks to make
-        // room for whatever the tag actually took, rather than the two
-        // being sized independently and risking an overflow into the
-        // score pill area on the row's right edge.
+        // Capped to MAX_PREFIX_WIDTH so a long one can't crowd out the
+        // name it's labeling; the name's own available width shrinks by
+        // exactly whatever the (possibly-truncated) tag actually
+        // measures, rather than the two being sized independently and
+        // risking an overflow into the score pill area on the row's
+        // right edge.
         const prefix = slot?.entrant?.participants?.[0]?.prefix || null;
-        const displayPrefix =
-          prefix && prefix.length > MAX_PREFIX_CHARS
-            ? prefix.slice(0, MAX_PREFIX_CHARS - 1) + "…"
-            : prefix;
-        const nameBudget = displayPrefix
-          ? Math.max(
-              MIN_NAME_ROW_CHARS,
-              MAX_NAME_ROW_CHARS - displayPrefix.length - 1,
+        const displayPrefix = prefix
+          ? truncateToWidth(prefix, MAX_PREFIX_WIDTH, PLAYER_NAME_FONT_SIZE, rowFontWeight)
+          : null;
+        const nameAvailableWidth = displayPrefix
+          ? NAME_ROW_AVAILABLE_WIDTH -
+            measureTextWidth(
+              `${displayPrefix} `,
+              PLAYER_NAME_FONT_SIZE,
+              rowFontWeight,
             )
-          : MAX_NAME_ROW_CHARS;
-        const displayName =
-          name.length > nameBudget ? name.slice(0, nameBudget - 1) + "…" : name;
+          : NAME_ROW_AVAILABLE_WIDTH;
+        const displayName = truncateToWidth(
+          name,
+          nameAvailableWidth,
+          PLAYER_NAME_FONT_SIZE,
+          rowFontWeight,
+        );
         return (
           <g key={i}>
             <g transform={`translate(0,${rowY})`}>
@@ -1084,6 +1272,39 @@ function ElapsedTimerPill({
         fontSize={12}
       >
         {mm}:{ss.toString().padStart(2, "0")}
+      </text>
+    </g>
+  );
+}
+
+/** A Called match's own right-side status pill -- same position/shape as
+ * ElapsedTimerPill (they're mutually exclusive, see MatchBox's own
+ * hasStatusPill), just static text instead of a ticking clock: start.gg
+ * doesn't expose a "time since called" timestamp anywhere in the schema,
+ * so there's no elapsed time to show for this state, only that the match
+ * has been called to a station and is coming up. */
+function UpNextPill({
+  x,
+  y,
+  color,
+}: {
+  x: number;
+  y: number;
+  color: string;
+}) {
+  const height = 22;
+  return (
+    <g transform={`translate(${x},${y - height / 2})`}>
+      <rect width={UP_NEXT_PILL_WIDTH} height={height} rx={4} fill={color} />
+      <text
+        x={UP_NEXT_PILL_WIDTH / 2}
+        y={height / 2 + 5}
+        textAnchor="middle"
+        fill="#fff"
+        fontWeight={700}
+        fontSize={12}
+      >
+        Up Next
       </text>
     </g>
   );

@@ -600,6 +600,20 @@ export interface GeometryOptions {
    * further automatically (their Y is the average of their feeders'),
    * this is only the base case with no feeders to average. */
   rowGap: number;
+  /** How far a match box's own "divider" (the horizontal line that
+   * splits its two player rows, e.g. bracket-tree.tsx's ROW_DIVIDER_Y)
+   * sits from the box's plain geometric center (boxHeight / 2) --
+   * that's what a progression connector should actually converge on,
+   * not the raw center. Defaults to 0 (divider == center), which
+   * reproduces this function's old, undocumented assumption exactly --
+   * only a caller whose own top/bottom row padding isn't symmetric
+   * (bracket-tree.tsx's own ROW_TOP_PAD/ROW_BOTTOM_PAD; see
+   * ROW_DIVIDER_Y's own doc there) needs to pass a nonzero value.
+   * Confirmed live: without this, bracket-tree.tsx's own dashed
+   * connector lines landed 2 SVG units above every match box's real
+   * divider line -- small, but a real, visible misalignment on every
+   * single connector in the tree, not just an isolated one. */
+  dividerOffset: number;
 }
 
 const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
@@ -607,6 +621,7 @@ const DEFAULT_GEOMETRY_OPTIONS: GeometryOptions = {
   boxHeight: 56,
   colGap: 48,
   rowGap: 24,
+  dividerOffset: 0,
 };
 
 /**
@@ -624,7 +639,14 @@ export function computeSideGeometry(
   options: Partial<GeometryOptions> = {},
 ): SideGeometry {
   const opts = { ...DEFAULT_GEOMETRY_OPTIONS, ...options };
-  const centerYById = new Map<string, number>();
+  // Keyed by match id, but stores each match's DIVIDER y (box center +
+  // dividerOffset) rather than its raw geometric center -- see
+  // GeometryOptions.dividerOffset's own doc for why that distinction
+  // matters. This is both what a later column's connector line actually
+  // draws to/from AND what that column's own centering average is based
+  // on, so a whole chain of connectors converges on every box's real
+  // divider the entire way across the tree, not just the first hop.
+  const dividerYById = new Map<string, number>();
   const matches: PositionedMatch[] = [];
   const connectors: string[] = [];
 
@@ -636,28 +658,37 @@ export function computeSideGeometry(
         centerY =
           match.row * (opts.boxHeight + opts.rowGap) + opts.boxHeight / 2;
       } else {
-        const feederYs = (match.set.slots || [])
+        const feederDividerYs = (match.set.slots || [])
           .filter(
             (slot): slot is NonNullable<typeof slot> =>
               slot != null &&
               slot.prereqType === "set" &&
               slot.prereqId != null &&
-              centerYById.has(slot.prereqId),
+              dividerYById.has(slot.prereqId),
           )
-          .map((slot) => centerYById.get(slot.prereqId!)!);
-        centerY = feederYs.length
-          ? feederYs.reduce((a, b) => a + b, 0) / feederYs.length
+          .map((slot) => dividerYById.get(slot.prereqId!)!);
+        const dividerY = feederDividerYs.length
+          ? feederDividerYs.reduce((a, b) => a + b, 0) /
+            feederDividerYs.length
           : match.row * (opts.boxHeight + opts.rowGap) * Math.pow(2, col) +
-            opts.boxHeight / 2;
+            opts.boxHeight / 2 +
+            opts.dividerOffset;
+        // Back out the plain geometric center from the divider position
+        // -- `y` (the box's own top-left, below) is still expressed
+        // relative to the center, not the divider, so every OTHER caller
+        // of this box's position keeps working exactly as before.
+        centerY = dividerY - opts.dividerOffset;
 
-        for (const feederY of feederYs) {
+        for (const feederDividerY of feederDividerYs) {
           const fromX = x - opts.colGap;
-          connectors.push(connectorPath(fromX, feederY, x, centerY, opts));
+          connectors.push(
+            connectorPath(fromX, feederDividerY, x, dividerY, opts),
+          );
         }
       }
       // String(...) -- same Set.id-is-actually-a-number vs prereqId-is-a-
       // string mismatch as layoutBracket's byId map above.
-      centerYById.set(String(match.set.id), centerY);
+      dividerYById.set(String(match.set.id), centerY + opts.dividerOffset);
       matches.push({ ...match, x, y: centerY - opts.boxHeight / 2 });
     });
   });
