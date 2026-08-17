@@ -32,6 +32,7 @@ import { useAppState } from "../state/store";
 import { BODY_FONT_FAMILY, LOCAL_FONT_FACE_CSS } from "./local-fonts";
 import { BROADCAST_COLORS, POOL_PLAYER_ROW_FONT_SIZE } from "./broadcast-theme";
 import { BroadcastTitleBar } from "./broadcast-title-bar";
+import { MARQUEE_KEYFRAMES_CSS } from "./marquee";
 import Banner from "../other-assets/backgrounds/bg.png";
 
 // Long fallback poll, same rationale as pool-results.tsx's
@@ -363,6 +364,11 @@ function BracketTreeInner({
           local-fonts.ts's own comment on this. Shared with gauntlet-
           pools.tsx/schedule.tsx, not a local redeclaration. */}
       <style>{LOCAL_FONT_FACE_CSS}</style>
+      {/* Same reasoning, for @keyframes this time -- one <style> per
+          overlay instance covers every MatchBox's own name marquee
+          below, since @keyframes are referenced by name, not scoped to
+          wherever they're declared. */}
+      <style>{MARQUEE_KEYFRAMES_CSS}</style>
       <div
         style={{
           // The card's base is the BODY font -- most of its text (match
@@ -820,6 +826,24 @@ const NAME_ROW_AVAILABLE_WIDTH = 146;
 // squeeze the actual player name down to almost nothing.
 const MAX_PREFIX_WIDTH = 70;
 
+// A name that's too long to fit now scrolls (see the marquee rendering
+// in MatchBox's own row map below) instead of being cut off with an
+// ellipsis -- explicit user request, same MARQUEE_KEYFRAMES_CSS cycle
+// shape schedule.tsx originally introduced for its own event/description
+// text (see that constant's own doc). Only the clan tag prefix still
+// truncates (MAX_PREFIX_WIDTH above) -- it's secondary, static-by-design
+// information, not the primary thing a viewer is watching scroll by.
+// Speed/duration are in this SVG's own LOCAL units (pre-SVG_SCALE), not
+// real screen px -- unlike schedule.tsx's own MARQUEE_SPEED_PX_PER_S
+// (plain HTML, no extra scale factor in play), everything in this SVG,
+// including these two constants, gets multiplied by SVG_SCALE on screen
+// together, so expressing speed in the SAME local-unit space this text
+// itself is measured in keeps the apparent on-screen speed relative to
+// the text's own size consistent, which is what actually reads as
+// "reasonable" regardless of the final scale factor.
+const NAME_MARQUEE_SPEED_UNITS_PER_S = 40;
+const NAME_MARQUEE_BASE_DURATION_S = 2;
+
 // Was a fixed character-count budget (e.g. "20 chars total, 15 for the
 // name") before this -- confirmed live that doesn't actually work well
 // for a non-monospace font: the SAME character count has to be
@@ -952,6 +976,12 @@ function MatchBox({
   const slots = set.slots || [];
   const live = isSetLive(set);
   const called = isSetCalled(set);
+  // Base for each row's own <clipPath> id below (row 0/1 append their
+  // own suffix) -- unique per MatchBox instance, same reasoning as
+  // BracketTree's own liveGlowFilterId: an SVG id has to be unique
+  // document-wide for url(#id) to reliably resolve to the right
+  // <clipPath>, not whichever same-named one happens to appear first.
+  const nameClipIdBase = useId();
   // Both a live and a called match get a thicker outline than a normal
   // one -- read once here so the outline `<rect>` and the divider
   // `<line>` below (which needs to stay clear of however thick that
@@ -1218,27 +1248,70 @@ function MatchBox({
         // Only a real, filled slot has a clan tag to show -- a
         // placeholder/TBD row's own "name" text (e.g. "winner of A") has
         // no entrant, so this is naturally null for those already.
-        // Capped to MAX_PREFIX_WIDTH so a long one can't crowd out the
-        // name it's labeling; the name's own available width shrinks by
-        // exactly whatever the (possibly-truncated) tag actually
-        // measures, rather than the two being sized independently and
-        // risking an overflow into the score pill area on the row's
-        // right edge.
+        // Still capped to MAX_PREFIX_WIDTH so a long one can't crowd out
+        // the name it's labeling -- the prefix stays truncated/static
+        // even though the NAME below no longer is (see nameOverflows'
+        // own doc); it's secondary, static-by-design information, not
+        // the primary thing a viewer is watching scroll by.
         const prefix = slot?.entrant?.participants?.[0]?.prefix || null;
         const displayPrefix = prefix
           ? truncateToWidth(prefix, MAX_PREFIX_WIDTH, PLAYER_NAME_FONT_SIZE, rowFontWeight)
           : null;
-        const nameAvailableWidth = displayPrefix
-          ? NAME_ROW_AVAILABLE_WIDTH -
-            measureTextWidth(
-              `${displayPrefix} `,
-              PLAYER_NAME_FONT_SIZE,
-              rowFontWeight,
-            )
-          : NAME_ROW_AVAILABLE_WIDTH;
-        const displayName = truncateToWidth(
+        // Called's bell + the (possibly-truncated) clan tag, together:
+        // whatever sits BEFORE the name and stays completely static,
+        // never part of the marquee below. Measured explicitly (not left
+        // to SVG's own text flow to place it) so the marquee's own clip
+        // region can start exactly where this leaves off -- two
+        // separate <text> elements now, not one <text> with a <tspan>
+        // and trailing plain text, since the marquee needs its own
+        // independently-clippable, independently-animated element.
+        const bellPrefix = called && slot?.entrant ? "🔔 " : "";
+        const staticPrefixText = displayPrefix
+          ? `${bellPrefix}${displayPrefix} `
+          : bellPrefix;
+        const staticPrefixWidth = staticPrefixText
+          ? measureTextWidth(staticPrefixText, PLAYER_NAME_FONT_SIZE, rowFontWeight)
+          : 0;
+        const nameAvailableWidth = Math.max(
+          0,
+          NAME_ROW_AVAILABLE_WIDTH - staticPrefixWidth,
+        );
+        const nameWidth = measureTextWidth(
           name,
-          nameAvailableWidth,
+          PLAYER_NAME_FONT_SIZE,
+          rowFontWeight,
+        );
+        // Scrolls instead of truncating with an ellipsis when it doesn't
+        // fit -- explicit user request, reusing marquee.tsx's own
+        // MARQUEE_KEYFRAMES_CSS cycle shape (rendered once per overlay
+        // instance, see BracketTreeInner's own <style> tag) adapted for
+        // SVG: an HTML overflow:hidden box has no SVG equivalent, so
+        // this clips via <clipPath> instead, on a separate stationary
+        // wrapper <g> from the one that actually animates (see the
+        // render below) -- putting both the clip AND the animated
+        // transform on the SAME element risks the clip region itself
+        // sliding along with the animation instead of staying fixed,
+        // depending on transform/clip evaluation order, which splitting
+        // them across two elements sidesteps entirely. A name that
+        // already fits renders with no clip-path/animation at all and
+        // is visually identical to plain static text.
+        const nameOverflows = nameWidth > nameAvailableWidth;
+        const nameMarqueeDistance = nameOverflows
+          ? nameWidth - nameAvailableWidth
+          : 0;
+        const nameMarqueeDuration =
+          NAME_MARQUEE_BASE_DURATION_S +
+          nameMarqueeDistance / NAME_MARQUEE_SPEED_UNITS_PER_S;
+        const nameClipId = `${nameClipIdBase}-name-${i}`;
+        // One shared baseline for both the static prefix text and the
+        // marqueeing name text below, so they visually align on the same
+        // line -- measured against `name` itself (the row's main
+        // content), not the prefix (Canvas2D's ascent/descent metrics
+        // aren't reliable for the bell emoji specifically, and the
+        // prefix is typically similar cap-height regardless).
+        const nameBaselineY = verticalCenterBaselineY(
+          name,
+          0,
           PLAYER_NAME_FONT_SIZE,
           rowFontWeight,
         );
@@ -1250,34 +1323,60 @@ function MatchBox({
                 not relative to a flat ROW_HEIGHT-tall slice from the
                 row's own top. */}
             <g transform={`translate(0,${rowCenterY})`}>
-              {/* Baseline measured against just displayName (not the
-                  optional bell emoji prefix, which Canvas2D's own
-                  ascent/descent metrics don't reliably report for --
-                  the prefix tspan shares this same baseline regardless,
-                  same as normal SVG text flow, so measuring the row's
-                  main content is representative enough). */}
-              <text
-                x={NAME_INSET_X}
-                y={verticalCenterBaselineY(
-                  displayPrefix ? `${displayPrefix} ${displayName}` : displayName,
-                  0,
-                  PLAYER_NAME_FONT_SIZE,
-                  rowFontWeight,
-                )}
-                fill={nameColor}
-                fontSize={PLAYER_NAME_FONT_SIZE}
-                fontWeight={isWinner ? 700 : 400}
-                fontStyle={slot?.entrant ? "normal" : "italic"}
+              {staticPrefixText && (
+                <text
+                  x={NAME_INSET_X}
+                  y={nameBaselineY}
+                  fill={nameColor}
+                  fontSize={PLAYER_NAME_FONT_SIZE}
+                  fontWeight={isWinner ? 700 : 400}
+                  fontStyle={slot?.entrant ? "normal" : "italic"}
+                >
+                  {/* Called shows a bell next to both entrants -- matches
+                      start.gg's own report view, which marks Called this
+                      way instead of (or alongside) the outline. */}
+                  {bellPrefix}
+                  {displayPrefix && (
+                    <tspan fill={COLORS.prefix}>{displayPrefix} </tspan>
+                  )}
+                </text>
+              )}
+              <clipPath id={nameClipId}>
+                <rect
+                  x={0}
+                  y={-PLAYER_NAME_FONT_SIZE}
+                  width={nameAvailableWidth}
+                  height={PLAYER_NAME_FONT_SIZE * 2}
+                />
+              </clipPath>
+              {/* Stationary wrapper -- carries the one-time position
+                  translate AND the clip-path, neither of which ever
+                  changes. The animated <text> nests one level inside,
+                  entirely separate from this element (see nameOverflows'
+                  own doc above for why that split matters). */}
+              <g
+                transform={`translate(${NAME_INSET_X + staticPrefixWidth},0)`}
+                clipPath={`url(#${nameClipId})`}
               >
-                {/* Called shows a bell next to both entrants -- matches
-                    start.gg's own report view, which marks Called this
-                    way instead of (or alongside) the outline. */}
-                {called && slot?.entrant ? "🔔 " : ""}
-                {displayPrefix && (
-                  <tspan fill={COLORS.prefix}>{displayPrefix} </tspan>
-                )}
-                {displayName}
-              </text>
+                <text
+                  x={0}
+                  y={nameBaselineY}
+                  fill={nameColor}
+                  fontSize={PLAYER_NAME_FONT_SIZE}
+                  fontWeight={isWinner ? 700 : 400}
+                  fontStyle={slot?.entrant ? "normal" : "italic"}
+                  style={
+                    nameOverflows
+                      ? ({
+                          "--marquee-distance": `-${nameMarqueeDistance}px`,
+                          animation: `broadcastMarqueeScroll ${nameMarqueeDuration}s ease-in-out infinite`,
+                        } as React.CSSProperties)
+                      : undefined
+                  }
+                >
+                  {name}
+                </text>
+              </g>
               {isDq ? (
                 <g>
                   <rect

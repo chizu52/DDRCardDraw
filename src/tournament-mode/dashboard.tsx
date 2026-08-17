@@ -65,11 +65,11 @@ import {
   ParsedSheet,
   colIndexToLetter,
   sumScores,
-  topScoreRanks,
   finalRankingStatusByName,
   formatSongScore,
+  topScoreRanks,
 } from "../sheets/parse-pools";
-import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
+import { rowColorForRank, RowColorTiers } from "../sheets/row-colors";
 import { startggKeyAtom, useStartggPhases } from "../startgg-gql";
 import {
   DEFAULT_SCHEDULE_STATUS,
@@ -583,9 +583,6 @@ function MatchesImportPanel() {
                 </thead>
                 <tbody>
                   {(() => {
-                    const topRanks = pool.finished
-                      ? topScoreRanks(pool)
-                      : new Map<number, number>();
                     // Same name-keyed lookup gauntlet-pools.tsx/
                     // pool-results.tsx use, same finished gate (see
                     // finalRankingStatusByName's own doc) -- automatic,
@@ -595,19 +592,29 @@ function MatchesImportPanel() {
                     const statusByName = pool.finished
                       ? finalRankingStatusByName(pool, rankingColors)
                       : new Map<string, "advancing" | "eliminated">();
+                    // Rank still determines WHICH tier color an
+                    // advancing row gets (see row-colors.ts's own
+                    // module doc) -- only computed once finished, same
+                    // gate finalRankingStatusByName itself uses.
+                    const ranks = pool.finished
+                      ? topScoreRanks(pool)
+                      : new Map<number, number>();
                     return pool.rows.map((row, rowIdx) => {
-                      const rank = topRanks.get(rowIdx);
+                      const status =
+                        statusByName.get(row.player.trim().toLowerCase()) ??
+                        null;
+                      // Same automatic, sheet-color-driven signal
+                      // pool-results.tsx's own PoolTable uses -- see
+                      // row-colors.ts's own module doc.
                       const tierColor = rowColors
-                        ? rowColorForRank(rank, rowColorTiers)
+                        ? rowColorForRank(ranks.get(rowIdx), status, rowColorTiers)
                         : null;
                       const backgroundColor =
                         tierColor ??
                         (rowIdx % 2 === 0
                           ? "transparent"
                           : "rgba(143,153,168,0.08)");
-                      const advances =
-                        statusByName.get(row.player.trim().toLowerCase()) ===
-                        "advancing";
+                      const advances = status === "advancing";
                       return (
                         <tr key={rowIdx} style={{ backgroundColor }}>
                           <td style={{ ...tdStyle, fontWeight: 500 }}>
@@ -725,6 +732,16 @@ function MatchesSettingsPanel() {
               Gauntlet Pool Tables
               <CopyOverlayUrlButton />
             </h3>
+            {/* WHETHER a row colors at all is always automatic -- gated
+                on the sheet's own Final Ranking cell marking it
+                advancing (same signal the advancing/eliminated TEXT
+                color already uses), never a manually-picked fixed rank
+                position -- a pool's real advance count varies pool to
+                pool (1, 2, or 3 players), so a fixed cutoff could color
+                a row that didn't actually advance, or leave uncolored
+                one that did. WHICH of the 4 tier colors an advancing
+                row gets is still configurable below, by placement --
+                see row-colors.ts's own module doc. */}
             <Checkbox
               checked={rowColors}
               label="Colored Placements upon Finalization"
@@ -736,29 +753,37 @@ function MatchesSettingsPanel() {
                 )
               }
             />
-            <div style={{ marginLeft: "1.5rem", marginTop: "-0.25rem" }}>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.25rem",
+                marginLeft: "1.75rem",
+                marginTop: "0.25rem",
+              }}
+            >
               <RowColorTierCheckbox
                 tier="first"
                 label="1st place (gold)"
-                tiers={rowColorTiers}
+                rowColorTiers={rowColorTiers}
                 disabled={!rowColors}
               />
               <RowColorTierCheckbox
                 tier="second"
                 label="2nd place (silver)"
-                tiers={rowColorTiers}
+                rowColorTiers={rowColorTiers}
                 disabled={!rowColors}
               />
               <RowColorTierCheckbox
                 tier="third"
                 label="3rd place (bronze)"
-                tiers={rowColorTiers}
+                rowColorTiers={rowColorTiers}
                 disabled={!rowColors}
               />
               <RowColorTierCheckbox
                 tier="fourthPlus"
-                label="4th place and below (gray)"
-                tiers={rowColorTiers}
+                label="4th+ place (gray)"
+                rowColorTiers={rowColorTiers}
                 disabled={!rowColors}
               />
             </div>
@@ -1078,11 +1103,15 @@ function GauntletPoolsDividerEditor() {
               }}
             >
               <span style={{ whiteSpace: "nowrap" }}>Before Pool #</span>
+              {/* No buttonPosition="none" here -- same NumericInput
+                  shape as ScheduleDayEditor's own "Minutes" field
+                  (which doesn't set buttonPosition either, so it gets
+                  Blueprint's default increment/decrement spinner
+                  buttons); explicit user request to match that. */}
               <NumericInput
                 value={row.beforeSetNumber}
                 min={1}
                 clampValueOnBlur
-                buttonPosition="none"
                 style={{ width: "70px" }}
                 onValueChange={(n, valueAsString) => {
                   if (valueAsString !== "") {
@@ -1771,23 +1800,35 @@ function ScheduleDayEditor({ day }: { day: ScheduleDay }) {
   );
 }
 
-function RowColorTierCheckbox(props: {
+/** One checkbox per placement tier (see event.overlayRowColorTiers /
+ * row-colors.ts) -- dispatches setOverlayRowColorTier for just its own
+ * `tier`, leaving the other 3 untouched, same "each is independently
+ * switchable" idea DEFAULT_ROW_COLOR_TIERS documents. `disabled` mirrors
+ * the parent "Colored Placements upon Finalization" checkbox -- these
+ * sub-options have no effect while that's off, so greying them out says
+ * so instead of letting them look like live controls. */
+function RowColorTierCheckbox({
+  tier,
+  label,
+  rowColorTiers,
+  disabled,
+}: {
   tier: keyof RowColorTiers;
   label: string;
-  tiers: RowColorTiers;
+  rowColorTiers: RowColorTiers;
   disabled: boolean;
 }) {
   const dispatch = useAppDispatch();
   return (
     <Checkbox
-      checked={props.tiers[props.tier]}
-      disabled={props.disabled}
-      label={props.label}
+      checked={rowColorTiers[tier]}
+      disabled={disabled}
+      label={label}
       onChange={(e) =>
         dispatch(
           eventSlice.actions.setOverlayRowColorTier({
-            tier: props.tier,
-            enabled: e.currentTarget.checked,
+            tier,
+            value: e.currentTarget.checked,
           }),
         )
       }

@@ -72,15 +72,19 @@ interface EventState {
   /** Same setting as sheets-creds-manager.tsx's other Sheets config, but
    * room-synced (not device-local) since it affects what the overlay
    * displays for everyone, not just this device -- see
-   * tournament-mode/dashboard.tsx's MatchesSettingsPanel. Advancement
-   * itself (who gets the arrow tag) isn't a setting -- it reads straight
-   * from the sheet's own Final Ranking color (see parse-pools.ts's
-   * finalRankingStatusByName), same automatic logic gauntlet-pools.tsx
-   * uses, so there's no separate count to store here anymore. */
+   * tournament-mode/dashboard.tsx's MatchesSettingsPanel. WHETHER a row
+   * colors at all is not separately configurable beyond this on/off
+   * switch -- it always reads straight from the sheet's own Final
+   * Ranking color (see parse-pools.ts's finalRankingStatusByName), same
+   * automatic logic gauntlet-pools.tsx uses, rather than a fixed rank
+   * position. WHICH color an advancing row gets is still configurable,
+   * see overlayRowColorTiers below (see row-colors.ts's own module
+   * doc). */
   overlayRowColors: boolean;
-  /** Which placement tiers get colored when overlayRowColors is on --
-   * lets the user pick e.g. gold+silver only (the original behavior) vs.
-   * also coloring bronze/4th-and-below. See sheets/row-colors.ts. */
+  /** Which placements get colored, and with which of the 4 fixed tier
+   * colors, when overlayRowColors is on -- see row-colors.ts's own
+   * module doc for why this is independent from whether a row is
+   * eligible to be colored at all (that part is always automatic). */
   overlayRowColorTiers: RowColorTiers;
   /** Which start.gg phase the bracket-tree OBS overlay
    * (obs-sources/bracket-tree.tsx) currently shows -- a phase id, same
@@ -297,11 +301,14 @@ export const eventSlice = createSlice({
     setOverlayRowColors(state, action: PayloadAction<boolean>) {
       state.overlayRowColors = action.payload;
     },
+    // One checkbox per tier in dashboard.tsx's MatchesSettingsPanel --
+    // payload replaces the field named by `tier`, leaving the other 3
+    // tiers' settings untouched.
     setOverlayRowColorTier(
       state,
-      action: PayloadAction<{ tier: keyof RowColorTiers; enabled: boolean }>,
+      action: PayloadAction<{ tier: keyof RowColorTiers; value: boolean }>,
     ) {
-      state.overlayRowColorTiers[action.payload.tier] = action.payload.enabled;
+      state.overlayRowColorTiers[action.payload.tier] = action.payload.value;
     },
     setSelectedBracketPhase(state, action: PayloadAction<string | null>) {
       state.selectedBracketPhase = action.payload;
@@ -480,7 +487,7 @@ export function addOverlaySettings(state: EventState) {
     state.overlayRowColors = true;
   }
   if (!state.overlayRowColorTiers) {
-    state.overlayRowColorTiers = { ...DEFAULT_ROW_COLOR_TIERS };
+    state.overlayRowColorTiers = DEFAULT_ROW_COLOR_TIERS;
   }
   if (state.selectedBracketPhase === undefined) {
     state.selectedBracketPhase = null;

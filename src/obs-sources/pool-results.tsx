@@ -1,14 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Callout } from "@blueprintjs/core";
 import {
   parsePoolsFromRows,
-  topScoreRanks,
   colIndexToLetter,
   finalRankingStatusByName,
   formatSongScore,
   sumScores,
+  topScoreRanks,
   ParsedPool,
+  PoolPlayerRow,
 } from "../sheets/parse-pools";
 import {
   fetchPublicCellColors,
@@ -17,7 +18,7 @@ import {
 } from "../sheets/sheets-public-read";
 import { decodeSheetsConnection } from "../sheets/sheets-connection-param";
 import { CellColor, colorToCss } from "../sheets/sheets-export";
-import { RowColorTiers, rowColorForRank } from "../sheets/row-colors";
+import { rowColorForRank, RowColorTiers } from "../sheets/row-colors";
 import { useAppState } from "../state/store";
 import {
   BODY_FONT_FAMILY,
@@ -25,6 +26,11 @@ import {
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
 import { BROADCAST_COLORS, statusPillStyle } from "./broadcast-theme";
+import {
+  MARQUEE_KEYFRAMES_CSS,
+  MarqueeText,
+  useMarqueeDistances,
+} from "./marquee";
 
 // Scope is colors/fonts/status-pill styling only -- no banner backdrop
 // or title/icon header bar here, this overlay keeps its existing
@@ -205,7 +211,7 @@ export function PoolResultsOverlay() {
 
 // Dark broadcast-panel theme, matching gauntlet-pools.tsx/schedule.tsx
 // -- same thStyle/tdStyle layout and header-color chip as before, just
-// recolored. Row tier highlighting and the zebra-stripe fallback are
+// recolored. Row highlighting and the zebra-stripe fallback are
 // untouched -- both are already low-opacity rgba() tints that blend
 // correctly over either a light or dark base.
 function PoolTable({
@@ -221,11 +227,6 @@ function PoolTable({
   rowColors: boolean;
   rowColorTiers: RowColorTiers;
 }) {
-  // Only ranked (and only the advance arrow shown) once the pool is
-  // marked Finished -- same convention the Dashboard's own gold/silver
-  // highlighting already uses, so a still-in-progress pool never shows a
-  // premature "this player already advanced".
-  const ranks = pool.finished ? topScoreRanks(pool) : new Map<number, number>();
   // Same name-keyed lookup gauntlet-pools.tsx uses (see
   // finalRankingStatusByName's own doc for why by NAME, not row position)
   // -- gated on pool.finished for the same reason `ranks` above is: a
@@ -235,6 +236,15 @@ function PoolTable({
   const statusByName = pool.finished
     ? finalRankingStatusByName(pool, rankingColors)
     : new Map<string, "advancing" | "eliminated">();
+
+  // Rank still determines WHICH tier color an advancing row gets (see
+  // row-colors.ts's own module doc) -- same finished gate as
+  // statusByName above, same function the Matches tab preview table
+  // uses, so this overlay and that table can't drift into disagreement
+  // on which placement a row counts as.
+  const ranks = pool.finished
+    ? topScoreRanks(pool)
+    : new Map<number, number>();
 
   // Standings sorted by current score, highest first, so this reads as
   // a live leaderboard instead of staying in original seed/entry order.
@@ -254,6 +264,10 @@ function PoolTable({
       {/* A plain `style` prop can't express @font-face -- see
           local-fonts.ts's own comment on this. */}
       <style>{LOCAL_FONT_FACE_CSS}</style>
+      {/* Same reasoning, for @keyframes this time -- covers every row's
+          own name marquee below (see PoolResultRow), since @keyframes
+          are referenced by name, not scoped to wherever declared. */}
+      <style>{MARQUEE_KEYFRAMES_CSS}</style>
       <div
         style={{
           ...headerBarStyle,
@@ -300,8 +314,9 @@ function PoolTable({
             once a pool goes from Live to Final, so that recompute alone
             was enough to visibly reflow every other column at that
             moment. Locking widths here means the ADV Tag appearing can
-            only affect its own cell (truncating via playerNameStyle
-            below if needed), never the table's overall shape. */}
+            only affect its own cell (the name marquees instead of
+            reflowing anything else, see PoolResultRow), never the
+            table's overall shape. */}
         <colgroup>
           <col style={{ width: "24%" }} />
           {Array.from({ length: pool.songCount }).map((_, i) => (
@@ -324,73 +339,43 @@ function PoolTable({
         </thead>
         <tbody>
           {sortedRows.map(({ row, rowIdx, total }, displayIdx) => {
-            const rank = ranks.get(rowIdx);
+            // Automatic -- reads the sheet's own Final Ranking color for
+            // this player's name, same as gauntlet-pools.tsx, rather
+            // than a manually configured rank cutoff that could drift
+            // out of sync with what the sheet actually marks (a pool's
+            // real advance count varies: 1, 2, or 3 players, never a
+            // single fixed number across every pool). Drives BOTH the
+            // row's own background tint (see row-colors.ts) and the
+            // advance arrow Tag further down -- one signal, not two
+            // separately-configured ones that could disagree.
+            const status =
+              statusByName.get(row.player.trim().toLowerCase()) ?? null;
             const tierColor = rowColors
-              ? rowColorForRank(rank, rowColorTiers)
+              ? rowColorForRank(ranks.get(rowIdx), status, rowColorTiers)
               : null;
             const backgroundColor =
               tierColor ??
               (displayIdx % 2 === 0
                 ? "transparent"
                 : "rgba(143,153,168,0.08)");
-            // Automatic now -- reads the sheet's own Final Ranking color
-            // for this player's name, same as gauntlet-pools.tsx, rather
-            // than a manually configured cutoff count that could drift
-            // out of sync with what the sheet actually marks (a pool's
-            // real advance count varies: 1, 2, or 3 players, never a
-            // single fixed number across every pool).
-            const status =
-              statusByName.get(row.player.trim().toLowerCase()) ?? null;
             // How far off this player is from the opponent directly
             // above them in the current sorted standings -- explicit
             // user request. First place (displayIdx 0) never has one.
             // Also withheld for a player with no real score yet (total
-            // 0 -- same "not entered yet" convention topScoreRanks
-            // already uses) since there's nothing real to be "off" from.
+            // 0 -- nothing real to be "off" from).
             const above = displayIdx > 0 ? sortedRows[displayIdx - 1] : null;
             const diffText =
               above && total > 0
                 ? `-${(above.total - total).toFixed(4)}%`
                 : "";
             return (
-              <tr key={rowIdx} style={{ backgroundColor }}>
-                <td style={{ ...tdStyle, fontWeight: 500 }}>
-                  {/* Same convention as gauntlet-pools.tsx's own
-                      PoolRowList -- advancing/eliminated status reads
-                      from the player's own NAME color, not a separate
-                      Tag/icon (replaces the old ArrowRight Tag), so
-                      this overlay's row highlighting looks and behaves
-                      identically to the diagram overlay's. */}
-                  <span
-                    style={{
-                      ...playerNameStyle,
-                      // Only "eliminated" shifts color (dims to
-                      // COLORS.muted); advancing renders as plain
-                      // full-brightness text, same as gauntlet-pools.tsx.
-                      color:
-                        status === "eliminated" ? COLORS.muted : COLORS.text,
-                    }}
-                  >
-                    {row.player}
-                  </span>
-                </td>
-                {row.songs.map((s, j) => (
-                  <td key={j} style={tdStyle}>
-                    {formatSongScore(s) || "--"}
-                  </td>
-                ))}
-                <td style={{ ...tdStyle, fontWeight: 700 }}>{row.total}</td>
-                <td
-                  style={{
-                    ...tdStyle,
-                    borderRight: "none",
-                    color: COLORS.red,
-                    fontWeight: 600,
-                  }}
-                >
-                  {diffText || "--"}
-                </td>
-              </tr>
+              <PoolResultRow
+                key={rowIdx}
+                row={row}
+                backgroundColor={backgroundColor}
+                status={status}
+                diffText={diffText}
+              />
             );
           })}
         </tbody>
@@ -398,6 +383,95 @@ function PoolTable({
     </div>
   );
 }
+
+// Its own component, not rendered inline inside PoolTable's own
+// sortedRows.map -- the player-name marquee below needs its own
+// useRef/useMarqueeDistances (see marquee.tsx), and hooks can only be
+// called from a genuine component instance, not from inside a plain
+// callback passed to .map(). Same reason schedule.tsx's own per-row
+// marquee needed ScheduleRow to be a real component rather than staying
+// inline in Schedule's own render.
+function PoolResultRow({
+  row,
+  backgroundColor,
+  status,
+  diffText,
+}: {
+  row: PoolPlayerRow;
+  backgroundColor: string;
+  status: "advancing" | "eliminated" | null;
+  diffText: string;
+}) {
+  const nameBoxRef = useRef<HTMLDivElement>(null);
+  const nameContentRef = useRef<HTMLDivElement>(null);
+  const marqueeDistances = useMarqueeDistances(
+    [{ key: "name", boxRef: nameBoxRef, contentRef: nameContentRef }],
+    [row.player],
+  );
+  const nameDistance = marqueeDistances.get("name") ?? 0;
+  const nameDuration =
+    POOL_MARQUEE_BASE_DURATION_S + nameDistance / POOL_MARQUEE_SPEED_PX_PER_S;
+  return (
+    <tr style={{ backgroundColor }}>
+      <td style={{ ...tdStyle, fontWeight: 500 }}>
+        {/* Same convention as gauntlet-pools.tsx's own PoolRowList --
+            advancing/eliminated status reads from the player's own NAME
+            color, not a separate Tag/icon (replaces the old ArrowRight
+            Tag), so this overlay's row highlighting looks and behaves
+            identically to the diagram overlay's.
+
+            Scrolls instead of truncating with an ellipsis when the name
+            doesn't fit the (fixed, table-layout:fixed) Player column --
+            explicit user request, reusing the exact same
+            MarqueeText/useMarqueeDistances schedule.tsx's own
+            event/description text already uses (extracted to
+            marquee.tsx once a second overlay needed it). Left
+            completely static, no animation at all, whenever the name
+            already fits -- same as every other marquee in this app. */}
+        <MarqueeText
+          boxRef={nameBoxRef}
+          contentRef={nameContentRef}
+          distance={nameDistance}
+          duration={nameDuration}
+          style={{
+            // Only "eliminated" shifts color (dims to COLORS.muted);
+            // advancing renders as plain full-brightness text, same as
+            // gauntlet-pools.tsx.
+            color: status === "eliminated" ? COLORS.muted : COLORS.text,
+          }}
+        >
+          {row.player}
+        </MarqueeText>
+      </td>
+      {row.songs.map((s, j) => (
+        <td key={j} style={tdStyle}>
+          {formatSongScore(s) || "--"}
+        </td>
+      ))}
+      <td style={{ ...tdStyle, fontWeight: 700 }}>{row.total}</td>
+      <td
+        style={{
+          ...tdStyle,
+          borderRight: "none",
+          color: COLORS.red,
+          fontWeight: 600,
+        }}
+      >
+        {diffText || "--"}
+      </td>
+    </tr>
+  );
+}
+
+// Same "constant-ish scroll speed, proportional cycle length" reasoning
+// as schedule.tsx's own MARQUEE_SPEED_PX_PER_S/MARQUEE_BASE_DURATION_S
+// -- separate constants (not reused directly) since this overlay's own
+// font size/column width call for their own tuning, not schedule.tsx's.
+// Plain HTML/CSS px here (unlike bracket-tree.tsx's own SVG-local-unit
+// version), since this whole overlay has no extra SVG scale factor in
+// play.
+const POOL_MARQUEE_SPEED_PX_PER_S = 60;
+const POOL_MARQUEE_BASE_DURATION_S = 2.5;
 
 // Dark COLORS tokens now, not literal light-mode hex values -- explicit
 // user request to match gauntlet-pools.tsx/schedule.tsx's palette
@@ -430,14 +504,6 @@ const cardStyle: React.CSSProperties = {
   border: `1px solid ${COLORS.border}`,
   borderRadius: 14,
   overflow: "hidden",
-};
-
-// Truncates a long player name with an ellipsis instead of overflowing
-// its fixed-width column (see the colgroup comment above).
-const playerNameStyle: React.CSSProperties = {
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
 };
 
 const headerBarStyle: React.CSSProperties = {
