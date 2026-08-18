@@ -31,10 +31,17 @@ import {
 } from "../startgg-gql/bracket-layout";
 import { useAppState } from "../state/store";
 import { BODY_FONT_FAMILY, LOCAL_FONT_FACE_CSS } from "./local-fonts";
-import { BROADCAST_COLORS, POOL_PLAYER_ROW_FONT_SIZE } from "./broadcast-theme";
+import {
+  BROADCAST_COLORS,
+  POOL_PLAYER_ROW_FONT_SIZE,
+  sectionLabelStyle,
+  outerWrapperStyle,
+  bannerBackdropStyle,
+  cardStyle,
+  cardContentStyle,
+} from "./broadcast-theme";
 import { BroadcastTitleBar } from "./broadcast-title-bar";
 import { MARQUEE_KEYFRAMES_CSS } from "./marquee";
-import Banner from "../other-assets/backgrounds/bg.png";
 
 // Long fallback poll, same rationale as pool-results.tsx's
 // FALLBACK_POLL_INTERVAL_MS -- the Settings tab's refresh button
@@ -411,82 +418,52 @@ function BracketTreeInner({
           below, since @keyframes are referenced by name, not scoped to
           wherever they're declared. */}
       <style>{MARQUEE_KEYFRAMES_CSS}</style>
-      <div
-        style={{
-          // The card's base is the BODY font -- most of its text (match
-          // names, round headers) is body content. The title bar
-          // overrides to TITLE_FONT_FAMILY individually, below.
-          fontFamily: BODY_FONT_FAMILY,
-          // local-fonts.ts's @font-face only ever registers ONE weight
-          // (400) regardless of the supplied file's own native weight --
-          // without this, elements asking for 700/600 (round headers,
-          // winner names, the title bar) get a synthesized fake bold,
-          // which makes a custom display font look blurry instead of
-          // crisp. Inherited, so this reaches the SVG text below too.
-          fontSynthesis: "none",
-          // A fallback fill only -- the content wrapper below (its own
-          // sibling-of-the-banner, painted after it) is what actually
-          // hides the banner in steady state.
-          background: "rgb(17, 20, 24)",
-          borderRadius: 20,
-          overflow: "hidden",
-          display: "inline-block",
-          position: "relative",
-          color: COLORS.text,
-        }}
-      >
-        {/* Same soft out-of-focus banner backdrop as gauntlet-pools.tsx/
-            schedule.tsx -- isolated on its own absolutely-positioned
-            layer so `filter: blur()` never touches the sharp bracket
-            tree stacked on top of it. `inset: -20px` gives the blur room
-            to bleed past the card's own edges. */}
-        <div
-          style={{
-            position: "absolute",
-            inset: -20,
-            background: `url(${Banner}) center/cover no-repeat`,
-            filter: "blur(3px) brightness(0.55)",
-          }}
-        />
-        <div
-          style={{
-            // Opaque, same color as the outer wrapper's own fallback
-            // fill above -- this is what actually hides the banner:
-            // this div sits ON TOP of the blurred banner layer (a
-            // preceding sibling) in paint order and exactly matches its
-            // parent's own content box, so a solid fill here covers the
-            // banner completely, including the gaps between the title
-            // bar and the bracket below that would otherwise let it
-            // bleed through.
-            position: "relative",
-            background: "rgb(17, 20, 24)",
-            padding: 24,
-            display: "flex",
-            flexDirection: "column",
-            gap: 20,
-          }}
-        >
-          {/* Shared with gauntlet-pools.tsx's own title bar (same
-              component, not just similarly-styled). No subtitle in the
-              normal case -- phase.name only exists once `body` above has
-              real phase data, and lives inside `body` itself for that
-              reason, so the title bar can render immediately without
-              waiting on it. Only reused here for isStale's own small,
-              honest "this isn't fresh" indicator, which belongs beside
-              the title rather than stacked above body's own (possibly
-              stale, reused-from-cache) phase.name caption. */}
-          <BroadcastTitleBar
-            icon={icon}
-            title={title || "Bracket"}
-            subtitle={
-              isStale
-                ? result.error
-                  ? "Couldn't refresh — showing the last loaded bracket"
-                  : "Updating…"
-                : undefined
-            }
-          />
-          {body}
+      {/* Same whole-page shell gauntlet-pools.tsx's own pools diagram
+          uses (outerWrapperStyle/bannerBackdropStyle/cardStyle/
+          cardContentStyle, shared via broadcast-theme.ts) -- explicit
+          user request so switching the "Now showing" dropdown between
+          the two views never visibly changes the overall page
+          composition, only the content inside. Deliberately NOT
+          wrapped in that other view's own scroll container/auto-pan
+          camera though -- explicit user request to keep this view
+          static rather than add scrolling behavior it never had
+          before; a bracket wide enough to overflow this card just
+          clips at the canvas edge, same as it always has. */}
+      <div style={outerWrapperStyle}>
+        <div style={bannerBackdropStyle} />
+        <div style={cardStyle}>
+          <div style={cardContentStyle}>
+            {/* Shared with gauntlet-pools.tsx's own title bar (same
+                component, not just similarly-styled). No subtitle in the
+                normal case -- phase.name only exists once `body` above has
+                real phase data, and lives inside `body` itself for that
+                reason, so the title bar can render immediately without
+                waiting on it. Only reused here for isStale's own small,
+                honest "this isn't fresh" indicator, which belongs beside
+                the title rather than stacked above body's own (possibly
+                stale, reused-from-cache) phase.name caption. Plain static
+                positioning, not gauntlet-pools.tsx's own sticky-in-grid
+                treatment -- there's nothing to scroll away from here (see
+                this view's own no-camera doc above), so a sticky offset
+                would have nothing to stick against; it renders at the
+                same visual position either way since that other view's
+                own sticky title bar only ever visibly differs from plain
+                static positioning once its content has actually scrolled. */}
+            <div style={{ marginBottom: 20 }}>
+              <BroadcastTitleBar
+                icon={icon}
+                title={title || "Bracket"}
+                subtitle={
+                  isStale
+                    ? result.error
+                      ? "Couldn't refresh — showing the last loaded bracket"
+                      : "Updating…"
+                    : undefined
+                }
+              />
+            </div>
+            {body}
+          </div>
         </div>
       </div>
     </>
@@ -750,10 +727,23 @@ function BracketTree({
   const totalHeight = geo.height + BASE_PADDING * 2 + HEADER_HEIGHT;
   return (
     <div>
-      {/* No visible "Winners"/"Losers" text header above the tree
-          itself -- `label` still flows into the SVG's own <title>
-          below (screen readers/accessibility), just not rendered as
-          its own standalone heading here. */}
+      {/* Same section-label treatment gauntlet-pools.tsx's own pools
+          diagram uses for its "Winners Side Bracket"/"Losers Side
+          Bracket" captions (sectionLabelStyle, shared via
+          broadcast-theme.ts) -- explicit user request to bring the two
+          views' look in line; this used to render no visible label at
+          all here (label only reached the SVG's own <title> below, for
+          screen readers). Color carries the side identity, same
+          mint/coral convention as that other view. */}
+      <div
+        style={{
+          ...sectionLabelStyle,
+          color: label === "Winners" ? COLORS.mint : COLORS.coral,
+          marginBottom: 8,
+        }}
+      >
+        {label} Bracket
+      </div>
       <svg
         role="img"
         // Rendered size is SVG_SCALE times the natural geometry below --
@@ -1045,11 +1035,15 @@ function MatchBox({
   // document-wide for url(#id) to reliably resolve to the right
   // <clipPath>, not whichever same-named one happens to appear first.
   const nameClipIdBase = useId();
-  // Both a live and a called match get a thicker outline than a normal
-  // one -- read once here so the outline `<rect>` and the divider
-  // `<line>` below (which needs to stay clear of however thick that
-  // outline actually is, see its own comment) always agree.
-  const boxStrokeWidth = live || called ? 3 : 2;
+  // Flat 3px regardless of state -- matches gauntlet-pools.tsx's own
+  // PoolBox, whose border is always 3px too (only the COLOR swaps for
+  // live/upcoming, never the weight). Used to be 2px normally and only
+  // 3px for live/called, which also meant the divider `<line>` below
+  // (computed from this same value, so it never drifts out of sync)
+  // shifted its own inset by half a pixel every time a match's state
+  // changed -- a flat value removes that too, not just the box-to-box
+  // mismatch against PoolBox.
+  const boxStrokeWidth = 3;
   // Several rounds out with nothing determined yet -- dim it so the
   // still-active/decided matches read as the focus, not equally-weighted
   // clutter.
@@ -1200,7 +1194,13 @@ function MatchBox({
         y={0}
         width={BOX_WIDTH}
         height={MATCH_BOX_HEIGHT}
-        rx={6}
+        // 10, not 6 -- matches the soft glow rect's own rx just above
+        // (it was already 10, so a live match's square-ish 6px box used
+        // to sit oddly inside its own rounder halo), and reads closer
+        // to gauntlet-pools.tsx's own PoolBox (18px, on a much bigger
+        // box -- 10 is the proportionate match for MatchBox's much
+        // smaller footprint, not a literal copy of that number).
+        rx={10}
         fill={COLORS.panel}
         stroke={live ? COLORS.live : called ? COLORS.called : COLORS.border}
         strokeWidth={boxStrokeWidth}
@@ -1567,7 +1567,17 @@ function ElapsedTimerPill({
   const height = 22;
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
-      <rect width={LIVE_TIMER_WIDTH} height={height} rx={4} fill={color} />
+      {/* rx={height/2} (a true pill/capsule), not a barely-rounded
+          rx={4} rect -- matches PromotionPill's own shape further down
+          this file, and gauntlet-pools.tsx's statusPillStyle
+          (borderRadius: 999), whose "Live"/"Final"/"Upcoming" pill this
+          is the bracket view's own equivalent of. */}
+      <rect
+        width={LIVE_TIMER_WIDTH}
+        height={height}
+        rx={height / 2}
+        fill={color}
+      />
       {/* Baseline measured via verticalCenterBaselineY, not
           dominantBaseline="central" -- tried that first (matching
           IdentifierTag's own established pattern), but confirmed live it
@@ -1579,7 +1589,12 @@ function ElapsedTimerPill({
         x={LIVE_TIMER_WIDTH / 2}
         y={verticalCenterBaselineY(label, height / 2, 12, 700)}
         textAnchor="middle"
-        fill="#fff"
+        // COLORS.panel (dark), not white -- matches
+        // gauntlet-pools.tsx's own statusPillStyle convention (dark
+        // text on a bright colored pill, not white-on-bright, which
+        // reads as low-contrast against a bright fill like COLORS.live
+        // or COLORS.called).
+        fill={COLORS.panel}
         fontWeight={700}
         fontSize={12}
       >
@@ -1607,20 +1622,34 @@ function UpNextPill({
   const height = 22;
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
-      <rect width={UP_NEXT_PILL_WIDTH} height={height} rx={4} fill={color} />
+      {/* Same true-pill shape as ElapsedTimerPill -- see its own doc. */}
+      <rect
+        width={UP_NEXT_PILL_WIDTH}
+        height={height}
+        rx={height / 2}
+        fill={color}
+      />
       {/* Measured baseline, not dominantBaseline="central" -- see
           ElapsedTimerPill's own doc on this same fix, same reasoning
           applies here (mutually exclusive with it, but otherwise an
-          identical shape). */}
+          identical shape). "UP NEXT" (all-caps in the source text, not
+          a CSS textTransform -- SVG <text> here), matching
+          gauntlet-pools.tsx's own STATUS_LABELS pill convention
+          (Title Case source + textTransform: uppercase in HTML/CSS;
+          simplest to just spell it out directly for this one static
+          two-word SVG label rather than reach for a CSS property that
+          doesn't gain anything over hardcoding the two words). Same
+          COLORS.panel text fill fix as ElapsedTimerPill, for the same
+          contrast reason. */}
       <text
         x={UP_NEXT_PILL_WIDTH / 2}
-        y={verticalCenterBaselineY("Up Next", height / 2, 12, 700)}
+        y={verticalCenterBaselineY("UP NEXT", height / 2, 12, 700)}
         textAnchor="middle"
-        fill="#fff"
+        fill={COLORS.panel}
         fontWeight={700}
         fontSize={12}
       >
-        Up Next
+        UP NEXT
       </text>
     </g>
   );

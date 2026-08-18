@@ -32,10 +32,17 @@ import {
   LOCAL_FONT_FACE_CSS,
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
-import { BROADCAST_COLORS, statusPillStyle } from "./broadcast-theme";
+import {
+  BROADCAST_COLORS,
+  statusPillStyle,
+  sectionLabelStyle,
+  outerWrapperStyle,
+  bannerBackdropStyle,
+  cardStyle,
+  cardContentStyle,
+} from "./broadcast-theme";
 import { BroadcastTitleBar } from "./broadcast-title-bar";
 import { BracketTreeWithApiKey } from "./bracket-tree";
-import Banner from "../other-assets/backgrounds/bg.png";
 
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
@@ -522,19 +529,11 @@ export function GauntletPoolsWithCreds({
     // `height: contentHeight` overrides CSS auto-height (undefined on
     // first render falls through to ordinary auto-sizing).
     <div style={{ ...outerWrapperStyle, height: contentHeight }}>
-      {/* The banner art as a soft out-of-focus backdrop, fixed to the
-          screen rather than scrolling with the pools. A sibling of the
-          scroll container below, not a descendant, so native scrolling
-          never moves it. `inset: -20px` gives the blur room to bleed
-          past this wrapper's own edges. */}
-      <div
-        style={{
-          position: "absolute",
-          inset: -20,
-          background: `url(${Banner}) center/cover no-repeat`,
-          filter: "blur(3px)",
-        }}
-      />
+      {/* Shared with bracket-tree.tsx (bannerBackdropStyle) -- fixed to
+          the screen rather than scrolling with the pools. A sibling of
+          the scroll container below, not a descendant, so native
+          scrolling never moves it. */}
+      <div style={bannerBackdropStyle} />
       {/* Real native horizontal scroll, not a CSS transform. Scrollbar
           hidden -- scrolling here is entirely programmatic
           (recomputeScroll sets scrollLeft directly). */}
@@ -1305,15 +1304,6 @@ function ArrowCell({
   );
 }
 
-// Hosts the banner backdrop as a static layer and applies the
-// JS-measured contentHeight safety net. `overflow: hidden` clips the
-// banner's own `inset: -20px` blur-bleed.
-const outerWrapperStyle: React.CSSProperties = {
-  width: "100vw",
-  overflow: "hidden",
-  position: "relative",
-};
-
 // The actual scrolling element -- real native horizontal scroll, not a
 // CSS transform. `scrollBehavior: "smooth"` means a plain
 // `scrollEl.scrollLeft = x` assignment animates on its own.
@@ -1330,53 +1320,6 @@ const scrollContainerStyle: React.CSSProperties = {
 // styles can't target -- needs a real `<style>` tag.
 const HIDE_SCROLLBAR_CLASS = "gauntlet-pools-scroll-container";
 const HIDE_SCROLLBAR_CSS = `.${HIDE_SCROLLBAR_CLASS}::-webkit-scrollbar { display: none; }`;
-
-// One cohesive card. `position: relative` + `overflow: hidden` clips
-// its own rounded corners against whatever content sits inside.
-const cardStyle: React.CSSProperties = {
-  fontFamily: BODY_FONT_FAMILY,
-  // Explicit base size (every other size in this file is `em`, relative
-  // to this), checked against a true 1920x1080 broadcast canvas rather
-  // than left at the browser default.
-  fontSize: 28,
-  // local-fonts.ts's @font-face only ever registers ONE weight (400)
-  // regardless of the supplied file's native weight -- without this,
-  // elements asking for 700/600 get a synthesized fake bold, which
-  // makes a custom display font look blurry instead of crisp.
-  fontSynthesis: "none",
-  // This card sits on top of the banner and spans nearly the whole
-  // visible width, so its own opacity (not the banner's own brightness)
-  // is what actually controls how much banner shows through.
-  background: "rgba(17, 20, 24, 0.65)",
-  // Matches the banner's own square corners -- a rounded corner here
-  // left a triangular sliver of the banner's square edge showing
-  // through un-tinted.
-  borderRadius: 0,
-  position: "relative",
-  // No `overflow: hidden` -- any ancestor with an overflow value other
-  // than `visible` counts as a "scrolling ancestor" for sticky
-  // positioning, and this box (sized to its own content, so nothing
-  // overflows it) would become the nearer such ancestor over the real
-  // scroll container two levels up, breaking sticky on the title bar
-  // and section labels nested inside it.
-  display: "inline-block",
-  // `display: inline-block` alone sizes via shrink-to-fit, capped at
-  // the containing block's available width even when true content
-  // needs more -- clamped this card's pool columns down to their floor
-  // regardless of minmax's max side, spilling text past the border.
-  // `width: "max-content"` renders at the card's true natural width,
-  // scrolling horizontally in OBS if wider than the visible canvas.
-  width: "max-content",
-  color: COLORS.text,
-};
-
-// The padded content, layered above the banner via normal DOM order.
-// Padding lives here rather than on cardStyle, since that box is what
-// overflow:hidden clips the banner against.
-const cardContentStyle: React.CSSProperties = {
-  position: "relative",
-  padding: 40,
-};
 
 // `gridTemplateColumns` is built by the caller (GauntletPoolsOverlay's
 // own gridColumnTemplate) -- (pool, arrow) repeated once per distinct
@@ -1402,19 +1345,6 @@ function gridStyle(
   };
 }
 
-// Same "Winners"/"Losers" section-labeling idea as start.gg's own
-// bracket page and this app's own bracket-tree.tsx overlay. Text color
-// carries the side identity (COLORS.mint/coral, set per call site),
-// legible against the banner via a dark drop shadow rather than a
-// background shape.
-const sectionLabelStyle: React.CSSProperties = {
-  fontFamily: TITLE_FONT_FAMILY,
-  fontWeight: 700,
-  fontSize: "1.3em",
-  textTransform: "uppercase",
-  letterSpacing: "0.04em",
-  textShadow: "0 2px 6px rgba(0, 0, 0, 0.85)",
-};
 
 const boxStyle: React.CSSProperties = {
   display: "flex",
