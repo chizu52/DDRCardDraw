@@ -919,6 +919,12 @@ type PoolSlotDisplay =
  * should render there, no fallback to any other mechanism. A slot with
  * no code, or one that can't be resolved, says so plainly:
  *  - blank cell: "TBD" -- nothing stated yet, not an error.
+ *  - "N/A" (or "NA", case-insensitive, optional slash either way): this
+ *    seat is never getting filled by design -- a pool that's
+ *    permanently short a player, not one still waiting on a result.
+ *    Explicit user request to distinguish this from plain "TBD," which
+ *    implied "coming eventually." Checked before the shorthand parse
+ *    below since it isn't that shorthand at all, just a fixed keyword.
  *  - text that doesn't match the {rank}P{L?}{number}{letter?} shorthand
  *    at all, or names a pool that isn't currently loaded (a typo, or a
  *    renamed/removed pool): "TBD (Progression Code Error)" --
@@ -944,6 +950,9 @@ function resolveSlotDisplay(
   allPools: ParsedPool[],
 ): PoolSlotDisplay {
   if (!progressionCode) return { kind: "placeholder", label: "TBD" };
+  if (/^n\/?a$/i.test(progressionCode.trim())) {
+    return { kind: "placeholder", label: "N/A" };
+  }
   const parsed = parseProgressionCode(progressionCode);
   if (!parsed) return { kind: "placeholder", label: "TBD (Progression Code Error)" };
   const source = allPools.find(
