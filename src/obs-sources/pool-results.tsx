@@ -32,6 +32,8 @@ import {
   MARQUEE_KEYFRAMES_CSS,
   MarqueeText,
   useMarqueeDistances,
+  MARQUEE_SPEED_PX_PER_S,
+  MARQUEE_BASE_DURATION_S,
 } from "./marquee";
 
 // Scope is colors/fonts/status-pill styling only -- no banner backdrop
@@ -419,7 +421,7 @@ function PoolResultRow({
   );
   const nameDistance = marqueeDistances.get("name") ?? 0;
   const nameDuration =
-    POOL_MARQUEE_BASE_DURATION_S + nameDistance / POOL_MARQUEE_SPEED_PX_PER_S;
+    MARQUEE_BASE_DURATION_S + nameDistance / MARQUEE_SPEED_PX_PER_S;
   return (
     <tr style={{ backgroundColor }}>
       <td style={{ ...tdStyle, fontWeight: 500 }}>
@@ -489,16 +491,6 @@ function PoolResultRow({
     </tr>
   );
 }
-
-// Same "constant-ish scroll speed, proportional cycle length" reasoning
-// as schedule.tsx's own MARQUEE_SPEED_PX_PER_S/MARQUEE_BASE_DURATION_S
-// -- separate constants (not reused directly) since this overlay's own
-// font size/column width call for their own tuning, not schedule.tsx's.
-// Plain HTML/CSS px here (unlike bracket-tree.tsx's own SVG-local-unit
-// version), since this whole overlay has no extra SVG scale factor in
-// play.
-const POOL_MARQUEE_SPEED_PX_PER_S = 60;
-const POOL_MARQUEE_BASE_DURATION_S = 2.5;
 
 // Dark COLORS tokens now, not literal light-mode hex values -- explicit
 // user request to match gauntlet-pools.tsx/schedule.tsx's palette

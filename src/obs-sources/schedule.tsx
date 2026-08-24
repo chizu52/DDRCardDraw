@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
 import {
   DEFAULT_SCHEDULE_STATUS,
   type ScheduleDay,
@@ -22,6 +23,13 @@ import {
   BODY_FONT_FAMILY,
 } from "./local-fonts";
 import { BROADCAST_COLORS } from "./broadcast-theme";
+import {
+  MARQUEE_KEYFRAMES_CSS,
+  MarqueeText,
+  useMarqueeDistances,
+  MARQUEE_SPEED_PX_PER_S,
+  MARQUEE_BASE_DURATION_S,
+} from "./marquee";
 
 // The accent trio (mint/gold/coral) is shared with gauntlet-pools.tsx/
 // pool-results.tsx; currentBg/blue/red are this overlay's own additions
@@ -94,25 +102,6 @@ const ANIMATIONS_CSS = `
 @keyframes scheduleDayIn {
   from { opacity: 0; transform: translateY(-10px) scale(0.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
-}
-/* One fixed-shape cycle (pause at start / scroll out / pause at end /
-   fade out / snap back to start / fade in) shared by every MarqueeText
-   instance -- only animation-duration and the --marquee-distance custom
-   property vary per row, so a longer overflow gets a proportionally
-   longer cycle at a roughly constant scroll speed. Loops via a fade,
-   not a scroll back the way it came -- the "snap" at 82%/83% happens
-   while opacity is already 0, so it's invisible rather than a visible
-   jump. The fade out/in spans (78->82%, 83->87%) are half the width of
-   the pauses either side of them -- twice the speed -- so the reset
-   between loops reads as quick rather than lingering; the time that
-   frees up rolls into the final pause (87->100%) instead of shortening
-   the cycle's own total duration. */
-@keyframes scheduleMarqueeScroll {
-  0%, 10% { transform: translateX(0); opacity: 1; }
-  70%, 78% { transform: translateX(var(--marquee-distance, 0px)); opacity: 1; }
-  82% { transform: translateX(var(--marquee-distance, 0px)); opacity: 0; }
-  83% { transform: translateX(0); opacity: 0; }
-  87%, 100% { transform: translateX(0); opacity: 1; }
 }
 `;
 // Values that change WITHOUT the whole panel re-entering -- the day
@@ -524,121 +513,6 @@ function CenteredTimeText({
       {children}
     </div>
   );
-}
-
-// Constant-ish scroll speed across rows -- a longer overflow takes
-// proportionally longer to cross, rather than every row racing by (or
-// crawling) at the same fixed duration regardless of how much text
-// there actually is. MARQUEE_BASE_DURATION_S covers the pauses/fade
-// baked into scheduleMarqueeScroll's own keyframe shape.
-const MARQUEE_SPEED_PX_PER_S = 70;
-const MARQUEE_BASE_DURATION_S = 3;
-
-/** Single-line, overflow:hidden text that scrolls only when its content
- * is actually too wide for the row -- left completely static otherwise,
- * so a short event/description never animates for no reason. Loops via
- * a fade (see scheduleMarqueeScroll's own comment), not a scroll back
- * the way it came.
- *
- * Measurement (boxRef/contentRef/distance) and the animation's own
- * `duration` are owned by the CALLER (ScheduleRow), not this component
- * -- a row's event and description each have their own natural overflow
- * distance, so computing duration independently per instance would loop
- * them out of sync with each other. ScheduleRow measures both and
- * shares ONE duration (from whichever needs more time) between them, so
- * their scroll/fade cycles restart together. */
-function MarqueeText({
-  boxRef,
-  contentRef,
-  distance,
-  duration,
-  children,
-  style,
-}: {
-  boxRef: React.RefObject<HTMLDivElement | null>;
-  contentRef: React.RefObject<HTMLDivElement | null>;
-  distance: number;
-  duration: number;
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <div ref={boxRef} style={{ overflow: "hidden", whiteSpace: "nowrap" }}>
-      <div
-        ref={contentRef}
-        style={{
-          display: "inline-block",
-          ...(distance > 0
-            ? ({
-                "--marquee-distance": `-${distance}px`,
-                animation: `scheduleMarqueeScroll ${duration}s ease-in-out infinite`,
-              } as React.CSSProperties)
-            : null),
-          ...style,
-        }}
-      >
-        {children}
-      </div>
-    </div>
-  );
-}
-
-/** Measures scrollWidth against clientWidth for however many boxes are
- * given, keyed by whatever key the caller wants back (ScheduleRow uses
- * "event"/"description") -- shared by every MarqueeText in one row so
- * their durations can be derived from the SAME max-distance instead of
- * each computing its own independently (see MarqueeText's own doc).
- * Re-measures on resize and once every @font-face has actually finished
- * loading, same font-load re-measure concern as CenteredTimeText's own
- * comment explains. */
-function useMarqueeDistances(
-  boxes: {
-    key: string;
-    boxRef: React.RefObject<HTMLDivElement | null>;
-    contentRef: React.RefObject<HTMLDivElement | null>;
-  }[],
-  deps: unknown[],
-): Map<string, number> {
-  const [distances, setDistances] = useState<Map<string, number>>(new Map());
-
-  useLayoutEffect(() => {
-    // `.current` read HERE, inside the effect body -- not while building
-    // the `boxes` array up in the render body above, where refs haven't
-    // attached to their real DOM nodes yet (a real bug, found live: every
-    // row's own marquee silently never animated, since that render-time
-    // read always saw null and this effect's deps never gave it a
-    // reason to re-run once text stopped changing).
-    const present = boxes
-      .map(({ key, boxRef, contentRef }) => ({
-        key,
-        box: boxRef.current,
-        content: contentRef.current,
-      }))
-      .filter(
-        (b): b is { key: string; box: HTMLDivElement; content: HTMLDivElement } =>
-          !!b.box && !!b.content,
-      );
-    if (!present.length) return;
-    const measure = () => {
-      const next = new Map<string, number>();
-      for (const { key, box, content } of present) {
-        const overflow = content.scrollWidth - box.clientWidth;
-        next.set(key, overflow > 0 ? overflow : 0);
-      }
-      // eslint-disable-next-line react-hooks-js/set-state-in-effect
-      setDistances(next);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    for (const { box } of present) observer.observe(box);
-    void document.fonts.ready.then(measure);
-    return () => observer.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `boxes` is
-    // a fresh array/refs every render by construction; `deps` is the
-    // caller's own stand-in for "the actual text content changed."
-  }, deps);
-
-  return distances;
 }
 
 /** Compares two possibly-null DisplayTimes by their rendered text, not
@@ -1203,6 +1077,15 @@ export function Schedule() {
     <>
       <style>{FONT_FACE_CSS}</style>
       <style>{ANIMATIONS_CSS}</style>
+      {/* Shared with pool-results.tsx/bracket-tree.tsx (MARQUEE_KEYFRAMES_CSS)
+          -- this overlay used to keep its own separate, byte-identical
+          copy (scheduleMarqueeScroll) rather than importing this one,
+          specifically to avoid touching an already-tuned file for an
+          unrelated request; now retrofitted onto the shared version,
+          same canonical speed/duration every other overlay's marquee
+          uses -- explicit user request to make overflow text uniform
+          across every overlay, not just share the keyframe shape. */}
+      <style>{MARQUEE_KEYFRAMES_CSS}</style>
       {/* No key here (deliberately) -- this panel mounts once, when the
           overlay itself first loads, and then stays mounted for the
           whole OBS session. Its own entrance below plays that one time

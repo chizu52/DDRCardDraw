@@ -14,11 +14,14 @@ import { useLayoutEffect, useState } from "react";
  * pause (87->100%) instead of shortening the cycle's own total duration.
  *
  * Originally schedule.tsx's own `scheduleMarqueeScroll`, extracted here
- * once a second overlay (pool-results.tsx) needed the identical shape --
- * schedule.tsx keeps its own separate copy rather than importing this
- * one (see this file's own top-of-session history for why: a live
- * refactor of an already-tuned, unrelated-to-this-request file wasn't
- * worth the risk just for DRYness). Works identically on plain HTML
+ * once a second overlay (pool-results.tsx) needed the identical shape.
+ * schedule.tsx kept its own separate copy for a while after that (a
+ * live refactor of an already-tuned, unrelated-to-that-request file
+ * wasn't worth the risk just for DRYness at the time) -- since
+ * retrofitted onto this shared version too, explicit user request to
+ * make every overlay's overflow-text handling genuinely uniform, not
+ * just share a keyframe shape three separate copies happened to agree
+ * on. Works identically on plain HTML
  * elements (MarqueeText below) and on SVG elements (bracket-tree.tsx's
  * own hand-rolled clip-path version, which can't reuse MarqueeText
  * itself -- SVG has no `overflow: hidden` on an arbitrary box the way
@@ -33,6 +36,24 @@ export const MARQUEE_KEYFRAMES_CSS = `
   87%, 100% { transform: translateX(0); opacity: 1; }
 }
 `;
+
+/** The one canonical scroll speed/base-duration every marquee instance
+ * across every overlay uses -- explicit user request to make overflow
+ * text uniform everywhere, not just share the keyframe shape above.
+ * Previously three different overlays had independently tuned their
+ * own "looks about right" numbers (schedule.tsx: 70px/s + 3s;
+ * pool-results.tsx: 60px/s + 2.5s; bracket-tree.tsx: 40 SVG-local-
+ * units/s + 2s, which worked out to ~67 real screen px/s once scaled
+ * up by that file's own SVG_SCALE) -- picked THESE two values as the
+ * one target since pool-results.tsx (an HTML consumer, so its numbers
+ * are real screen px with no unit-conversion question) already used
+ * them. `duration = MARQUEE_BASE_DURATION_S + distance / MARQUEE_SPEED_PX_PER_S`
+ * is each caller's own formula (not baked in here, since bracket-
+ * tree.tsx's SVG version needs to convert this into its own local
+ * units via its own SVG_SCALE first -- see that file's own
+ * NAME_MARQUEE_SPEED_UNITS_PER_S). */
+export const MARQUEE_SPEED_PX_PER_S = 60;
+export const MARQUEE_BASE_DURATION_S = 2.5;
 
 /** Single-line, overflow:hidden text that scrolls only when its content
  * is actually too wide for the row -- left completely static otherwise,

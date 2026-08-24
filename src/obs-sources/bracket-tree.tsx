@@ -41,7 +41,11 @@ import {
   cardContentStyle,
 } from "./broadcast-theme";
 import { BroadcastTitleBar } from "./broadcast-title-bar";
-import { MARQUEE_KEYFRAMES_CSS } from "./marquee";
+import {
+  MARQUEE_KEYFRAMES_CSS,
+  MARQUEE_SPEED_PX_PER_S,
+  MARQUEE_BASE_DURATION_S,
+} from "./marquee";
 
 // Long fallback poll, same rationale as pool-results.tsx's
 // FALLBACK_POLL_INTERVAL_MS -- the Settings tab's refresh button
@@ -886,16 +890,23 @@ const MAX_PREFIX_WIDTH = 70;
 // text (see that constant's own doc). Only the clan tag prefix still
 // truncates (MAX_PREFIX_WIDTH above) -- it's secondary, static-by-design
 // information, not the primary thing a viewer is watching scroll by.
-// Speed/duration are in this SVG's own LOCAL units (pre-SVG_SCALE), not
-// real screen px -- unlike schedule.tsx's own MARQUEE_SPEED_PX_PER_S
-// (plain HTML, no extra scale factor in play), everything in this SVG,
-// including these two constants, gets multiplied by SVG_SCALE on screen
-// together, so expressing speed in the SAME local-unit space this text
-// itself is measured in keeps the apparent on-screen speed relative to
-// the text's own size consistent, which is what actually reads as
-// "reasonable" regardless of the final scale factor.
-const NAME_MARQUEE_SPEED_UNITS_PER_S = 40;
-const NAME_MARQUEE_BASE_DURATION_S = 2;
+// Speed is in this SVG's own LOCAL units (pre-SVG_SCALE), not real
+// screen px -- unlike marquee.tsx's own MARQUEE_SPEED_PX_PER_S (plain
+// HTML consumers, no extra scale factor in play), everything in this
+// SVG gets multiplied by SVG_SCALE on screen together, so expressing
+// speed in the SAME local-unit space this text itself is measured in
+// keeps the apparent on-screen speed relative to the text's own size
+// consistent regardless of the final scale factor. Still DERIVED from
+// the shared canonical MARQUEE_SPEED_PX_PER_S (divided by SVG_SCALE,
+// the exact factor this whole SVG gets scaled up by) rather than its
+// own independently-picked number, so the REAL on-screen speed a
+// viewer actually sees matches every other overlay's marquee exactly,
+// not just approximately -- explicit user request to make overflow
+// text uniform across every overlay, not just this file's own
+// internal consistency. Base duration doesn't need the same
+// conversion -- it's a plain time value, scale-invariant either way.
+const NAME_MARQUEE_SPEED_UNITS_PER_S = MARQUEE_SPEED_PX_PER_S / SVG_SCALE;
+const NAME_MARQUEE_BASE_DURATION_S = MARQUEE_BASE_DURATION_S;
 
 // Was a fixed character-count budget (e.g. "20 chars total, 15 for the
 // name") before this -- confirmed live that doesn't actually work well
