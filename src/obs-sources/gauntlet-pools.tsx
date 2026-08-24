@@ -337,8 +337,16 @@ export function GauntletPoolsWithCreds({
           `[data-pool-title="${CSS.escape(selectedPool)}"]`,
         )
       : null;
+    // No target -- either no pool is currently marked "Show on Overlay"
+    // (selectedPool null) or that title isn't in the DOM (a stale/
+    // renamed pool). Leaves scrollLeft exactly where it already is,
+    // rather than snapping back to 0 -- explicit user request: an
+    // operator clearing the live pool between matches (or switching
+    // away and back) shouldn't yank the camera back to the far left
+    // and lose whatever pool a viewer was just looking at; it should
+    // just hold there until a genuinely NEW pool is selected, which
+    // re-runs this same effect and pans normally.
     if (!target) {
-      scrollEl.scrollLeft = 0;
       return;
     }
     // target isn't a direct child of panEl, so walk the offsetParent
