@@ -1,9 +1,46 @@
 .container {
+  /* Bounded to the space TournamentModeAppShell's own flex layout
+     leaves below the sticky Header (same role main-view.tsx's own
+     TournamentModeAppMain plays for that sibling route) -- min-height
+     alone (the app-wide .container in app.css) never caps this div's
+     own height, so without this, a tall Settings/Pool Results panel
+     just grew the whole page and scrolled Header/tabs away with it.
+     overflow: hidden is what makes that bound real, and what .tabs
+     below needs from its own parent to carve out an independently-
+     scrolling content area under a fixed tab bar. */
+  flex: 1 1 0px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 1rem;
 }
 
 .container section {
   margin-bottom: 1rem;
+}
+
+/* Tabs stay fixed at the top while each panel's own content scrolls
+   independently underneath -- explicit user request to match the Card
+   Draw window's own tabs (main-view.css's .mainView, same technique,
+   not just a similar look). Blueprint's <Tabs> renders the tab-list
+   bar as its first child, then each panel as a later sibling (every
+   panel's own div coexists in the DOM regardless of which is active,
+   toggled by Blueprint's own CSS, not unmounted) -- splitting flex-grow
+   between :first-child (the bar, fixed) and the rest (each panel,
+   independently scrollable) is what pins the bar instead of the whole
+   page scrolling past it. */
+.tabs {
+  flex: 1 1 0px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tabs > div:first-child {
+  flex: 0 0 auto;
+}
+.tabs > div:not(:first-child) {
+  flex: 1 1 auto;
+  overflow-y: auto;
 }
 
 .textSourceCard {
