@@ -499,10 +499,26 @@ function MatchesImportPanel() {
                   />
                 </div>
                 <ButtonGroup>
+                  {/* Score Scope (see triggerCvCapture's own doc above)
+                      reads maimai DX's own on-screen score display --
+                      not a general-purpose reader, so importing from it
+                      only makes sense while the operator's chosen
+                      ScoreFormat is actually "maimaidx". Disabled
+                      (not hidden) with an explanatory title when it
+                      isn't, same "still visible, says why it's off"
+                      convention this file's other conditionally-off
+                      controls already use, rather than the button
+                      silently disappearing. */}
                   <Button
                     small
                     icon={<Import />}
                     loading={importingPool === pool.title}
+                    disabled={scoreFormat !== "maimaidx"}
+                    title={
+                      scoreFormat !== "maimaidx"
+                        ? "Score Scope reads maimai DX's own score display -- switch Score Format to maimai DX in Settings to use it"
+                        : undefined
+                    }
                     onClick={() => importPoolFromCapture(poolIdx, pool)}
                   >
                     Capture
