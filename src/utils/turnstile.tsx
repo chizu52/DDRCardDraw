@@ -94,7 +94,13 @@ export function TurnstileWidget({
       .then(() => {
         if (cancelled || !window.turnstile) return;
         widgetId = window.turnstile.render(el, {
-          sitekey: TURNSTILE_SITE_KEY,
+          // `as string`: TURNSTILE_SITE_KEY is always a string at runtime
+          // (webpack DefinePlugin always substitutes a JSON-stringified
+          // string here -- see webpack.config.js -- and the `|| ""`
+          // fallback above covers the unset case too), but some builds have
+          // inferred it as `{}` instead, likely a fork-ts-checker caching
+          // quirk rather than a real type change.
+          sitekey: TURNSTILE_SITE_KEY as string,
           // Stay hidden unless Cloudflare actually needs an interactive challenge from
           // this session (requires the site key's dashboard widget mode to be Managed,
           // not Invisible, or there's no interactive check left to reveal).
