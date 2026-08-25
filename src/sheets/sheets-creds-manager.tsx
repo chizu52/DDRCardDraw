@@ -100,6 +100,25 @@ export function SheetsCredsManager() {
           />
         </FormGroup>
       </form>
+      <form onSubmit={saveApiKey}>
+        <FormGroup
+          label={
+            <>
+              {"Sheets read-only API key, optional ("}
+              <a href={consoleLink} target="_blank" rel="noreferrer">
+                create one here
+              </a>
+              {", used for OBS Overlays that need to read from Sheets)"}
+            </>
+          }
+        >
+          <InputGroup
+            defaultValue={apiKey || undefined}
+            inputRef={apiKeyRef}
+            rightElement={<Button type="submit">Save</Button>}
+          />
+        </FormGroup>
+      </form>
       <form onSubmit={saveSheetId}>
         <FormGroup
           label={
@@ -114,31 +133,6 @@ export function SheetsCredsManager() {
             disabled={!token}
             defaultValue={spreadsheetId || undefined}
             inputRef={sheetIdRef}
-            rightElement={<Button type="submit">Save</Button>}
-          />
-        </FormGroup>
-      </form>
-      <form onSubmit={saveApiKey}>
-        <FormGroup
-          label={
-            <>
-              {"Sheets read-only API key, optional ("}
-              <a href={consoleLink} target="_blank" rel="noreferrer">
-                create one here
-              </a>
-              {", restricted to just the Sheets API) -- only used by the "}
-              <strong>pool-results OBS overlay</strong>
-              {", so it can show live results without needing the "}
-              {"Google-account popup above (which can't run inside OBS). "}
-              {"Only works against a spreadsheet shared as "}
-              <em>Anyone with the link can view</em>
-              {"."}
-            </>
-          }
-        >
-          <InputGroup
-            defaultValue={apiKey || undefined}
-            inputRef={apiKeyRef}
             rightElement={<Button type="submit">Save</Button>}
           />
         </FormGroup>
