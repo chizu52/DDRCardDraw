@@ -1,6 +1,7 @@
 .pnp.*
 .yarn/*
 .partykit/*
+.wrangler/*
 .env
 !.yarn/patches
 !.yarn/plugins

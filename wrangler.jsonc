@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Same project identity as the old partykit.json this replaces.
+  "name": "ddr-card-draw-party",
+  "main": "src/party/server.ts",
+  "compatibility_date": "2026-08-01",
+  // The old `partykit` CLI enabled Node.js API compatibility shims (process,
+  // Buffer, etc.) transparently as part of its build pipeline -- raw wrangler
+  // needs it declared explicitly. Several packages in the Redux state tree
+  // server.ts pulls in (via ../state/root-reducer) assume at least some of
+  // this is available.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Two Durable Object classes -- one per "party" from the old partykit.json
+  // (main room-sync + capture_bridge). Binding names are PascalCase on
+  // purpose: partyserver's routePartykitRequest kebab-cases binding names to
+  // build its routing table (CaptureBridge -> "capture-bridge"), so the URL
+  // path segment clients hit is the kebab-case form -- see host.ts.
+  "durable_objects": {
+    "bindings": [
+      { "name": "Main", "class_name": "Main" },
+      { "name": "CaptureBridge", "class_name": "CaptureBridge" }
+    ]
+  },
+
+  // Free-plan Cloudflare accounts can only provision SQLite-backed Durable
+  // Object namespaces (the old key-value backend is closed to new
+  // namespaces entirely, on any plan) -- this is the migration the old
+  // `partykit` CLI didn't know how to generate, which is the whole reason
+  // this project deploys via wrangler directly now instead.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Main", "CaptureBridge"]
+    }
+  ],
+
+  // Binds this Worker to party.soundvoltex.com as a Workers Custom Domain
+  // (not a path-pattern Route) -- `custom_domain: true` is what does that.
+  // The zone is already active on Cloudflare, so `wrangler deploy` alone
+  // provisions the DNS record and certificate, no separate steps needed.
+  "routes": [{ "pattern": "party.soundvoltex.com", "custom_domain": true }]
+
+  // SUPABASE_URL / SUPABASE_KEY are intentionally not declared here.
+  // Production: `wrangler secret put SUPABASE_URL` / `SUPABASE_KEY`.
+  // Local dev: a `.dev.vars` file (gitignored, same shape as .env.template).
+  // Omitting both is fine too -- server.ts disables supabase persistence
+  // gracefully when they're absent.
+}

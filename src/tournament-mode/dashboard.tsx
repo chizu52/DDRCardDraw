@@ -43,7 +43,9 @@ import ReactCodeMirror from "@uiw/react-codemirror";
 import { useAtom, useAtomValue } from "jotai";
 import { nanoid } from "nanoid";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useHref } from "react-router-dom";
+import { useHref, useParams } from "react-router-dom";
+import { captureBridgeEndpoint, PARTYKIT_HOST } from "../party/host";
+import { copyPlainTextToClipboard } from "../utils/share";
 import {
   colorToCss,
   googleClientIdAtom,
@@ -91,13 +93,14 @@ import {
 import styles from "./dashboard.css";
 import { iconLabel, localIcons } from "../obs-sources/local-icons";
 
-// Score Scope (the Python CV score reader) runs a small local HTTP
-// server so this button can trigger a fresh capture and get the read
-// scores back directly in the same response -- no Google Sheets
-// "Pending" tab in between anymore. Only reachable if that app is
-// running on the same machine as the browser -- if it's not, there's
-// nothing to import (see triggerCvCapture's null case).
-const CV_READER_TRIGGER_URL = "http://localhost:8765/capture";
+// Score Scope (the Python CV score reader) connects OUT to this room's
+// own "capture-bridge" party (see party/capture-bridge-server.ts) and
+// gets the read scores back directly in that same relayed response --
+// no Google Sheets "Pending" tab, and no longer a raw localhost URL
+// either, so this reaches Score Scope from any device that can reach
+// this app itself, not just the one machine Score Scope happens to be
+// running on. See MatchesImportPanel's own Score Scope Pairing section
+// for where the room/token Score Scope needs get displayed.
 const CV_READER_TRIGGER_TIMEOUT_MS = 35000;
 
 interface CvCaptureResult {
@@ -108,18 +111,27 @@ interface CvCaptureResult {
   results?: CaptureResultRow[];
 }
 
-/** Returns null if the CV reader isn't running/reachable. `pool` is
- * passed through so the CV reader can archive uncropped per-player source
+/** Returns null on a genuine network/timeout failure talking to ddr.
+ * tools' own capture-bridge party (this app's own backend -- normally
+ * always reachable, so null here usually means something's wrong with
+ * THIS connection, not with Score Scope). A capture-bridge response that
+ * successfully parses but says `ok: false` (e.g. "Score Scope isn't
+ * connected to this room") is NOT this case -- that's a normal, non-null
+ * result the caller handles via describeCaptureResult. `pool` is passed
+ * through so Score Scope can archive uncropped per-player source
  * screenshots under Matches/<pool>/ -- purely for building up reference
  * material, it has no effect on the returned results. */
-async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
+async function triggerCvCapture(
+  pool: string,
+  roomName: string,
+): Promise<CvCaptureResult | null> {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
     CV_READER_TRIGGER_TIMEOUT_MS,
   );
   try {
-    const res = await fetch(CV_READER_TRIGGER_URL, {
+    const res = await fetch(captureBridgeEndpoint(roomName), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pool }),
@@ -136,7 +148,11 @@ async function triggerCvCapture(pool: string): Promise<CvCaptureResult | null> {
 
 function describeCaptureResult(result: CvCaptureResult | null): string {
   if (result === null) {
-    return "CV reader isn't running -- nothing to import.";
+    // Couldn't reach ddr.tools' OWN backend (this app's own capture_
+    // bridge party) -- not the same as Score Scope itself being
+    // unreachable, which comes back as a normal {ok:false, reason}
+    // handled below instead.
+    return "Couldn't reach ddr.tools' server to request a capture.";
   }
   const archivedNote = result.archived
     ? ` Archived ${result.archived} source screenshot(s).`
@@ -181,6 +197,40 @@ interface ExportStatus {
   message: string;
 }
 
+/** One labeled, copyable value in the Score Scope Pairing section below
+ * -- Host/Room/Token are each shown this same way, so the operator can
+ * copy exactly one value at a time into Score Scope's own matching
+ * field rather than needing to select-and-copy from a longer combined
+ * string by hand. */
+function PairingField({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | null;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <span style={{ minWidth: "3.5rem", opacity: 0.7 }}>{label}:</span>
+      <code style={{ flex: 1, wordBreak: "break-all" }}>{value ?? "..."}</code>
+      <Button
+        icon={<Duplicate />}
+        minimal
+        small
+        disabled={!value}
+        title={`Copy ${label}`}
+        onClick={() =>
+          value &&
+          void copyPlainTextToClipboard(
+            value,
+            `Copied ${label.toLowerCase()} to clipboard`,
+          )
+        }
+      />
+    </div>
+  );
+}
+
 function MatchesImportPanel() {
   // useAtom (not useAtomValue) -- this tab now also WRITES sheetsTokenAtom
   // itself (see reconnectGoogle below), not just reads it.
@@ -219,6 +269,32 @@ function MatchesImportPanel() {
   const [status, setStatus] = useState<ExportStatus | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
   const [importingPool, setImportingPool] = useState<string | null>(null);
+  // Guaranteed by the route (this panel only ever mounts under
+  // "e/:roomName/..." -- see app.tsx) -- the `!` matches how every other
+  // room-scoped component here already treats it (e.g. PartySocketManager
+  // callers), not a new assumption.
+  const roomName = useParams<"roomName">().roomName!;
+  const [bridgeToken, setBridgeToken] = useState<string | null>(null);
+  useEffect(() => {
+    // Fetches (or lazily creates, server-side -- see capture-bridge-
+    // server.ts's getOrCreateToken) this room's Score Scope pairing
+    // token so the section below has something to show/copy. Best-
+    // effort: a failure here just leaves the section showing "..." --
+    // it doesn't block anything else on this tab, and the operator can
+    // reload to retry.
+    let cancelled = false;
+    fetch(captureBridgeEndpoint(roomName))
+      .then((res) => res.json())
+      .then((data: { token?: string }) => {
+        if (!cancelled && data.token) setBridgeToken(data.token);
+      })
+      .catch(() => {
+        // swallowed -- see comment above
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [roomName]);
 
   const loadPools = useCallback(async () => {
     if (!token || !spreadsheetId) return;
@@ -288,7 +364,7 @@ function MatchesImportPanel() {
   ) => {
     setImportingPool(pool.title);
     try {
-      const captureResult = await triggerCvCapture(pool.title);
+      const captureResult = await triggerCvCapture(pool.title, roomName);
       const captureNote = describeCaptureResult(captureResult);
 
       if (!captureResult?.ok || !captureResult.results?.length) {
@@ -427,6 +503,39 @@ function MatchesImportPanel() {
           />
         </ButtonGroup>
       </h1>
+      {/* Independent of the Google Sheets connection below -- pairing
+          Score Scope to this room has nothing to do with Sheets. Gated on
+          ScoreFormat "maimai DX" for the same reason the Capture button
+          itself is disabled otherwise (see that button's own comment
+          below): Score Scope only reads maimai DX's on-screen score
+          display, so there's nothing here worth showing -- or values
+          worth copying anywhere -- for any other format. One-time setup
+          once it is visible: copy these 3 values into Score Scope's own
+          "ddr.tools Pairing" section, and its Connect button (or its own
+          remembered-from-last-launch reconnect) handles the rest -- see
+          capture_bridge_client.py. */}
+      {scoreFormat === "maimaidx" && (
+        <Callout style={{ marginBottom: "1.25rem" }}>
+          <strong>Score Scope Pairing</strong>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.35rem",
+              marginTop: "0.5rem",
+            }}
+          >
+            <PairingField label="Host" value={PARTYKIT_HOST} />
+            <PairingField label="Room" value={roomName} />
+            <PairingField label="Token" value={bridgeToken} />
+          </div>
+          <p style={{ marginTop: "0.5rem", marginBottom: 0, opacity: 0.75 }}>
+            Copy these into Score Scope's own "ddr.tools Pairing" section
+            (Host/Room/Token + Connect) so its Capture button can reach this
+            room.
+          </p>
+        </Callout>
+      )}
       {status && (
         <Callout intent={status.type} style={{ marginBottom: "1rem" }}>
           {status.message}
@@ -626,7 +735,11 @@ function MatchesImportPanel() {
                       // pool-results.tsx's own PoolTable uses -- see
                       // row-colors.ts's own module doc.
                       const tierColor = rowColors
-                        ? rowColorForRank(ranks.get(rowIdx), status, rowColorTiers)
+                        ? rowColorForRank(
+                            ranks.get(rowIdx),
+                            status,
+                            rowColorTiers,
+                          )
                         : null;
                       const backgroundColor =
                         tierColor ??
@@ -675,7 +788,10 @@ function MatchesImportPanel() {
                                     poolIdx,
                                     rowIdx,
                                     j,
-                                    formatSongScore(e.target.value, scoreFormat),
+                                    formatSongScore(
+                                      e.target.value,
+                                      scoreFormat,
+                                    ),
                                   )
                                 }
                                 style={inputStyle}
@@ -1056,7 +1172,9 @@ function GauntletPoolsSettingsSection() {
             onChange={(e) => {
               const value = e.currentTarget.value;
               if (value === "") {
-                dispatch(eventSlice.actions.setGauntletPoolsShowsBracket(false));
+                dispatch(
+                  eventSlice.actions.setGauntletPoolsShowsBracket(false),
+                );
                 return;
               }
               // Picking the pending-bracket placeholder itself (see its
@@ -1134,7 +1252,9 @@ function GauntletPoolsDividerEditor() {
     // to fight; a brand-new divider (default beforeSetNumber: 1) lands
     // straight in its real sorted position instead of always at the
     // bottom regardless of its value.
-    setDividers((prev) => sortDividersByPoolNumber([...prev, emptyDividerRow()]));
+    setDividers((prev) =>
+      sortDividersByPoolNumber([...prev, emptyDividerRow()]),
+    );
     setDirty(true);
   }
 

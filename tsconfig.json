@@ -65,5 +65,12 @@
     /* Advanced Options */
     "forceConsistentCasingInFileNames": true /* Disallow inconsistently-cased references to the same file. */
   },
-  "include": ["src/**/*", "types/*"]
+  "include": ["src/**/*", "types/*"],
+  // The Workers backend under src/party has its own scoped tsconfig
+  // (src/party/tsconfig.json): it needs Cloudflare's runtime globals
+  // (DurableObjectState, etc.) instead of this project's DOM lib, and the
+  // two would conflict with each other in a single shared program (both
+  // declare `fetch`, `Response`, `WebSocket`, `crypto`, ... differently).
+  // See that file's own comment.
+  "exclude": ["src/party/**"]
 }

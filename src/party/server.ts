@@ -1,4 +1,10 @@
-import type * as Party from "partykit/server";
+import {
+  Server,
+  routePartykitRequest,
+  type Connection,
+  type ConnectionContext,
+  type WSMessage,
+} from "partyserver";
 import type {
   ActionAck,
   ActionReject,
@@ -14,24 +20,17 @@ import { configureStore } from "@reduxjs/toolkit";
 import { reducer } from "../state/root-reducer";
 import type { AppState } from "../state/store";
 
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "./database.types";
 import { applyMigrations } from "../state/migrations";
+import { CaptureBridge } from "./capture-bridge-server";
 
-function getSupabase() {
-  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
-    console.log("Your env both SUPABASE_URL and SUPABASE_KEY available.");
-    console.log("Disabling subpabase persistence.");
-    return;
-  }
-  return createClient<Database>(
-    process.env.SUPABASE_URL as string,
-    process.env.SUPABASE_KEY as string,
-    { auth: { persistSession: false } },
-  );
-}
-
-const supabase = getSupabase();
+// wrangler.jsonc's "main" points here -- Durable Object classes must be
+// exported from that entry script for durable_objects.bindings to resolve
+// them, and something has to provide the top-level fetch handler (below).
+// Folded into this file rather than a separate worker.ts/index.ts: it's
+// ~15 lines with no independent reason to exist on its own.
+export { CaptureBridge };
 
 function isAppState(state: unknown): state is AppState {
   if (state && !Array.isArray(state) && typeof state === "object") {
@@ -107,9 +106,32 @@ function describeError(e: unknown): string {
 
 const CORS_HEADERS = { "Access-Control-Allow-Origin": "*" };
 
-export default class Server implements Party.Server {
+/**
+ * Ported from the old `implements Party.Server` (partykit/server) shape to
+ * `extends Server` (partyserver), which deploys via plain `wrangler deploy`
+ * instead of the `partykit` CLI -- see wrangler.jsonc's own comment for why.
+ * Wire protocol, sync/dedupe/catch-up behavior, and persistence semantics
+ * are all unchanged; only the framework glue moved:
+ *   - `this.room.id` -> `this.name`
+ *   - `this.room.storage` -> `this.ctx.storage`
+ *   - `this.room.broadcast` / `this.room.getConnections()` -> `this.broadcast` / `this.getConnections()`
+ *   - `onMessage`'s params are (connection, message) instead of (message, sender)
+ *   - `onClose` gets (connection, code, reason, wasClean) instead of just (conn)
+ *   - `onError`'s error is `unknown` instead of `Error`
+ *   - SUPABASE_URL/SUPABASE_KEY come from `this.env` (a wrangler binding, set
+ *     via `wrangler secret put`) instead of `process.env` (which PartyKit's
+ *     own CLI shimmed in at build time -- raw Workers has no such shim, so
+ *     the old module-level `getSupabase()`/`const supabase = ...` singleton
+ *     became an instance-level lazy init in onStart() instead, since `env`
+ *     isn't available until the Durable Object actually exists).
+ */
+export class Main extends Server<Env> {
+  static options = { hibernate: true };
+
   // @ts-expect-error I assign this for sure
   private store: typeof appReduxStore;
+
+  private supabase: SupabaseClient<Database> | undefined;
 
   /** monotonic counter assigning the canonical order of applied actions */
   private seq = 0;
@@ -168,23 +190,41 @@ export default class Server implements Party.Server {
     };
   }
 
-  constructor(readonly room: Party.Room) {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
     console.log("constructor start");
   }
 
   /** emit a single greppable diagnostic line tagged with this room's id */
   private log(event: string, details = "") {
     console.log(
-      `${LOG_PREFIX} room=${this.room.id} ${event}${details ? ` ${details}` : ""}`,
+      `${LOG_PREFIX} room=${this.name} ${event}${details ? ` ${details}` : ""}`,
     );
   }
 
   /** current count of live connections, for correlating socket cycles */
   private connectionCount(): number {
-    return [...this.room.getConnections()].length;
+    return [...this.getConnections()].length;
+  }
+
+  /** builds (or leaves undefined) the Supabase client from wrangler-bound
+   * env vars -- see this class's own doc for why this moved here from a
+   * module-level singleton. Called once from onStart(); `this.env` isn't
+   * populated before the Durable Object actually starts. */
+  private initSupabase(): SupabaseClient<Database> | undefined {
+    if (!this.env.SUPABASE_URL || !this.env.SUPABASE_KEY) {
+      console.log("Your env is missing SUPABASE_URL and/or SUPABASE_KEY.");
+      console.log("Disabling supabase persistence.");
+      return undefined;
+    }
+    return createClient<Database>(this.env.SUPABASE_URL, this.env.SUPABASE_KEY, {
+      auth: { persistSession: false },
+    });
   }
 
   async onStart() {
+    this.supabase = this.initSupabase();
+
     let preloadedState: AppState | undefined;
     let source: "storage" | "supabase" | "fresh" = "fresh";
     let hydrateError: string | null = null;
@@ -206,7 +246,7 @@ export default class Server implements Party.Server {
       hydrateError = describeError(e);
       this.recordError("onStart", e);
       console.error(
-        `${LOG_PREFIX} room=${this.room.id} onStart:hydrate-error`,
+        `${LOG_PREFIX} room=${this.name} onStart:hydrate-error`,
         e,
       );
     }
@@ -220,7 +260,7 @@ export default class Server implements Party.Server {
     // (which would let a client's re-send be applied a second time)
     let metaSource = "none";
     try {
-      const meta = await this.room.storage.get<SyncMeta>(SYNC_META_KEY);
+      const meta = await this.ctx.storage.get<SyncMeta>(SYNC_META_KEY);
       if (meta) {
         this.seq = meta.seq;
         this.seenActionIds = new Map(meta.seenIds.map((id) => [id, meta.seq]));
@@ -229,7 +269,7 @@ export default class Server implements Party.Server {
     } catch (e) {
       metaSource = "error";
       console.error(
-        `${LOG_PREFIX} room=${this.room.id} onStart:syncMeta-error`,
+        `${LOG_PREFIX} room=${this.name} onStart:syncMeta-error`,
         e,
       );
     }
@@ -249,11 +289,11 @@ export default class Server implements Party.Server {
   }
 
   private async getFromSupabase() {
-    if (!supabase) return;
-    const { data, error } = await supabase
+    if (!this.supabase) return;
+    const { data, error } = await this.supabase
       .from("event_state")
       .select("state")
-      .eq("id", this.room.id)
+      .eq("id", this.name)
       .maybeSingle();
     if (error) {
       throw new Error(error.message);
@@ -262,10 +302,10 @@ export default class Server implements Party.Server {
   }
 
   private getFromStorage() {
-    return this.room.storage.get<AppState>("currentState");
+    return this.ctx.storage.get<AppState>("currentState");
   }
 
-  onRequest(req: Party.Request): Response | Promise<Response> {
+  onRequest(req: Request): Response | Promise<Response> {
     if (req.method === "GET") {
       // opt-in health snapshot: `?debug` reports how this room instance
       // hydrated and whether its writes are landing, without changing the
@@ -341,7 +381,7 @@ export default class Server implements Party.Server {
 
     return Response.json(
       {
-        room: this.room.id,
+        room: this.name,
         now: new Date().toISOString(),
         instance: {
           startedAt: new Date(this.instanceStartedAt).toISOString(),
@@ -356,7 +396,7 @@ export default class Server implements Party.Server {
         hydration: this.hydration,
         writes: {
           storage: { ...this.storageWrites, unsettled },
-          supabase: { ...this.supabaseWrites, enabled: !!supabase },
+          supabase: { ...this.supabaseWrites, enabled: !!this.supabase },
         },
         lastAction: this.lastAction,
         lastError: this.lastError,
@@ -390,12 +430,13 @@ export default class Server implements Party.Server {
   private async describeSupabase(
     memoryFingerprint: string,
   ): Promise<SnapshotInfo> {
-    if (!supabase) return { present: false, error: "supabase not configured" };
+    if (!this.supabase)
+      return { present: false, error: "supabase not configured" };
     try {
-      const { data, error } = await supabase
+      const { data, error } = await this.supabase
         .from("event_state")
         .select("state, updated_at")
-        .eq("id", this.room.id)
+        .eq("id", this.name)
         .maybeSingle();
       if (error) return { present: false, error: error.message };
       if (!data) return { present: false };
@@ -420,26 +461,30 @@ export default class Server implements Party.Server {
     }
   }
 
-  onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
+  onConnect(connection: Connection, ctx: ConnectionContext) {
     // A websocket just connected!
     console.log(
       `Connected:
-  id: ${conn.id}
-  room: ${this.room.id}
+  id: ${connection.id}
+  room: ${this.name}
   url: ${new URL(ctx.request.url).pathname}`,
     );
 
     const servedState = this.store.getState();
     this.log(
       "onConnect",
-      `conn=${conn.id} connections=${this.connectionCount()} serving roomstate seq=${this.seq} ${stateFingerprint(servedState)}`,
+      `conn=${connection.id} connections=${this.connectionCount()} serving roomstate seq=${this.seq} ${stateFingerprint(servedState)}`,
     );
 
     // send the initial state to this client
-    conn.send(JSON.stringify(this.roomstateMessage()));
+    connection.send(JSON.stringify(this.roomstateMessage()));
   }
 
-  async onMessage(message: string, sender: Party.Connection) {
+  async onMessage(connection: Connection, message: WSMessage) {
+    // clients only ever send text (JSON) frames; a non-string message
+    // (binary) isn't something this protocol defines.
+    if (typeof message !== "string") return;
+
     let parsed: ClientMessage;
     try {
       parsed = JSON.parse(message) as ClientMessage;
@@ -449,20 +494,20 @@ export default class Server implements Party.Server {
 
     switch (parsed.type) {
       case "ping":
-        sender.send(JSON.stringify(<Pong>{ type: "pong" }));
+        connection.send(JSON.stringify(<Pong>{ type: "pong" }));
         return;
       case "catchup":
-        this.handleCatchup(parsed, sender);
+        this.handleCatchup(parsed, connection);
         return;
       case "action":
-        await this.handleAction(parsed, sender, message);
+        await this.handleAction(parsed, connection, message);
         return;
     }
   }
 
   private async handleAction(
     parsed: ReduxAction,
-    sender: Party.Connection,
+    sender: Connection,
     rawMessage: string,
   ) {
     if (parsed.id && this.seenActionIds.has(parsed.id)) {
@@ -484,7 +529,7 @@ export default class Server implements Party.Server {
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error(
-        `${LOG_PREFIX} room=${this.room.id} action:rejected type=${parsed.action?.type} id=${parsed.id ?? "none"} seq=${this.seq}`,
+        `${LOG_PREFIX} room=${this.name} action:rejected type=${parsed.action?.type} id=${parsed.id ?? "none"} seq=${this.seq}`,
         e,
       );
       // seq is not consumed, the id is not remembered, nothing is broadcast:
@@ -504,12 +549,12 @@ export default class Server implements Party.Server {
         seq: this.seq,
       };
       this.rememberStampedAction(stamped);
-      this.room.broadcast(JSON.stringify(stamped));
+      this.broadcast(JSON.stringify(stamped));
     } else {
       // legacy client that can't recognize its own echo: relay the
       // unstamped action to everyone else only. It has no ack channel, so a
       // rejection can only be silent for these.
-      this.room.broadcast(rawMessage, [sender.id]);
+      this.broadcast(rawMessage, [sender.id]);
     }
 
     const nextState = this.store.getState();
@@ -524,14 +569,14 @@ export default class Server implements Party.Server {
       `type=${parsed.action?.type} id=${parsed.id ?? "none"} seq=${parsed.id ? this.seq : "n/a"} ${fingerprint}`,
     );
 
-    // persist to partykit storage: the state itself, plus the sequencer
+    // persist to durable storage: the state itself, plus the sequencer
     // metadata so dedupe/ordering survive a hibernation or restart. Both stay
     // fire-and-forget (unchanged behavior); wrapped only so we can observe
     // whether the write actually resolves before the room is evicted, or
     // rejects.
     this.storageWrites.started += 1;
     this.log("storage.put:start", fingerprint);
-    void this.room.storage
+    void this.ctx.storage
       .put("currentState", nextState)
       .then(() => {
         this.storageWrites.ok += 1;
@@ -543,13 +588,13 @@ export default class Server implements Party.Server {
         this.storageWrites.lastErrorAt = new Date().toISOString();
         this.recordError("storage.put", e);
         console.error(
-          `${LOG_PREFIX} room=${this.room.id} storage.put:error ${fingerprint}`,
+          `${LOG_PREFIX} room=${this.name} storage.put:error ${fingerprint}`,
           e,
         );
       });
 
     if (parsed.id) {
-      void this.room.storage
+      void this.ctx.storage
         .put<SyncMeta>(SYNC_META_KEY, {
           seq: this.seq,
           seenIds: Array.from(this.seenActionIds.keys()),
@@ -557,7 +602,7 @@ export default class Server implements Party.Server {
         .then(() => this.log("syncMeta.put:ok", `seq=${this.seq}`))
         .catch((e: unknown) =>
           console.error(
-            `${LOG_PREFIX} room=${this.room.id} syncMeta.put:error seq=${this.seq}`,
+            `${LOG_PREFIX} room=${this.name} syncMeta.put:error seq=${this.seq}`,
             e,
           ),
         );
@@ -565,13 +610,13 @@ export default class Server implements Party.Server {
 
     // persist the state to supabase
     try {
-      if (supabase) {
+      if (this.supabase) {
         // supabase returns errors in the result rather than throwing, so the
         // existing catch never saw them: capture and log the returned error
         // loudly, since a swallowed upsert failure would leave the served
         // snapshot stale on the next reconnect.
-        const { error } = await supabase.from("event_state").upsert({
-          id: this.room.id,
+        const { error } = await this.supabase.from("event_state").upsert({
+          id: this.name,
           state: nextState as unknown as Json,
           updated_at: new Date().toISOString(),
         });
@@ -580,7 +625,7 @@ export default class Server implements Party.Server {
           this.supabaseWrites.lastErrorAt = new Date().toISOString();
           this.recordError("supabase.upsert", error);
           console.error(
-            `${LOG_PREFIX} room=${this.room.id} supabase.upsert:error ${fingerprint}`,
+            `${LOG_PREFIX} room=${this.name} supabase.upsert:error ${fingerprint}`,
             error,
           );
         } else {
@@ -594,7 +639,7 @@ export default class Server implements Party.Server {
       this.supabaseWrites.lastErrorAt = new Date().toISOString();
       this.recordError("supabase.upsert", e);
       console.error(
-        `${LOG_PREFIX} room=${this.room.id} supabase.upsert:throw ${fingerprint}`,
+        `${LOG_PREFIX} room=${this.name} supabase.upsert:throw ${fingerprint}`,
         e,
       );
     }
@@ -605,7 +650,7 @@ export default class Server implements Party.Server {
    * `since`. If the gap reaches back further than our retained tail, fall
    * back to a full roomstate so the client resyncs wholesale.
    */
-  private handleCatchup(req: CatchupRequest, sender: Party.Connection) {
+  private handleCatchup(req: CatchupRequest, sender: Connection) {
     if (req.since >= this.seq) {
       // client is already current (or ahead); nothing to replay
       this.log(
@@ -646,27 +691,27 @@ export default class Server implements Party.Server {
     };
   }
 
-  onClose(conn: Party.Connection) {
+  onClose(connection: Connection) {
     // correlate socket cycles (flaky venue wifi) and potential hibernation with
     // whichever snapshot was last served/persisted for this room.
     this.log(
       "onClose",
-      `conn=${conn.id} connections=${this.connectionCount()} seq=${this.seq} ${stateFingerprint(this.store.getState())}`,
+      `conn=${connection.id} connections=${this.connectionCount()} seq=${this.seq} ${stateFingerprint(this.store.getState())}`,
     );
   }
 
-  onError(conn: Party.Connection, err: Error) {
+  onError(connection: Connection, error: unknown) {
     console.error(
-      `${LOG_PREFIX} room=${this.room.id} onError conn=${conn.id} seq=${this.seq}`,
-      err,
+      `${LOG_PREFIX} room=${this.name} onError conn=${connection.id} seq=${this.seq}`,
+      error,
     );
   }
 
-  private sendAck(conn: Party.Connection, id: string) {
+  private sendAck(conn: Connection, id: string) {
     conn.send(JSON.stringify(<ActionAck>{ type: "ack", id }));
   }
 
-  private sendReject(conn: Party.Connection, id: string, reason: string) {
+  private sendReject(conn: Connection, id: string, reason: string) {
     conn.send(JSON.stringify(<ActionReject>{ type: "reject", id, reason }));
   }
 
@@ -685,4 +730,25 @@ export default class Server implements Party.Server {
   }
 }
 
-Server satisfies Party.Worker;
+/**
+ * Replaces what the old `partykit` CLI generated automatically from
+ * partykit.json's `parties` map. `routePartykitRequest` matches
+ * `/parties/:server/:name` -- the same URL shape host.ts already builds
+ * (partykitEndpoint / captureBridgeEndpoint) -- against the Durable Object
+ * bindings in wrangler.jsonc, kebab-casing each binding name to get its URL
+ * segment (Main -> "main", CaptureBridge -> "capture-bridge"). See host.ts's
+ * own comment for why the capture bridge's URL uses a hyphen now instead of
+ * the underscore the old partykit.json party name used.
+ */
+export default {
+  async fetch(request: Request, env: Env) {
+    const response = await routePartykitRequest(request, env);
+    return (
+      response ??
+      new Response("Not found", {
+        status: 404,
+        headers: { "Access-Control-Allow-Origin": "*" },
+      })
+    );
+  },
+};
