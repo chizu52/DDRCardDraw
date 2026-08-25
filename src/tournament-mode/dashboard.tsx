@@ -274,27 +274,6 @@ function MatchesImportPanel() {
   // room-scoped component here already treats it (e.g. PartySocketManager
   // callers), not a new assumption.
   const roomName = useParams<"roomName">().roomName!;
-  const [bridgeToken, setBridgeToken] = useState<string | null>(null);
-  useEffect(() => {
-    // Fetches (or lazily creates, server-side -- see capture-bridge-
-    // server.ts's getOrCreateToken) this room's Score Scope pairing
-    // token so the section below has something to show/copy. Best-
-    // effort: a failure here just leaves the section showing "..." --
-    // it doesn't block anything else on this tab, and the operator can
-    // reload to retry.
-    let cancelled = false;
-    fetch(captureBridgeEndpoint(roomName))
-      .then((res) => res.json())
-      .then((data: { token?: string }) => {
-        if (!cancelled && data.token) setBridgeToken(data.token);
-      })
-      .catch(() => {
-        // swallowed -- see comment above
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [roomName]);
 
   const loadPools = useCallback(async () => {
     if (!token || !spreadsheetId) return;
@@ -503,39 +482,6 @@ function MatchesImportPanel() {
           />
         </ButtonGroup>
       </h1>
-      {/* Independent of the Google Sheets connection below -- pairing
-          Score Scope to this room has nothing to do with Sheets. Gated on
-          ScoreFormat "maimai DX" for the same reason the Capture button
-          itself is disabled otherwise (see that button's own comment
-          below): Score Scope only reads maimai DX's on-screen score
-          display, so there's nothing here worth showing -- or values
-          worth copying anywhere -- for any other format. One-time setup
-          once it is visible: copy these 3 values into Score Scope's own
-          "ddr.tools Pairing" section, and its Connect button (or its own
-          remembered-from-last-launch reconnect) handles the rest -- see
-          capture_bridge_client.py. */}
-      {scoreFormat === "maimaidx" && (
-        <Callout style={{ marginBottom: "1.25rem" }}>
-          <strong>Score Scope Pairing</strong>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.35rem",
-              marginTop: "0.5rem",
-            }}
-          >
-            <PairingField label="Host" value={PARTYKIT_HOST} />
-            <PairingField label="Room" value={roomName} />
-            <PairingField label="Token" value={bridgeToken} />
-          </div>
-          <p style={{ marginTop: "0.5rem", marginBottom: 0, opacity: 0.75 }}>
-            Copy these into Score Scope's own "ddr.tools Pairing" section
-            (Host/Room/Token + Connect) so its Capture button can reach this
-            room.
-          </p>
-        </Callout>
-      )}
       {status && (
         <Callout intent={status.type} style={{ marginBottom: "1rem" }}>
           {status.message}
@@ -838,6 +784,30 @@ function MatchesSettingsPanel() {
   const rowColorTiers = useAppState((s) => s.event.overlayRowColorTiers);
   const scoreFormat = useAppState((s) => s.event.overlayScoreFormat);
   const dispatch = useAppDispatch();
+  // Guaranteed by the route, same as MatchesImportPanel's own copy of
+  // this -- see that component's comment.
+  const roomName = useParams<"roomName">().roomName!;
+  const [bridgeToken, setBridgeToken] = useState<string | null>(null);
+  useEffect(() => {
+    // Fetches (or lazily creates, server-side -- see capture-bridge-
+    // server.ts's getOrCreateToken) this room's Score Scope pairing
+    // token so the section below has something to show/copy. Best-
+    // effort: a failure here just leaves the section showing "..." --
+    // it doesn't block anything else on this tab, and the operator can
+    // reload to retry.
+    let cancelled = false;
+    fetch(captureBridgeEndpoint(roomName))
+      .then((res) => res.json())
+      .then((data: { token?: string }) => {
+        if (!cancelled && data.token) setBridgeToken(data.token);
+      })
+      .catch(() => {
+        // swallowed -- see comment above
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [roomName]);
 
   return (
     // Each overlay's settings live in its own elevated Card -- previously
@@ -848,6 +818,34 @@ function MatchesSettingsPanel() {
     // than each section styling its own divider differently) is what
     // actually reads as "three separate things," not just three headings.
     <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+      {/* Not a tournament-overlay setting itself (that's what the group
+          below is for) -- placed ahead of it instead, above Score Format
+          specifically, since ScoreScope only reads maimai DX's on-screen
+          score display: gated the same way the Matches tab's own
+          Capture button already is, so there's nothing to show (or copy
+          anywhere) except while that format's actually selected. */}
+      {scoreFormat === "maimaidx" && (
+        <Card elevation={1} className={styles.settingsSection}>
+          <h3>ScoreScope Pairing</h3>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.35rem",
+              marginTop: "0.5rem",
+            }}
+          >
+            <PairingField label="Host" value={PARTYKIT_HOST} />
+            <PairingField label="Room" value={roomName} />
+            <PairingField label="Token" value={bridgeToken} />
+          </div>
+          <p style={{ marginTop: "0.5rem", marginBottom: 0, opacity: 0.75 }}>
+            Copy these into ScoreScope's own "ddr.tools Pairing" section
+            (Host/Room/Token + Connect) so its Capture button can reach this
+            room.
+          </p>
+        </Card>
+      )}
       {/* Groups the three bracket/pool-progress overlays, separately
           from ScheduleSettingsSection below (event timing, not
           tournament progress). elevation={0}, lower than the
