@@ -270,15 +270,17 @@ export function parsePoolsFromRows(rows: string[][]): ParsedSheet {
  * event.slice.ts), applied globally rather than per-overlay so a
  * Google Sheet's raw values always read the same way regardless of
  * which overlay (or the Matches tab's own editable table) is currently
- * looking at them. "maimaidx" is this app's original/default style --
- * a percentage to 4 decimal places, e.g. "98.5000%". "default" rounds
- * the SAME underlying value to a plain whole number with no "%" --
- * e.g. for games that score in raw points rather than a percentage.
- * This only changes how a value is DISPLAYED, never what's actually
- * stored -- see formatScoreValue below. */
+ * looking at them. "maimaidx" is this app's original style -- a
+ * percentage to 4 decimal places, e.g. "98.5000%". "default" (this
+ * app's own actual DEFAULT_SCORE_FORMAT below, despite the "maimaidx"
+ * name reading like the obvious default) rounds the SAME underlying
+ * value to a plain whole number with no "%" -- e.g. for games that
+ * score in raw points rather than a percentage. This only changes how
+ * a value is DISPLAYED, never what's actually stored -- see
+ * formatScoreValue below. */
 export type ScoreFormat = "maimaidx" | "default";
 
-export const DEFAULT_SCORE_FORMAT: ScoreFormat = "maimaidx";
+export const DEFAULT_SCORE_FORMAT: ScoreFormat = "default";
 
 /** Renders one already-parsed numeric score value in the given
  * ScoreFormat -- the single place both sumScores and formatSongScore
