@@ -41,11 +41,16 @@ locally-dropped files — without something to supply them, a production
 deploy always falls back to the system font stack, even if every
 developer's own machine has the real fonts sitting right there.
 
-`scripts/write-local-fonts.mjs` solves this: it's wired up as this
-project's own `prebuild` npm script (see `package.json`), so it runs
-automatically before every `build`, decoding base64-encoded fonts from
-environment variables and writing them into this folder before webpack
-ever looks for them.
+`scripts/write-local-fonts.mjs` solves this: it's chained directly into
+the start of this project's own `build` script (see `package.json`),
+decoding base64-encoded fonts from environment variables and writing
+them into this folder before webpack ever looks for them.
+
+(It's chained into `build` explicitly rather than using an npm-style
+`prebuild` hook, because this repo's pinned package manager is Yarn
+Berry, which intentionally doesn't run `pre`/`post` hooks for
+user-defined scripts -- a `prebuild` script would silently never run
+on a real Vercel deploy.)
 
 To set this up in Vercel's own dashboard (Project Settings →
 Environment Variables), for each font you want live on the deployed

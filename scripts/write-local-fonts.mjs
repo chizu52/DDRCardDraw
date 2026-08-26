@@ -15,10 +15,15 @@
  * what happened before this existed), even though the fonts were
  * "right there" on every dev's own machine.
  *
- * Wired up as an npm "prebuild" script (see package.json) -- npm/yarn
- * both run that automatically before "build", so this needs no
- * changes to vercel.json or webpack.config.js to take effect on a
- * real deploy.
+ * Chained directly into the start of the "build" script itself (see
+ * package.json), NOT wired up as an npm "prebuild" hook -- this repo's
+ * pinned package manager is Yarn Berry (see .yarnrc.yml), which
+ * intentionally does not run npm-style pre/post hooks for
+ * user-defined scripts like "build" (only preinstall/postinstall/
+ * prepack/postpack/prepublish are honored -- see
+ * https://yarnpkg.com/advanced/lifecycle-scripts). A "prebuild"
+ * script here would silently never run on a real Vercel deploy. No
+ * changes needed to vercel.json or webpack.config.js either way.
  *
  * No-ops silently (not a build failure) whenever a given font's env
  * vars aren't set -- same "fall back to the system font stack, don't
