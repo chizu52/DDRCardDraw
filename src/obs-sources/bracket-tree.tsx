@@ -14,7 +14,6 @@ import {
   winningSlotIndex,
   isSetLive,
   isSetCalled,
-  hasAnyEntrant,
   indexSetsById,
   indexWinnersEntrantIds,
   indexSeedProgressionById,
@@ -36,7 +35,6 @@ import {
   POOL_PLAYER_ROW_FONT_SIZE,
   sectionLabelStyle,
   outerWrapperStyle,
-  bannerBackdropStyle,
   cardStyle,
   cardContentStyle,
 } from "./broadcast-theme";
@@ -319,12 +317,52 @@ function BracketTreeInner({
   // honest indicator below rather than silently passing off old data as
   // current.
   let isStale = false;
+  // True whenever `body` is a genuine (fresh or cached) bracket render,
+  // as opposed to the loading/error/not-found placeholders further
+  // below -- drives whether the fit-to-canvas scaling further down
+  // applies at all. Scaling a tiny "Loading bracket…" caption or an
+  // error Callout up to fill the whole OBS canvas would look absurd;
+  // those stay at their own natural size.
+  let isBracketContent = false;
   if (result.data?.phase) {
     const phase = result.data.phase;
     const layout = layoutBracket(sets);
     const winnersEntrantIds = indexWinnersEntrantIds(layout.winners);
     const seedProgressionById = indexSeedProgressionById(
       phase.seeds?.nodes || [],
+    );
+    // The wider of the two sides' own totalWidth, so BOTH sides' <svg>
+    // elements resolve to the exact same real px-per-viewBox-unit ratio
+    // (see widthPercent's own doc in BracketTree) instead of each
+    // independently stretching to its own 100% and landing on two
+    // visibly different text/box sizes purely because one side has
+    // fewer rounds than the other. Each call below passes the SAME
+    // arguments its matching <BracketTree> call further down does
+    // (winnersEntrantIds only for Losers, never Winners -- see that
+    // prop's own doc) -- computeBracketDimensions is a pure function of
+    // its arguments, so mismatched arguments here would silently
+    // compute a different totalWidth than what actually renders.
+    const winnersDims = computeBracketDimensions(
+      layout.winners,
+      phase.id,
+      setsById,
+      undefined,
+      seedProgressionById,
+      phantomSetsById,
+    );
+    const losersDims = layout.losers
+      ? computeBracketDimensions(
+          layout.losers,
+          phase.id,
+          setsById,
+          winnersEntrantIds,
+          seedProgressionById,
+          phantomSetsById,
+        )
+      : null;
+    const widthBasis = Math.max(
+      winnersDims.totalWidth,
+      losersDims?.totalWidth ?? 0,
     );
     body = (
       <>
@@ -347,6 +385,7 @@ function BracketTreeInner({
             nowMs={nowMs}
             seedProgressionById={seedProgressionById}
             phantomSetsById={phantomSetsById}
+            widthBasis={widthBasis}
           />
           {layout.losers && (
             <BracketTree
@@ -363,15 +402,18 @@ function BracketTreeInner({
               winnersEntrantIds={winnersEntrantIds}
               seedProgressionById={seedProgressionById}
               phantomSetsById={phantomSetsById}
+              widthBasis={widthBasis}
             />
           )}
         </div>
       </>
     );
     lastGoodBodyRef.current = body;
+    isBracketContent = true;
   } else if (result.fetching && lastGoodBodyRef.current) {
     body = lastGoodBodyRef.current;
     isStale = true;
+    isBracketContent = true;
   } else if (result.fetching) {
     // The genuine first-ever load, nothing cached yet -- this message is
     // already its own self-explanatory loading state, not a stale
@@ -390,6 +432,7 @@ function BracketTreeInner({
     // over.
     body = lastGoodBodyRef.current;
     isStale = true;
+    isBracketContent = true;
   } else if (result.error) {
     body = (
       <Callout intent="danger" style={{ maxWidth: 480 }}>
@@ -411,6 +454,33 @@ function BracketTreeInner({
     );
   }
 
+  // The card fills the canvas's own width (100%, not cardStyle's usual
+  // `width: max-content`) so a bracket wide enough to have overflowed
+  // and silently clipped at the canvas edge (see outerWrapperStyle's
+  // own `overflow: hidden` in broadcast-theme.ts -- confirmed live on a
+  // real Stage 2 bracket) instead scales down to fit, and a narrow one
+  // scales up to use the full canvas. Overridden locally here, not in
+  // the shared cardStyle constant itself -- gauntlet-pools.tsx's own
+  // pools diagram keeps its own max-content card unchanged, since it
+  // already handles overflow its own way (a scroll/pan camera, see its
+  // own scrollContainerStyle) that this view was explicitly asked NOT
+  // to add.
+  //
+  // The actual scaling math lives entirely in each <BracketTree>'s own
+  // <svg> now (CSS percentage width + aspect-ratio, see widthPercent's
+  // own doc there) -- not measured/applied here via JS. An earlier
+  // version of this used a ResizeObserver + window-resize listener to
+  // measure the card's real pixel size and apply `transform: scale()`
+  // by hand; replaced with plain CSS for the same reason the rest of
+  // this app already prefers it (see song-card.css's own `.chart`,
+  // flex-sized between a min/max width with zero JS involved) -- the
+  // browser reflows this correctly on its own, with no measured state,
+  // no effects, and none of the "guard against an infinite render loop"
+  // complexity a JS version needs.
+  const cardStyleForBracket: React.CSSProperties = isBracketContent
+    ? { ...cardStyle, width: "100%" }
+    : cardStyle;
+
   return (
     <>
       {/* A plain `style` prop can't express @font-face -- see
@@ -423,19 +493,19 @@ function BracketTreeInner({
           wherever they're declared. */}
       <style>{MARQUEE_KEYFRAMES_CSS}</style>
       {/* Same whole-page shell gauntlet-pools.tsx's own pools diagram
-          uses (outerWrapperStyle/bannerBackdropStyle/cardStyle/
-          cardContentStyle, shared via broadcast-theme.ts) -- explicit
-          user request so switching the "Now showing" dropdown between
-          the two views never visibly changes the overall page
-          composition, only the content inside. Deliberately NOT
-          wrapped in that other view's own scroll container/auto-pan
-          camera though -- explicit user request to keep this view
-          static rather than add scrolling behavior it never had
-          before; a bracket wide enough to overflow this card just
-          clips at the canvas edge, same as it always has. */}
+          uses (outerWrapperStyle/cardStyle/cardContentStyle, shared via
+          broadcast-theme.ts) -- explicit user request so switching the
+          "Now showing" dropdown between the two views never visibly
+          changes the overall page composition, only the content
+          inside. Deliberately NOT wrapped in that other view's own
+          scroll container/auto-pan camera though -- explicit user
+          request to keep this view static rather than add scrolling
+          behavior it never had before. Instead, cardStyleForBracket
+          above fills the canvas width and each <BracketTree> scales
+          its own <svg> to match -- see that block's own comment for
+          why. */}
       <div style={outerWrapperStyle}>
-        <div style={bannerBackdropStyle} />
-        <div style={cardStyle}>
+        <div style={cardStyleForBracket}>
           <div style={cardContentStyle}>
             {/* Shared with gauntlet-pools.tsx's own title bar (same
                 component, not just similarly-styled). No subtitle in the
@@ -452,7 +522,10 @@ function BracketTreeInner({
                 would have nothing to stick against; it renders at the
                 same visual position either way since that other view's
                 own sticky title bar only ever visibly differs from plain
-                static positioning once its content has actually scrolled. */}
+                static positioning once its content has actually scrolled.
+                Deliberately NOT part of cardStyleForBracket's own width-
+                driven scaling -- explicit user request to leave the title
+                bar's own sizing alone for now. */}
             <div style={{ marginBottom: 20 }}>
               <BroadcastTitleBar
                 icon={icon}
@@ -607,22 +680,33 @@ async function fetchPhantomSets(
 // constant) -- SVG_SCALE below is computed against it, not a re-tuned
 // literal, so the two can never quietly drift apart from each other.
 const PLAYER_NAME_FONT_SIZE = 15;
-// The whole bracket <svg> renders at this many times its own natural
-// width/height (viewBox stays at the ORIGINAL, unscaled coordinate
-// space) -- standard SVG technique, scales every child (text, strokes,
-// pills, connectors, everything) proportionally for free. Exists so this
-// view's player names visually match gauntlet-pools.tsx's own PoolBox
-// rows exactly (POOL_PLAYER_ROW_FONT_SIZE, see its own doc in
-// broadcast-theme.ts) -- the two views were tuned independently before,
-// to two "looks about right" sizes that didn't actually match, so
-// switching the "Now showing" dropdown between them made every name
-// suddenly jump ~68% larger or smaller. Deliberately NOT hand-retuning
-// BOX_WIDTH/ROW_HEIGHT/every other constant below by this same ratio
-// instead -- they're already carefully tuned relative to EACH OTHER (see
-// this component's own "tightened toward start.gg's own compact
-// proportions" comment just below), and re-deriving a dozen of them by
-// hand risks quietly missing one; scaling the rendered SVG uniformly
-// can't miss anything since there's nothing left to individually retune.
+// No longer the bracket <svg>'s own literal pixel multiplier -- its
+// rendered size is CSS-driven now (see widthPercent's own doc on
+// BracketTree), so the actual real px-per-viewBox-unit ratio varies
+// with the OBS canvas's own width instead of being fixed at this
+// value. Still exists as NAME_MARQUEE_SPEED_UNITS_PER_S's own baseline
+// reference below (converting the shared canonical real-px/s marquee
+// speed into this SVG's local units) -- that's an accepted
+// approximation, not a bug: the marquee's true on-screen speed already
+// varies with the canvas size too now, same as everything else in this
+// view, and re-deriving it from the CSS-resolved width at animation
+// time would need its own measurement/effect machinery for a cosmetic
+// speed wobble nobody's flagged as a problem.
+//
+// Originally: the whole bracket <svg> rendered at this many times its
+// own natural width/height (viewBox at the ORIGINAL, unscaled
+// coordinate space) specifically so this view's player names visually
+// matched gauntlet-pools.tsx's own PoolBox rows exactly
+// (POOL_PLAYER_ROW_FONT_SIZE, see its own doc in broadcast-theme.ts)
+// -- the two views were tuned independently before, to two "looks
+// about right" sizes that didn't actually match, so switching the "Now
+// showing" dropdown between them made every name suddenly jump ~68%
+// larger or smaller. That exact match no longer holds once the canvas
+// width pushes the real scale away from this ratio -- an accepted
+// tradeoff of making the view fill the canvas at all, not a regression
+// specific to this refactor (a JS-measured `transform: scale()`
+// version of the same canvas-fitting idea would have the identical
+// effect on text size).
 const SVG_SCALE = POOL_PLAYER_ROW_FONT_SIZE / PLAYER_NAME_FONT_SIZE;
 
 // Tightened up from this component's first "readability" pass to read
@@ -649,6 +733,60 @@ const HEADER_HEIGHT = 38;
 const PILL_MARGIN = 200;
 const BASE_PADDING = 16;
 
+/** The true, unscaled pixel footprint (viewBox units) one side's whole
+ * drawing needs -- BracketTreeInner calls this once per side (before
+ * either <BracketTree> renders) purely to find widthBasis, the wider
+ * of the two, and BracketTree calls it again internally for its own
+ * totalWidth/totalHeight. One function, not two copies of the same
+ * padding/pill logic that could quietly drift out of sync -- see
+ * widthBasis's own doc in BracketTreeInner for why both sides need to
+ * agree on the same basis in the first place. */
+function computeBracketDimensions(
+  side: LayoutSide,
+  currentPhaseId: string,
+  setsById: SetsById,
+  winnersEntrantIds: WinnersEntrantIds | undefined,
+  seedProgressionById: SeedProgressionById | undefined,
+  phantomSetsById: PhantomSetsById | undefined,
+): { totalWidth: number; totalHeight: number; paddingLeft: number } {
+  const geo = computeSideGeometry(side, {
+    boxWidth: BOX_WIDTH,
+    colGap: COL_GAP,
+    boxHeight: MATCH_BOX_HEIGHT,
+    dividerOffset: ROW_DIVIDER_Y - MATCH_BOX_HEIGHT / 2,
+  });
+  const hasLeftPill = (side.columns[0] || []).some((m) =>
+    (m.set.slots || []).some((s) =>
+      incomingProgressionLabel(
+        s,
+        currentPhaseId,
+        winnersEntrantIds,
+        seedProgressionById,
+        setsById,
+        phantomSetsById,
+      ),
+    ),
+  );
+  const hasRightPill = side.columns.some((col) =>
+    col.some((m) => {
+      const prog = outgoingProgression(m.set, setsById);
+      return (
+        prog.winner || prog.loser || isSetLive(m.set) || isSetCalled(m.set)
+      );
+    }),
+  );
+  const paddingLeft = BASE_PADDING + (hasLeftPill ? PILL_MARGIN : 0);
+  const paddingRight = BASE_PADDING + (hasRightPill ? PILL_MARGIN : 0);
+  return {
+    totalWidth: geo.width + paddingLeft + paddingRight,
+    totalHeight: geo.height + BASE_PADDING * 2 + HEADER_HEIGHT,
+    // Returned too, not just folded into totalWidth -- BracketTree's
+    // own render still needs this alone, to know where its drawing
+    // group starts (translateX), not just the final total.
+    paddingLeft,
+  };
+}
+
 function BracketTree({
   label,
   side,
@@ -658,6 +796,7 @@ function BracketTree({
   winnersEntrantIds,
   seedProgressionById,
   phantomSetsById,
+  widthBasis,
 }: {
   label: string;
   side: LayoutSide;
@@ -667,6 +806,13 @@ function BracketTree({
   winnersEntrantIds?: WinnersEntrantIds;
   seedProgressionById?: SeedProgressionById;
   phantomSetsById?: PhantomSetsById;
+  /** The wider of the two sides' own totalWidth (see
+   * computeBracketDimensions), computed once by BracketTreeInner
+   * before either side renders -- this side's own <svg> width becomes
+   * `(its own totalWidth / widthBasis) * 100%`, so whichever side IS
+   * the widest renders at exactly 100% and the other scales down to
+   * match its real px-per-unit ratio, not its own independent 100%. */
+  widthBasis: number;
 }) {
   const geo = computeSideGeometry(side, {
     boxWidth: BOX_WIDTH,
@@ -701,34 +847,29 @@ function BracketTree({
   // box on this side, not one per box -- the blur radius is identical
   // either way, no reason to duplicate the <filter> itself per match.
   const liveGlowFilterId = `live-match-glow-${useId()}`;
-  const hasLeftPill = (side.columns[0] || []).some((m) =>
-    (m.set.slots || []).some((s) =>
-      incomingProgressionLabel(
-        s,
-        currentPhaseId,
-        winnersEntrantIds,
-        seedProgressionById,
-        setsById,
-        phantomSetsById,
-      ),
-    ),
+  // Same computeBracketDimensions call BracketTreeInner already made
+  // for both sides (to find widthBasis, below) -- not a second,
+  // independently-written copy of the same padding/pill logic, just
+  // the same pure function run again for this side alone. geo itself
+  // (above) still comes from its own direct computeSideGeometry call,
+  // not from this -- this only returns the two final totals, not the
+  // full per-column layout BracketTree's own JSX still needs.
+  const { totalWidth, totalHeight, paddingLeft } = computeBracketDimensions(
+    side,
+    currentPhaseId,
+    setsById,
+    winnersEntrantIds,
+    seedProgressionById,
+    phantomSetsById,
   );
-  const hasRightPill = side.columns.some((col) =>
-    col.some((m) => {
-      const prog = outgoingProgression(m.set, setsById);
-      // isSetLive/isSetCalled too -- either one's own right-side status
-      // pill (ticking timer / "Up Next") needs the same room as an
-      // outgoing promotion pill, even on a match with no promotion pill
-      // of its own (see MatchBox's hasStatusPill).
-      return (
-        prog.winner || prog.loser || isSetLive(m.set) || isSetCalled(m.set)
-      );
-    }),
-  );
-  const paddingLeft = BASE_PADDING + (hasLeftPill ? PILL_MARGIN : 0);
-  const paddingRight = BASE_PADDING + (hasRightPill ? PILL_MARGIN : 0);
-  const totalWidth = geo.width + paddingLeft + paddingRight;
-  const totalHeight = geo.height + BASE_PADDING * 2 + HEADER_HEIGHT;
+  // The wider of the two sides (winners/losers) always renders at
+  // 100% -- this one's own share of that same basis, so both sides
+  // land on the exact same real px-per-viewBox-unit ratio once the
+  // browser resolves the percentage, instead of each independently
+  // stretching to fill 100% of the card and ending up at two visibly
+  // different text/box sizes purely because one side has fewer rounds
+  // than the other. See widthBasis's own doc in BracketTreeInner.
+  const widthPercent = (totalWidth / widthBasis) * 100;
   return (
     <div>
       {/* Same section-label treatment gauntlet-pools.tsx's own pools
@@ -742,6 +883,12 @@ function BracketTree({
       <div
         style={{
           ...sectionLabelStyle,
+          // Overridden to 300 here specifically, not in sectionLabelStyle
+          // itself -- explicit user request for lighter text across this
+          // view only; gauntlet-pools.tsx's own "Winners/Losers Side
+          // Bracket" captions still use sectionLabelStyle's own 700
+          // unchanged, since that wasn't asked for.
+          fontWeight: 300,
           color: label === "Winners" ? COLORS.mint : COLORS.coral,
           marginBottom: 8,
         }}
@@ -750,13 +897,30 @@ function BracketTree({
       </div>
       <svg
         role="img"
-        // Rendered size is SVG_SCALE times the natural geometry below --
-        // viewBox stays at the true, unscaled totalWidth/totalHeight, so
-        // every child renders at its own normal coordinates and the
-        // browser scales the whole result uniformly to fit. See
-        // SVG_SCALE's own doc for why this exists.
-        width={totalWidth * SVG_SCALE}
-        height={totalHeight * SVG_SCALE}
+        // CSS-driven, not a fixed pixel width/height -- viewBox stays at
+        // the true, unscaled totalWidth/totalHeight (every child keeps
+        // rendering at its own normal coordinates), and the browser
+        // scales the whole result uniformly to whatever `width` actually
+        // resolves to at layout time. widthPercent (this side's own
+        // share of widthBasis, see its own doc above) is what makes the
+        // wider side fill the card exactly and the narrower side match
+        // its real px-per-unit ratio instead of independently stretching
+        // to its own 100%. `aspectRatio` derives height from that same
+        // resolved width automatically -- no JS measurement, no
+        // ResizeObserver, no window-resize listener: this is the exact
+        // "let CSS reflow it" mechanism the rest of this app's own card
+        // grid already uses (song-card.css's `.chart`, flex-sized between
+        // its own min/max width), not a hand-rolled equivalent. Replaces
+        // an earlier version that measured the card's real pixel size via
+        // ResizeObserver and applied `transform: scale()` by hand --
+        // functionally the same end result, but as actual browser-native
+        // responsive sizing instead of JS-computed state.
+        style={{
+          width: `${widthPercent}%`,
+          height: "auto",
+          aspectRatio: `${totalWidth} / ${totalHeight}`,
+          display: "block",
+        }}
         viewBox={`0 0 ${totalWidth} ${totalHeight}`}
       >
         <title>{label} bracket</title>
@@ -794,7 +958,7 @@ function BracketTree({
                   x={x}
                   y={HEADER_HEIGHT - 26}
                   fontSize={13}
-                  fontWeight={700}
+                  fontWeight={300}
                   fill={isCurrent ? COLORS.text : COLORS.muted}
                 >
                   {colMatches[0]?.set.fullRoundText || ""}
@@ -1055,10 +1219,6 @@ function MatchBox({
   // changed -- a flat value removes that too, not just the box-to-box
   // mismatch against PoolBox.
   const boxStrokeWidth = 3;
-  // Several rounds out with nothing determined yet -- dim it so the
-  // still-active/decided matches read as the focus, not equally-weighted
-  // clutter.
-  const isFarOut = !live && winIdx === null && !hasAnyEntrant(set);
   const outgoing = outgoingProgression(set, setsById);
   // Only the very first column of a side has entry-point slots (filled
   // directly by seed, not by a prior same-phase set) -- everywhere else,
@@ -1123,7 +1283,7 @@ function MatchBox({
   }
 
   return (
-    <g transform={`translate(${x},${y})`} opacity={isFarOut ? 0.5 : 1}>
+    <g transform={`translate(${x},${y})`}>
       {/* A very subtle, slowly breathing glow behind the box's own solid
           outline -- confirmed live: rendering this BEFORE the outline
           rect (not after) is what makes it read as a soft halo peeking
@@ -1318,7 +1478,10 @@ function MatchBox({
         // Same weight the <text> below actually renders this row at --
         // measuring at any other weight would size-check against a
         // slightly different rendered width than what really shows up.
-        const rowFontWeight = isWinner ? 700 : 400;
+        // Flat 300 regardless of isWinner now -- explicit user request
+        // for lighter text across this whole view; winner/loser is
+        // still distinguished by nameColor, just not by weight anymore.
+        const rowFontWeight = 300;
         // Only a real, filled slot has a clan tag to show -- a
         // placeholder/TBD row's own "name" text (e.g. "winner of A") has
         // no entrant, so this is naturally null for those already.
@@ -1403,7 +1566,7 @@ function MatchBox({
                   y={nameBaselineY}
                   fill={nameColor}
                   fontSize={PLAYER_NAME_FONT_SIZE}
-                  fontWeight={isWinner ? 700 : 400}
+                  fontWeight={rowFontWeight}
                   fontStyle={slot?.entrant ? "normal" : "italic"}
                 >
                   {/* Called shows a bell next to both entrants -- matches
@@ -1437,7 +1600,7 @@ function MatchBox({
                   y={nameBaselineY}
                   fill={nameColor}
                   fontSize={PLAYER_NAME_FONT_SIZE}
-                  fontWeight={isWinner ? 700 : 400}
+                  fontWeight={rowFontWeight}
                   fontStyle={slot?.entrant ? "normal" : "italic"}
                   style={
                     nameOverflows
@@ -1476,12 +1639,12 @@ function MatchBox({
                       "DQ",
                       scorePillY + 11,
                       11,
-                      700,
+                      300,
                     )}
                     textAnchor="middle"
                     fill="#fff"
                     fontSize={11}
-                    fontWeight={700}
+                    fontWeight={300}
                   >
                     DQ
                   </text>
@@ -1533,12 +1696,12 @@ function MatchBox({
                         String(score),
                         scorePillY + 11,
                         13,
-                        700,
+                        300,
                       )}
                       textAnchor="middle"
                       fill="#fff"
                       fontSize={13}
-                      fontWeight={700}
+                      fontWeight={300}
                     >
                       {score}
                     </text>
@@ -1598,7 +1761,7 @@ function ElapsedTimerPill({
           metrics. */}
       <text
         x={LIVE_TIMER_WIDTH / 2}
-        y={verticalCenterBaselineY(label, height / 2, 12, 700)}
+        y={verticalCenterBaselineY(label, height / 2, 12, 300)}
         textAnchor="middle"
         // COLORS.panel (dark), not white -- matches
         // gauntlet-pools.tsx's own statusPillStyle convention (dark
@@ -1606,7 +1769,7 @@ function ElapsedTimerPill({
         // reads as low-contrast against a bright fill like COLORS.live
         // or COLORS.called).
         fill={COLORS.panel}
-        fontWeight={700}
+        fontWeight={300}
         fontSize={12}
       >
         {label}
@@ -1654,10 +1817,10 @@ function UpNextPill({
           contrast reason. */}
       <text
         x={UP_NEXT_PILL_WIDTH / 2}
-        y={verticalCenterBaselineY("UP NEXT", height / 2, 12, 700)}
+        y={verticalCenterBaselineY("UP NEXT", height / 2, 12, 300)}
         textAnchor="middle"
         fill={COLORS.panel}
-        fontWeight={700}
+        fontWeight={300}
         fontSize={12}
       >
         UP NEXT
@@ -1751,11 +1914,11 @@ function PromotionPill({
           pill sit on the same y and visibly need to actually agree. */}
       <text
         x={pillX + width / 2}
-        y={verticalCenterBaselineY(label, y, 11, 600)}
+        y={verticalCenterBaselineY(label, y, 11, 300)}
         textAnchor="middle"
         fill={COLORS.muted}
         fontSize={11}
-        fontWeight={600}
+        fontWeight={300}
       >
         {label}
       </text>
@@ -1781,10 +1944,10 @@ function IdentifierTag({ label, y }: { label: string; y: number }) {
           reliably centering in this custom font). */}
       <text
         x={12}
-        y={verticalCenterBaselineY(label, 10, 11, 700)}
+        y={verticalCenterBaselineY(label, 10, 11, 300)}
         textAnchor="middle"
         fill="#fff"
-        fontWeight={700}
+        fontWeight={300}
         fontSize={11}
       >
         {label}

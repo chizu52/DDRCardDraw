@@ -7,22 +7,13 @@ import {
   type ScheduleStatusState,
 } from "../state/event.slice";
 import { useAppState } from "../state/store";
-// webpack's asset/resource handling (same as src/assets/ddr-tools-256.png,
-// see webpack.config.js) emits this as its own static file rather than
-// inlining it into the JS bundle -- important at this file's size (~14MB,
-// a high-res 6308x2143 banner), which would otherwise massively bloat
-// the bundle if base64-embedded instead. Lives in other-assets/backgrounds/,
-// not nested under a schedule-specific folder -- gauntlet-pools.tsx
-// reuses this exact same image for its own backdrop now, see its own
-// comment on why.
-import Banner from "../other-assets/backgrounds/bg.png";
 import {
   bodyFont,
   titleFont,
   TITLE_FONT_FAMILY,
   BODY_FONT_FAMILY,
 } from "./local-fonts";
-import { BROADCAST_COLORS } from "./broadcast-theme";
+import { BROADCAST_COLORS, blendOverBase } from "./broadcast-theme";
 import {
   MARQUEE_KEYFRAMES_CSS,
   MarqueeText,
@@ -299,27 +290,6 @@ function shiftTimeString(
   const d = new Date();
   d.setHours(hours, minutes + deltaMinutes, 0, 0);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-// Row colors come in as plain "#rrggbb" from the dashboard's native
-// <input type="color"> (see dashboard.tsx's ScheduleDayEditor), which
-// can't express alpha itself. Pre-blended into a SOLID color against
-// COLORS.panel rather than left as a translucent rgba() tint -- the time
-// box sits on top of the row's own background, which differs by row
-// state (COLORS.currentBg vs COLORS.panel) -- a translucent tint let
-// that show through, so the exact same row.color box read as a
-// different effective color on the current row than on every other row.
-// Blending against a fixed base up front keeps it looking identical
-// regardless of what row it's in.
-function blendOverPanel(hex: string, alpha: number): string {
-  const fgMatch = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  const bgMatch = /^#([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(COLORS.panel);
-  if (!fgMatch || !bgMatch) return hex;
-  const mix = (fg: string, bg: string) =>
-    Math.round(parseInt(fg, 16) * alpha + parseInt(bg, 16) * (1 - alpha));
-  const [, fr, fg, fb] = fgMatch;
-  const [, br, bgc, bb] = bgMatch;
-  return `rgb(${mix(fr, br)}, ${mix(fg, bgc)}, ${mix(fb, bb)})`;
 }
 
 function sortedByTime(items: ScheduleItem[]): ScheduleItem[] {
@@ -757,8 +727,8 @@ function ScheduleRow({
           // box against the box's exact midpoint instead.
           position: "relative",
           background: row.color
-            ? blendOverPanel(row.color, 0.18)
-            : blendOverPanel("#ffffff", 0.06),
+            ? blendOverBase(row.color, 0.18)
+            : blendOverBase("#ffffff", 0.06),
           borderRight: `3px solid ${pillBorderColor}`,
           // Matches the row's own 14px corner radius minus its 3px
           // border, so the box's outer edge nests flush against the
@@ -1124,10 +1094,19 @@ export function Schedule() {
           // descendant, present or future, instead of needing to audit
           // every individual fontWeight value by hand.
           fontSynthesis: "none",
-          // No border/gradient frame anymore -- just the solid
-          // fallback fill (still needed as a base under the blurred
-          // banner layer below).
-          background: "rgba(17, 20, 24, 0.92)",
+          // Transparent, not a solid fill -- explicit user request so
+          // this overlay composites as a proper OBS browser source
+          // (whatever's behind it in the OBS scene shows through the
+          // padding/gaps between the header and rows, not a big opaque
+          // rectangle). Used to be a translucent rgba() over a blurred
+          // banner-image backdrop, then briefly a flat opaque
+          // COLORS.panel once that backdrop was dropped -- safe to go
+          // fully transparent at THIS level specifically because the
+          // header panel and every row below already paint their own
+          // opaque background for legibility (see this file's own
+          // COLORS.panel/COLORS.currentBg usage further down), so this
+          // only affects the empty space around/between them.
+          background: "transparent",
           borderRadius: 20,
           overflow: "hidden",
           display: "inline-block",
@@ -1145,23 +1124,6 @@ export function Schedule() {
           animation: "scheduleDayIn 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both",
         }}
       >
-        {/* The banner art as a soft out-of-focus backdrop rather than a
-            legible image under a scrim -- fully removes the "art vs. row
-            text" contrast fight instead of just tuning it. Isolated on
-            its own absolutely-positioned layer (inline styles can't
-            express ::before) so `filter: blur()` never touches the sharp
-            text/panels stacked on top of it via z-index. `inset: -20px`
-            gives the blur room to bleed past the card's own edges --
-            sized exactly to the card, the blur would visibly soften
-            right at the border instead of staying inside it. */}
-        <div
-          style={{
-            position: "absolute",
-            inset: -20,
-            background: `url(${Banner}) center/cover no-repeat`,
-            filter: "blur(3px) brightness(0.55)",
-          }}
-        />
         <div
           style={{
             position: "relative",
@@ -1332,7 +1294,7 @@ export function Schedule() {
                   // this fully out, THEN swaps text+color, THEN fades it
                   // back in. See this badge's own useCrossfade call above.
                   border: `3px solid ${statusColor}`,
-                  background: blendOverPanel(statusColor, 0.15),
+                  background: blendOverBase(statusColor, 0.15),
                   color: statusColor,
                   fontSize: 16,
                   letterSpacing: "0.04em",

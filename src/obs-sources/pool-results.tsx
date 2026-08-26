@@ -27,7 +27,11 @@ import {
   LOCAL_FONT_FACE_CSS,
   TITLE_FONT_FAMILY,
 } from "./local-fonts";
-import { BROADCAST_COLORS, statusPillStyle } from "./broadcast-theme";
+import {
+  BROADCAST_COLORS,
+  statusPillStyle,
+  blendOverBase,
+} from "./broadcast-theme";
 import {
   MARQUEE_KEYFRAMES_CSS,
   MarqueeText,
@@ -361,11 +365,24 @@ function PoolTable({
             const tierColor = rowColors
               ? rowColorForRank(ranks.get(rowIdx), status, rowColorTiers)
               : null;
-            const backgroundColor =
+            // Opaque now, not a translucent rgba() tint left to blend
+            // against whatever's live behind it -- explicit user
+            // request so this overlay's own outer card (further below)
+            // can go fully transparent, for a proper OBS composite,
+            // without every un-tiered/zebra-striped row losing its
+            // legibility along with it. tierColor already comes back as
+            // a complete "rgba(...)" string (row-colors.ts's own
+            // TIER_COLORS) -- blendOverBase resolves either that or the
+            // zebra-stripe rgba() below into one solid color against
+            // COLORS.panel. Even rows blend at alpha 0 (pure COLORS.panel,
+            // identical to the old "transparent" default once the outer
+            // card was still opaque behind it).
+            const backgroundColor = blendOverBase(
               tierColor ??
-              (displayIdx % 2 === 0
-                ? "transparent"
-                : "rgba(143,153,168,0.08)");
+                (displayIdx % 2 === 0
+                  ? "rgba(0,0,0,0)"
+                  : "rgba(143,153,168,0.08)"),
+            );
             // How far off this player is from the opponent directly
             // above them in the current sorted standings -- explicit
             // user request. First place (displayIdx 0) never has one.
@@ -519,7 +536,17 @@ const cardStyle: React.CSSProperties = {
   // visual verification.
   fontSize: 28,
   color: COLORS.text,
-  background: COLORS.panel,
+  // Transparent, not a solid fill -- explicit user request so this
+  // overlay composites as a proper OBS browser source (whatever's
+  // behind it in the OBS scene shows through the border/corner area
+  // and any gaps, not a big opaque rectangle). Safe here specifically
+  // because the header bar and every row now paint their own opaque
+  // background for legibility (see headerBarStyle's own doc, and
+  // backgroundColor's own doc at this file's row-mapping callsite) --
+  // this only affects the thin border frame area, never the text
+  // itself. The border/borderRadius stay -- an outline frame, not a
+  // fill, reads fine over a transparent center.
+  background: "transparent",
   border: `1px solid ${COLORS.border}`,
   borderRadius: 14,
   overflow: "hidden",
@@ -528,6 +555,15 @@ const cardStyle: React.CSSProperties = {
 const headerBarStyle: React.CSSProperties = {
   padding: "14px 24px",
   color: COLORS.text,
+  // Own opaque fill now that cardStyle's own background is transparent
+  // (see its own doc) -- this used to rely entirely on cardStyle's fill
+  // showing through underneath (a real pre-existing gap: the "falls
+  // through to headerBarStyle's own background" comment on this bar's
+  // actual JSX usage below assumed a background lived here, but nothing
+  // defined one until now). The JSX usage's own headerColor override
+  // takes precedence over this when a sheet color is actually set --
+  // this is just the "no sheet color" fallback.
+  background: COLORS.panel,
   borderBottom: `1px solid ${COLORS.border}`,
   fontFamily: TITLE_FONT_FAMILY,
   fontWeight: 400,
@@ -546,6 +582,10 @@ const thStyle: React.CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: "0.03em",
   color: COLORS.muted,
+  // Own opaque fill, same reasoning as headerBarStyle's own -- the
+  // column-header row had no background of its own either, silently
+  // relying on cardStyle's now-transparent fill underneath.
+  background: COLORS.panel,
   borderBottom: `1px solid ${COLORS.border}`,
   borderRight: `1px solid ${COLORS.border}`,
 };

@@ -13,5 +13,4 @@
 - The same bundled list shows up in every overlay's own Icon dropdown in Settings (Schedule, Gauntlet Pools, etc.) -- drop a file in here once and every overlay can pick it.
 
 ## Backgrounds
-- Must be named "bg.png" for the OBS sources to pick it up.
-- Currently shared as-is by every overlay that uses a background banner (Schedule, Gauntlet Pools) -- there's one image, not a per-overlay picker yet.
+- No longer used -- every overlay used to render bg.png as a blurred backdrop behind its card, dropped in favor of a plain solid panel background (same look pool-results.tsx always had). bg.png itself is still in this folder/committed to the repo, just unreferenced by any overlay now.

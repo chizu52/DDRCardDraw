@@ -37,7 +37,6 @@ import {
   statusPillStyle,
   sectionLabelStyle,
   outerWrapperStyle,
-  bannerBackdropStyle,
   cardStyle,
   cardContentStyle,
 } from "./broadcast-theme";
@@ -537,11 +536,6 @@ export function GauntletPoolsWithCreds({
     // `height: contentHeight` overrides CSS auto-height (undefined on
     // first render falls through to ordinary auto-sizing).
     <div style={{ ...outerWrapperStyle, height: contentHeight }}>
-      {/* Shared with bracket-tree.tsx (bannerBackdropStyle) -- fixed to
-          the screen rather than scrolling with the pools. A sibling of
-          the scroll container below, not a descendant, so native
-          scrolling never moves it. */}
-      <div style={bannerBackdropStyle} />
       {/* Real native horizontal scroll, not a CSS transform. Scrollbar
           hidden -- scrolling here is entirely programmatic
           (recomputeScroll sets scrollLeft directly). */}
