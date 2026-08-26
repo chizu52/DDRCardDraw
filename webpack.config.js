@@ -272,7 +272,32 @@ module.exports = function (env = {}, argv = {}) {
                 ServiceWorker: {
                   events: true,
                 },
-                excludes: ["../*.zip", "jackets/**/*", "favicons/*"],
+                // songData*.js excluded for the same reason jackets/favicons
+                // are: ~40 chunks, several hundred KB to 1+ MB each (30+ MB
+                // combined). Precaching all of them on install made the
+                // service worker's install step effectively hang forever
+                // (neither completing nor rejecting), so it never reached
+                // "installed"/"activated" -- which meant the update-ready
+                // toast in update-manager.tsx never fired, since that whole
+                // chain depends on the worker actually finishing install.
+                // network-first still caches these normally as each is
+                // actually requested; this only removes them from the
+                // eager precache-everything-on-install list.
+                // *.map: the real fix. 53 of the 127 remaining precached
+                // files (42%) were *.js.map/*.css.map source maps, which
+                // Vercel's Protected Source Maps feature blocks with a 403
+                // for unauthenticated requests (confirmed by fetching every
+                // precached URL directly). That's very likely what was
+                // actually hanging the install step, not just songData's
+                // size -- source maps serve no purpose to the running app
+                // regardless, so excluding them is correct either way.
+                excludes: [
+                  "../*.zip",
+                  "jackets/**/*",
+                  "favicons/*",
+                  "songData*.js",
+                  "*.map",
+                ],
               }),
             ],
     ),
