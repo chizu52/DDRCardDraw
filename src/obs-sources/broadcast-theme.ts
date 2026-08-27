@@ -10,9 +10,9 @@ export const BROADCAST_COLORS = {
   border: "#3a3f49",
   text: "#f6f7f9",
   muted: "#9aa2ac",
-  mint: "#22c55e",
+  mint: "#47d896",
   gold: "#efc75e",
-  coral: "#f0a868",
+  coral: "#d97f4a",
 };
 
 // Pre-blends a color at some alpha against `base` into a single SOLID
