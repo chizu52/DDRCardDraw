@@ -32,7 +32,6 @@ import { useAppState } from "../state/store";
 import { BODY_FONT_FAMILY, LOCAL_FONT_FACE_CSS } from "./local-fonts";
 import {
   BROADCAST_COLORS,
-  POOL_PLAYER_ROW_FONT_SIZE,
   sectionLabelStyle,
   outerWrapperStyle,
   cardStyle,
@@ -282,6 +281,10 @@ function BracketTreeInner({
   );
   const setsById = useMemo(() => indexSetsById(sets), [sets]);
   const phantomSetsById = usePhantomSets(sets, setsById);
+  // Unconditional, like every other hook here -- only actually consumed
+  // once real phase data exists (see the density-adaptive metrics solve
+  // below), but hooks can't be called from inside that later branch.
+  const viewport = useViewportSize();
 
   // The chrome (banner, title bar) below is now ALWAYS rendered, not
   // gated behind these checks the way a plain early `return null`/
@@ -331,26 +334,29 @@ function BracketTreeInner({
     const seedProgressionById = indexSeedProgressionById(
       phase.seeds?.nodes || [],
     );
-    // The wider of the two sides' own totalWidth, so BOTH sides' <svg>
-    // elements resolve to the exact same real px-per-viewBox-unit ratio
-    // (see widthPercent's own doc in BracketTree) instead of each
-    // independently stretching to its own 100% and landing on two
-    // visibly different text/box sizes purely because one side has
-    // fewer rounds than the other. Each call below passes the SAME
-    // arguments its matching <BracketTree> call further down does
-    // (winnersEntrantIds only for Losers, never Winners -- see that
-    // prop's own doc) -- computeBracketDimensions is a pure function of
-    // its arguments, so mismatched arguments here would silently
-    // compute a different totalWidth than what actually renders.
-    const winnersDims = computeBracketDimensions(
+    // Density-adaptive sizing: solve for a width factor (kx) and height
+    // factor (ky) that make the bracket's own natural totalWidth/
+    // totalHeight come out matching the actual available card space
+    // exactly, then build the real BracketMetrics both sides render
+    // with -- see BracketMetrics's own doc for the full rationale.
+    //
+    // Step 1: each side's "natural" (BASE_METRICS, kx=ky=1) dimensions.
+    // Each call passes the SAME arguments its matching <BracketTree>
+    // call further down does (winnersEntrantIds only for Losers, never
+    // Winners -- see that prop's own doc) -- computeBracketDimensions is
+    // a pure function of its arguments, so mismatched arguments here
+    // would silently solve against a different shape than what actually
+    // renders.
+    const winnersNatural = computeBracketDimensions(
       layout.winners,
       phase.id,
       setsById,
       undefined,
       seedProgressionById,
       phantomSetsById,
+      BASE_METRICS,
     );
-    const losersDims = layout.losers
+    const losersNatural = layout.losers
       ? computeBracketDimensions(
           layout.losers,
           phase.id,
@@ -358,24 +364,84 @@ function BracketTreeInner({
           winnersEntrantIds,
           seedProgressionById,
           phantomSetsById,
+          BASE_METRICS,
         )
       : null;
-    const widthBasis = Math.max(
-      winnersDims.totalWidth,
-      losersDims?.totalWidth ?? 0,
+    // Step 2: how much real space is actually available for the two
+    // <BracketTree>s together. cardStyleForBracket is width:100% of the
+    // OBS canvas (see its own doc below), so viewport.width IS the
+    // canvas width; cardContentStyle's own 40px padding is the only
+    // horizontal deduction needed. Height has more fixed chrome above
+    // the brackets to account for: BroadcastTitleBar's own tallest
+    // child (the 100px icon) plus its 20px/32px padding and 3px border
+    // (~146px), the marginBottom:20 wrapper around it, and one
+    // sectionLabelStyle caption (~1.3em of cardStyle's own 28px base,
+    // ~1.2 line-height, plus its own marginBottom:8) per side actually
+    // shown -- these are real, deterministic style values from this
+    // file/broadcast-title-bar.tsx, not guesses, but they're computed
+    // here rather than measured off the live DOM (see useViewportSize's
+    // own doc on why this file avoids measuring its own rendered
+    // output) -- deliberately conservative names below so the reasoning
+    // stays checkable against those files if either one's own numbers
+    // ever change.
+    const CARD_PADDING = 40;
+    const TITLE_BAR_BLOCK_HEIGHT = 100 + 20 * 2 + 3 * 2 + 20; // icon + padding + border + marginBottom
+    const SECTION_LABEL_HEIGHT = 28 * 1.3 * 1.2 + 8; // sectionLabelStyle em size + line-height + marginBottom
+    const INTER_SIDE_GAP = 28;
+    const numSides = losersNatural ? 2 : 1;
+    const availableWidth = viewport.width - CARD_PADDING * 2;
+    const availableHeight =
+      viewport.height -
+      CARD_PADDING * 2 -
+      TITLE_BAR_BLOCK_HEIGHT -
+      SECTION_LABEL_HEIGHT * numSides -
+      (losersNatural ? INTER_SIDE_GAP : 0);
+    // Step 3: solve kx from whichever side is naturally wider (so THAT
+    // side ends up matching availableWidth exactly, same "shared basis"
+    // principle the previous CSS-percentage version used -- see git
+    // history -- just solved into a real box-width number instead of a
+    // CSS percentage now); ky from both sides' combined natural height
+    // against the shared vertical budget, since they stack. Guarded
+    // against a not-yet-laid-out 0 viewport (SSR/very first tick) and a
+    // pathological 0-natural-size bracket -- both fall back to 1 (same
+    // as BASE_METRICS itself) rather than dividing by zero into
+    // Infinity/NaN.
+    const naturalWidthBasis = Math.max(
+      winnersNatural.totalWidth,
+      losersNatural?.totalWidth ?? 0,
     );
+    const naturalHeightTotal =
+      winnersNatural.totalHeight + (losersNatural?.totalHeight ?? 0);
+    const rawKx =
+      availableWidth > 0 && naturalWidthBasis > 0
+        ? availableWidth / naturalWidthBasis
+        : 1;
+    const rawKy =
+      availableHeight > 0 && naturalHeightTotal > 0
+        ? availableHeight / naturalHeightTotal
+        : 1;
+    // Caps how far EITHER factor can scale UP, not just down -- confirmed
+    // live that letting a simple bracket balloon unbounded looked just as
+    // bad as shrinking one too far, arguably worse: a small 2-round
+    // bracket on a 1920x1080 canvas measured kx≈3.5 against this file's
+    // own reference numbers, ballooning the box to ~700px wide while the
+    // still-fixed-at-the-time secondary chrome (status/promotion pills)
+    // stayed tiny and stranded far from everything -- text and pills
+    // visibly disconnected from an oversized box, not just "generously
+    // sized." 1.5x keeps a simple bracket comfortably larger than its
+    // reference design without it stopping looking like the same
+    // component. Applied to both axes for the same reason MIN_KY is:
+    // consistent proportions, not a width-specific patch.
+    const MAX_SCALE = 1.5;
+    const kx = Math.min(rawKx, MAX_SCALE);
+    // Never shrinks player-name text (and everything else ky drives)
+    // past MIN_PLAYER_NAME_FONT_SIZE -- see that constant's own doc for
+    // the full rationale/tradeoff.
+    const MIN_KY = MIN_PLAYER_NAME_FONT_SIZE / BASE_PLAYER_NAME_FONT_SIZE;
+    const ky = Math.min(Math.max(rawKy, MIN_KY), MAX_SCALE);
+    const metrics = scaleBracketMetrics(kx, ky);
     body = (
       <>
-        <div
-          style={{
-            fontFamily: BODY_FONT_FAMILY,
-            fontSize: 20,
-            color: COLORS.muted,
-            marginTop: -8,
-          }}
-        >
-          {phase.name}
-        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
           <BracketTree
             label="Winners"
@@ -385,7 +451,7 @@ function BracketTreeInner({
             nowMs={nowMs}
             seedProgressionById={seedProgressionById}
             phantomSetsById={phantomSetsById}
-            widthBasis={widthBasis}
+            metrics={metrics}
           />
           {layout.losers && (
             <BracketTree
@@ -402,7 +468,7 @@ function BracketTreeInner({
               winnersEntrantIds={winnersEntrantIds}
               seedProgressionById={seedProgressionById}
               phantomSetsById={phantomSetsById}
-              widthBasis={widthBasis}
+              metrics={metrics}
             />
           )}
         </div>
@@ -466,17 +532,12 @@ function BracketTreeInner({
   // own scrollContainerStyle) that this view was explicitly asked NOT
   // to add.
   //
-  // The actual scaling math lives entirely in each <BracketTree>'s own
-  // <svg> now (CSS percentage width + aspect-ratio, see widthPercent's
-  // own doc there) -- not measured/applied here via JS. An earlier
-  // version of this used a ResizeObserver + window-resize listener to
-  // measure the card's real pixel size and apply `transform: scale()`
-  // by hand; replaced with plain CSS for the same reason the rest of
-  // this app already prefers it (see song-card.css's own `.chart`,
-  // flex-sized between a min/max width with zero JS involved) -- the
-  // browser reflows this correctly on its own, with no measured state,
-  // no effects, and none of the "guard against an infinite render loop"
-  // complexity a JS version needs.
+  // The actual scaling math is density-adaptive now, not a CSS-only
+  // scale of a fixed-density drawing -- see BracketMetrics's own doc
+  // for the full rationale and useViewportSize for why reading the
+  // window's own size (not measuring this component's own rendered
+  // output) doesn't reintroduce the infinite-render-loop risk an
+  // earlier ResizeObserver-based version of this had.
   const cardStyleForBracket: React.CSSProperties = isBracketContent
     ? { ...cardStyle, width: "100%" }
     : cardStyle;
@@ -509,13 +570,11 @@ function BracketTreeInner({
           <div style={cardContentStyle}>
             {/* Shared with gauntlet-pools.tsx's own title bar (same
                 component, not just similarly-styled). No subtitle in the
-                normal case -- phase.name only exists once `body` above has
-                real phase data, and lives inside `body` itself for that
-                reason, so the title bar can render immediately without
-                waiting on it. Only reused here for isStale's own small,
-                honest "this isn't fresh" indicator, which belongs beside
-                the title rather than stacked above body's own (possibly
-                stale, reused-from-cache) phase.name caption. Plain static
+                normal case -- explicit user request to drop the phase
+                name (e.g. "Pool 1A") this used to show as a small
+                caption above the bracket entirely, not just move it up
+                into here instead. Only reused here for isStale's own
+                small, honest "this isn't fresh" indicator. Plain static
                 positioning, not gauntlet-pools.tsx's own sticky-in-grid
                 treatment -- there's nothing to scroll away from here (see
                 this view's own no-camera doc above), so a sticky offset
@@ -675,72 +734,316 @@ async function fetchPhantomSets(
   return map;
 }
 
-// This file's own un-scaled baseline text size for a player's name (see
-// MatchBox's own fontSize prop, further down, which reads this same
-// constant) -- SVG_SCALE below is computed against it, not a re-tuned
-// literal, so the two can never quietly drift apart from each other.
-const PLAYER_NAME_FONT_SIZE = 15;
-// No longer the bracket <svg>'s own literal pixel multiplier -- its
-// rendered size is CSS-driven now (see widthPercent's own doc on
-// BracketTree), so the actual real px-per-viewBox-unit ratio varies
-// with the OBS canvas's own width instead of being fixed at this
-// value. Still exists as NAME_MARQUEE_SPEED_UNITS_PER_S's own baseline
-// reference below (converting the shared canonical real-px/s marquee
-// speed into this SVG's local units) -- that's an accepted
-// approximation, not a bug: the marquee's true on-screen speed already
-// varies with the canvas size too now, same as everything else in this
-// view, and re-deriving it from the CSS-resolved width at animation
-// time would need its own measurement/effect machinery for a cosmetic
-// speed wobble nobody's flagged as a problem.
+// Every pixel constant below that drives the bracket's OVERALL footprint
+// (box size, row/column spacing, padding, player-name/header font size)
+// is density-adaptive now -- computed fresh per render from BASE_METRICS
+// (this view's original, hand-tuned "reference" numbers, unchanged from
+// before) times a width factor (kx) and a height factor (ky), solved in
+// BracketTreeInner so the bracket's own natural totalWidth/totalHeight
+// come out matching the actual OBS canvas exactly, however many rounds/
+// entrants it has -- explicit user request ("standardize... so brackets
+// fit properly without constantly readjusting"), after confirming CSS-
+// only canvas-fitting (this view's previous approach: one shared scale
+// factor applied to a fixed-density drawing) can only ever bound ONE
+// axis without either leaving empty margin or distorting proportions.
+// kx and ky are independent -- box WIDTH-relevant constants (boxWidth,
+// colGap, horizontal padding) scale by kx, box HEIGHT/text-relevant
+// constants (matchBoxHeight, row spacing, header/name font size) scale
+// by ky -- so a bracket that's short-but-wide vs tall-but-narrow both
+// end up genuinely filling the canvas, not letterboxed. This does NOT
+// distort glyphs (that would need a single element non-uniformly
+// stretched via `transform: scale(kx,ky)`, never applied here) -- font
+// size is a real recomputed number fed into real text/box geometry, so
+// a shrunk name just renders smaller, not squished.
 //
-// Originally: the whole bracket <svg> rendered at this many times its
-// own natural width/height (viewBox at the ORIGINAL, unscaled
-// coordinate space) specifically so this view's player names visually
-// matched gauntlet-pools.tsx's own PoolBox rows exactly
-// (POOL_PLAYER_ROW_FONT_SIZE, see its own doc in broadcast-theme.ts)
-// -- the two views were tuned independently before, to two "looks
-// about right" sizes that didn't actually match, so switching the "Now
-// showing" dropdown between them made every name suddenly jump ~68%
-// larger or smaller. That exact match no longer holds once the canvas
-// width pushes the real scale away from this ratio -- an accepted
-// tradeoff of making the view fill the canvas at all, not a regression
-// specific to this refactor (a JS-measured `transform: scale()`
-// version of the same canvas-fitting idea would have the identical
-// effect on text size).
-const SVG_SCALE = POOL_PLAYER_ROW_FONT_SIZE / PLAYER_NAME_FONT_SIZE;
+// Status/promotion/score pills and the identifier tag scale too, not
+// just the main box -- an earlier version of this left them fixed-size
+// (a disclosed scope limit at the time), which confirmed live to look
+// actively broken rather than just incomplete: a simple bracket with
+// plenty of canvas room can scale kx up several-fold (a genuinely small
+// 2-round bracket on a 1920x1080 canvas measured kx≈3.5 against this
+// file's own reference numbers), ballooning the box far past its
+// pills' original fixed size -- text and pills stranded looking tiny
+// and disconnected inside a comically oversized box, not just "a bit
+// small." Pill WIDTHS (scorePillWidth, liveTimerWidth, upNextPillWidth,
+// promotionPillPaddingX/CharWidth/Gap) scale by kx, matching the main
+// box; pill HEIGHTS and their own text (scorePillHeight, pillFontSize,
+// smallPillFontSize) scale by ky, matching row height/player-name font
+// -- same width-vs-height split as the main box, so a pill's own
+// proportions don't warp independently of the box it sits beside.
+interface BracketMetrics {
+  boxWidth: number;
+  colGap: number;
+  matchBoxHeight: number;
+  rowHeight: number;
+  rowGap: number;
+  rowTopPad: number;
+  rowBottomPad: number;
+  /** The midpoint between the two entrant rows -- see BASE_ROW_DIVIDER_Y's
+   * own doc below for why this isn't simply matchBoxHeight / 2. */
+  rowDividerY: number;
+  headerHeight: number;
+  headerFontSize: number;
+  /** Horizontal padding inside the card, on whichever side(s) don't
+   * have a cross-phase promotion pill reserving pillMargin instead. */
+  basePaddingX: number;
+  basePaddingY: number;
+  pillMargin: number;
+  nameInsetX: number;
+  maxPrefixWidth: number;
+  playerNameFontSize: number;
+  /** The raw width/height factors themselves, for the rare shape that
+   * needs to scale its own hand-drawn geometry (MatchBox's own
+   * checkmark path) proportionally rather than reading a pre-derived
+   * field -- everything else on this object should prefer its own
+   * specific field over reaching for these directly. */
+  kx: number;
+  ky: number;
+  scorePillWidth: number;
+  scorePillMargin: number;
+  scorePillHeight: number;
+  liveTimerWidth: number;
+  upNextPillWidth: number;
+  /** max(liveTimerWidth, upNextPillWidth) -- see BASE_STATUS_PILL_WIDTH's
+   * own doc for why the wider of the two is what actually matters. */
+  statusPillWidth: number;
+  statusPillHeight: number;
+  promotionPillHeight: number;
+  promotionPillPaddingX: number;
+  promotionPillCharWidth: number;
+  promotionPillGap: number;
+  /** Status pill (elapsed timer / "UP NEXT") text size. */
+  pillFontSize: number;
+  /** Promotion pill, identifier-tag, and the DQ score-pill's own text
+   * size -- smaller than pillFontSize even at kx=ky=1, a separate field
+   * rather than a fraction of it so each can still be tuned
+   * independently later. */
+  smallPillFontSize: number;
+  /** The score-pill's own number text -- one size up from
+   * smallPillFontSize even at kx=ky=1 (a 2-digit score needs to read
+   * clearly), not the same field reused. */
+  scorePillFontSize: number;
+  /** Uniform scale for IdentifierTag's own hand-drawn path (a small
+   * fixed SVG shape, not a formula of box width/height) -- tied to ky
+   * specifically since the tag is vertically anchored to rowDividerY,
+   * not to the box's own width. */
+  identifierTagScale: number;
+}
 
 // Tightened up from this component's first "readability" pass to read
-// closer to start.gg's own, more compact proportions -- this is a spacing
-// pass only, the dark broadcast palette/LIVE badge/etc are unchanged
-// (colors are being revisited separately later).
-const BOX_WIDTH = 200;
+// closer to start.gg's own, more compact proportions -- this is a
+// spacing pass only, the dark broadcast palette/LIVE badge/etc are
+// unchanged (colors are revisited separately). These are the values
+// BracketMetrics scales from (at kx=ky=1) -- the actual rendered numbers
+// live on the metrics object now, not these constants directly (see
+// scaleBracketMetrics below).
+const BASE_BOX_WIDTH = 200;
 // Must comfortably clear a Live/Called match's own right-side status
 // pill, which extends 8px (gap) + STATUS_PILL_WIDTH past its own box's
 // right edge (defined further down, after that constant exists) --
 // needs real room to spare beyond that.
-const COL_GAP = 90;
+const BASE_COL_GAP = 90;
+// Still bigger than start.gg's own site (meant to be read up close while
+// clicking around, not from across a room), but tightened toward their
+// actual proportions in this spacing pass -- a 26px row per slot with a
+// slimmer gap, an opaque panel behind every match instead of bare text
+// (so it stays legible over arbitrary video, not just a plain website
+// background), and a wider score pill sized for 2-digit scores.
+const BASE_ROW_HEIGHT = 28;
+const BASE_ROW_GAP = 6;
+// Padding inside the box above row 0 and below row 1 -- gives the score
+// pills/name text breathing room from the box's own border.
+const BASE_ROW_TOP_PAD = 14;
+const BASE_ROW_BOTTOM_PAD = 10;
+const BASE_MATCH_BOX_HEIGHT =
+  BASE_ROW_TOP_PAD + BASE_ROW_HEIGHT * 2 + BASE_ROW_GAP + BASE_ROW_BOTTOM_PAD;
+// Not simply BASE_MATCH_BOX_HEIGHT / 2, since the top/bottom row padding
+// above isn't symmetric.
+const BASE_ROW_DIVIDER_Y = BASE_ROW_TOP_PAD + BASE_ROW_HEIGHT + BASE_ROW_GAP / 2;
 // The gap between the header text and a row-0 match's LIVE/NEXT badge is
 // controlled by the two elements' relative y offsets (see the header
-// text's own comment below), not by this -- so this can stay a
+// text's own comment further down), not by this -- so this can stay a
 // reasonably compact value rather than growing to manufacture clearance.
-const HEADER_HEIGHT = 38;
+const BASE_HEADER_HEIGHT = 38;
+const BASE_HEADER_FONT_SIZE = 13;
 // Extra side margin reserved only on whichever edge actually has a
 // cross-phase promotion pill to draw (see PromotionPill) -- most sides
 // don't need it, so it's added conditionally rather than baked into a
 // wider constant padding for every bracket. Sized for the left side's
 // longer placeholderName labels ("Stage 1 1: Losers", ~18 chars -- see
 // incomingProgressionLabel), not just a short phase name.
-const PILL_MARGIN = 200;
+const BASE_PILL_MARGIN = 200;
 const BASE_PADDING = 16;
+const BASE_NAME_INSET_X = 16;
+// A separate, smaller cap on just the prefix's own width, so one very
+// long clan tag can't eat most of the name row by itself and squeeze
+// the actual player name down to almost nothing.
+const BASE_MAX_PREFIX_WIDTH = 70;
+// This file's own un-scaled baseline text size for a player's name.
+const BASE_PLAYER_NAME_FONT_SIZE = 15;
+// The smallest this view will ever shrink a player's name down to,
+// regardless of how large/complex the bracket gets -- explicit user
+// request after confirming the unclamped math COULD shrink text well
+// past comfortable stream legibility for a genuinely big bracket (a
+// real, sanity-checked example: ~6.5px at ky≈0.44 for a 5-6 round
+// double-elim bracket on a 1920x1080 canvas). Enforced by flooring ky
+// itself (see MIN_KY below), not by clamping playerNameFontSize alone
+// after the fact -- every other ky-driven metric (row height/gap,
+// header text) stays proportionally consistent with the floored font
+// size instead of independently continuing to shrink around it. Once a
+// bracket is big enough to actually hit this floor, it genuinely no
+// longer fits the canvas vertically (the same clipped-at-the-bottom
+// behavior this whole density-adaptive system was built to avoid for
+// the common case) -- an accepted, explicit tradeoff: legible-but-
+// occasionally-clipped over always-fits-but-eventually-unreadable.
+const MIN_PLAYER_NAME_FONT_SIZE = 11;
 
-/** The true, unscaled pixel footprint (viewBox units) one side's whole
- * drawing needs -- BracketTreeInner calls this once per side (before
- * either <BracketTree> renders) purely to find widthBasis, the wider
- * of the two, and BracketTree calls it again internally for its own
- * totalWidth/totalHeight. One function, not two copies of the same
- * padding/pill logic that could quietly drift out of sync -- see
- * widthBasis's own doc in BracketTreeInner for why both sides need to
- * agree on the same basis in the first place. */
+// Sized for 2-digit scores.
+const BASE_SCORE_PILL_WIDTH = 30;
+const BASE_SCORE_PILL_MARGIN = 8;
+const BASE_SCORE_PILL_HEIGHT = 22;
+const BASE_LIVE_TIMER_WIDTH = 58;
+// Sized to comfortably fit "Up Next" at this pill's own font -- a fixed
+// pill for a fixed, known string doesn't need the real Canvas2D
+// measurement player names get (that exists because a NAME'S length is
+// unpredictable real-world data; this text never changes), just a
+// hand-picked value with real headroom, same as liveTimerWidth's own
+// already-established convention.
+const BASE_UP_NEXT_PILL_WIDTH = 72;
+// Whichever of the two right-side status pills (Live's ticking timer,
+// Called's static "Up Next") is actually showing on a given match, both
+// need the SAME amount of space reserved beside it -- sized to the
+// wider of the two so neither one is ever the surprise case that
+// doesn't quite fit.
+const BASE_STATUS_PILL_WIDTH = Math.max(
+  BASE_LIVE_TIMER_WIDTH,
+  BASE_UP_NEXT_PILL_WIDTH,
+);
+const BASE_PROMOTION_PILL_HEIGHT = 22;
+const BASE_PROMOTION_PILL_PADDING_X = 14;
+const BASE_PROMOTION_PILL_CHAR_WIDTH = 10;
+const BASE_PROMOTION_PILL_GAP = 20;
+const BASE_PILL_FONT_SIZE = 12;
+const BASE_SMALL_PILL_FONT_SIZE = 11;
+const BASE_SCORE_PILL_FONT_SIZE = 13;
+
+const BASE_METRICS: BracketMetrics = {
+  kx: 1,
+  ky: 1,
+  boxWidth: BASE_BOX_WIDTH,
+  colGap: BASE_COL_GAP,
+  matchBoxHeight: BASE_MATCH_BOX_HEIGHT,
+  rowHeight: BASE_ROW_HEIGHT,
+  rowGap: BASE_ROW_GAP,
+  rowTopPad: BASE_ROW_TOP_PAD,
+  rowBottomPad: BASE_ROW_BOTTOM_PAD,
+  rowDividerY: BASE_ROW_DIVIDER_Y,
+  headerHeight: BASE_HEADER_HEIGHT,
+  headerFontSize: BASE_HEADER_FONT_SIZE,
+  basePaddingX: BASE_PADDING,
+  basePaddingY: BASE_PADDING,
+  pillMargin: BASE_PILL_MARGIN,
+  nameInsetX: BASE_NAME_INSET_X,
+  maxPrefixWidth: BASE_MAX_PREFIX_WIDTH,
+  playerNameFontSize: BASE_PLAYER_NAME_FONT_SIZE,
+  scorePillWidth: BASE_SCORE_PILL_WIDTH,
+  scorePillMargin: BASE_SCORE_PILL_MARGIN,
+  scorePillHeight: BASE_SCORE_PILL_HEIGHT,
+  liveTimerWidth: BASE_LIVE_TIMER_WIDTH,
+  upNextPillWidth: BASE_UP_NEXT_PILL_WIDTH,
+  statusPillWidth: BASE_STATUS_PILL_WIDTH,
+  statusPillHeight: BASE_SCORE_PILL_HEIGHT,
+  promotionPillHeight: BASE_PROMOTION_PILL_HEIGHT,
+  promotionPillPaddingX: BASE_PROMOTION_PILL_PADDING_X,
+  promotionPillCharWidth: BASE_PROMOTION_PILL_CHAR_WIDTH,
+  promotionPillGap: BASE_PROMOTION_PILL_GAP,
+  pillFontSize: BASE_PILL_FONT_SIZE,
+  smallPillFontSize: BASE_SMALL_PILL_FONT_SIZE,
+  scorePillFontSize: BASE_SCORE_PILL_FONT_SIZE,
+  identifierTagScale: 1,
+};
+
+/** Builds the real metrics used to render, from BASE_METRICS times an
+ * independent width factor (kx) and height factor (ky) -- see
+ * BracketMetrics's own doc above for why the two are kept separate
+ * instead of one shared scale. Row-derived fields (matchBoxHeight,
+ * rowDividerY) are recomputed from the ALREADY-ky-scaled row constants,
+ * not re-derived from BASE_MATCH_BOX_HEIGHT directly, so they can never
+ * drift out of sync with each other the way two independently-scaled
+ * copies of the same relationship could. */
+function scaleBracketMetrics(kx: number, ky: number): BracketMetrics {
+  const rowHeight = BASE_ROW_HEIGHT * ky;
+  const rowGap = BASE_ROW_GAP * ky;
+  const rowTopPad = BASE_ROW_TOP_PAD * ky;
+  const rowBottomPad = BASE_ROW_BOTTOM_PAD * ky;
+  const liveTimerWidth = BASE_LIVE_TIMER_WIDTH * kx;
+  const upNextPillWidth = BASE_UP_NEXT_PILL_WIDTH * kx;
+  return {
+    kx,
+    ky,
+    boxWidth: BASE_BOX_WIDTH * kx,
+    colGap: BASE_COL_GAP * kx,
+    matchBoxHeight: rowTopPad + rowHeight * 2 + rowGap + rowBottomPad,
+    rowHeight,
+    rowGap,
+    rowTopPad,
+    rowBottomPad,
+    rowDividerY: rowTopPad + rowHeight + rowGap / 2,
+    headerHeight: BASE_HEADER_HEIGHT * ky,
+    headerFontSize: BASE_HEADER_FONT_SIZE * ky,
+    scorePillWidth: BASE_SCORE_PILL_WIDTH * kx,
+    scorePillMargin: BASE_SCORE_PILL_MARGIN * kx,
+    scorePillHeight: BASE_SCORE_PILL_HEIGHT * ky,
+    liveTimerWidth,
+    upNextPillWidth,
+    statusPillWidth: Math.max(liveTimerWidth, upNextPillWidth),
+    statusPillHeight: BASE_SCORE_PILL_HEIGHT * ky,
+    promotionPillHeight: BASE_PROMOTION_PILL_HEIGHT * ky,
+    promotionPillPaddingX: BASE_PROMOTION_PILL_PADDING_X * kx,
+    promotionPillCharWidth: BASE_PROMOTION_PILL_CHAR_WIDTH * kx,
+    promotionPillGap: BASE_PROMOTION_PILL_GAP * kx,
+    pillFontSize: BASE_PILL_FONT_SIZE * ky,
+    smallPillFontSize: BASE_SMALL_PILL_FONT_SIZE * ky,
+    scorePillFontSize: BASE_SCORE_PILL_FONT_SIZE * ky,
+    identifierTagScale: ky,
+    basePaddingX: BASE_PADDING * kx,
+    basePaddingY: BASE_PADDING * ky,
+    pillMargin: BASE_PILL_MARGIN * kx,
+    nameInsetX: BASE_NAME_INSET_X * kx,
+    maxPrefixWidth: BASE_MAX_PREFIX_WIDTH * kx,
+    playerNameFontSize: BASE_PLAYER_NAME_FONT_SIZE * ky,
+  };
+}
+
+/** window.innerWidth/innerHeight, kept in sync via a plain `resize`
+ * listener -- deliberately NOT a ResizeObserver on this component's own
+ * rendered output. Measuring an element to decide that SAME element's
+ * own size is what caused a real infinite-render-loop bug earlier this
+ * file's history (see git log) -- this only ever reads the window
+ * itself, an input this component doesn't influence, so there's no
+ * feedback loop to guard against. */
+function useViewportSize(): { width: number; height: number } {
+  const [size, setSize] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  useEffect(() => {
+    const onResize = () =>
+      setSize({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return size;
+}
+
+/** One side's whole drawing's pixel footprint, at whatever `metrics`
+ * describes (BASE_METRICS for the k=1 "natural" pre-pass BracketTreeInner
+ * runs once to solve kx/ky, or the real scaleBracketMetrics(kx,ky)
+ * result for actual rendering) -- BracketTreeInner calls this once per
+ * side for EACH of those, and BracketTree calls it again internally
+ * (with the final metrics) for its own totalWidth/totalHeight. One
+ * function, not several independent copies of the same padding/pill
+ * logic that could quietly drift out of sync. */
 function computeBracketDimensions(
   side: LayoutSide,
   currentPhaseId: string,
@@ -748,12 +1051,13 @@ function computeBracketDimensions(
   winnersEntrantIds: WinnersEntrantIds | undefined,
   seedProgressionById: SeedProgressionById | undefined,
   phantomSetsById: PhantomSetsById | undefined,
+  metrics: BracketMetrics,
 ): { totalWidth: number; totalHeight: number; paddingLeft: number } {
   const geo = computeSideGeometry(side, {
-    boxWidth: BOX_WIDTH,
-    colGap: COL_GAP,
-    boxHeight: MATCH_BOX_HEIGHT,
-    dividerOffset: ROW_DIVIDER_Y - MATCH_BOX_HEIGHT / 2,
+    boxWidth: metrics.boxWidth,
+    colGap: metrics.colGap,
+    boxHeight: metrics.matchBoxHeight,
+    dividerOffset: metrics.rowDividerY - metrics.matchBoxHeight / 2,
   });
   const hasLeftPill = (side.columns[0] || []).some((m) =>
     (m.set.slots || []).some((s) =>
@@ -775,11 +1079,13 @@ function computeBracketDimensions(
       );
     }),
   );
-  const paddingLeft = BASE_PADDING + (hasLeftPill ? PILL_MARGIN : 0);
-  const paddingRight = BASE_PADDING + (hasRightPill ? PILL_MARGIN : 0);
+  const paddingLeft =
+    metrics.basePaddingX + (hasLeftPill ? metrics.pillMargin : 0);
+  const paddingRight =
+    metrics.basePaddingX + (hasRightPill ? metrics.pillMargin : 0);
   return {
     totalWidth: geo.width + paddingLeft + paddingRight,
-    totalHeight: geo.height + BASE_PADDING * 2 + HEADER_HEIGHT,
+    totalHeight: geo.height + metrics.basePaddingY * 2 + metrics.headerHeight,
     // Returned too, not just folded into totalWidth -- BracketTree's
     // own render still needs this alone, to know where its drawing
     // group starts (translateX), not just the final total.
@@ -796,7 +1102,7 @@ function BracketTree({
   winnersEntrantIds,
   seedProgressionById,
   phantomSetsById,
-  widthBasis,
+  metrics,
 }: {
   label: string;
   side: LayoutSide;
@@ -806,24 +1112,21 @@ function BracketTree({
   winnersEntrantIds?: WinnersEntrantIds;
   seedProgressionById?: SeedProgressionById;
   phantomSetsById?: PhantomSetsById;
-  /** The wider of the two sides' own totalWidth (see
-   * computeBracketDimensions), computed once by BracketTreeInner
-   * before either side renders -- this side's own <svg> width becomes
-   * `(its own totalWidth / widthBasis) * 100%`, so whichever side IS
-   * the widest renders at exactly 100% and the other scales down to
-   * match its real px-per-unit ratio, not its own independent 100%. */
-  widthBasis: number;
+  /** Density-adaptive sizing, solved once by BracketTreeInner and
+   * shared by both sides -- see BracketMetrics's own doc. */
+  metrics: BracketMetrics;
 }) {
   const geo = computeSideGeometry(side, {
-    boxWidth: BOX_WIDTH,
-    colGap: COL_GAP,
-    boxHeight: MATCH_BOX_HEIGHT,
-    // ROW_DIVIDER_Y isn't MATCH_BOX_HEIGHT / 2 (top/bottom row padding
-    // isn't symmetric, see ROW_DIVIDER_Y's own doc) -- without telling
-    // computeSideGeometry that, its connector lines converged on the
-    // box's plain geometric center instead of the divider, landing
-    // visibly off from where the box's own divider line actually is.
-    dividerOffset: ROW_DIVIDER_Y - MATCH_BOX_HEIGHT / 2,
+    boxWidth: metrics.boxWidth,
+    colGap: metrics.colGap,
+    boxHeight: metrics.matchBoxHeight,
+    // rowDividerY isn't matchBoxHeight / 2 (top/bottom row padding
+    // isn't symmetric, see BASE_ROW_DIVIDER_Y's own doc) -- without
+    // telling computeSideGeometry that, its connector lines converged
+    // on the box's plain geometric center instead of the divider,
+    // landing visibly off from where the box's own divider line
+    // actually is.
+    dividerOffset: metrics.rowDividerY - metrics.matchBoxHeight / 2,
   });
   // Every column with a live match in it -- a Set, not a single index,
   // since more than one match can be live at once in different columns.
@@ -847,13 +1150,15 @@ function BracketTree({
   // box on this side, not one per box -- the blur radius is identical
   // either way, no reason to duplicate the <filter> itself per match.
   const liveGlowFilterId = `live-match-glow-${useId()}`;
-  // Same computeBracketDimensions call BracketTreeInner already made
-  // for both sides (to find widthBasis, below) -- not a second,
+  // Same computeBracketDimensions function BracketTreeInner already
+  // called (twice: once at BASE_METRICS to solve kx/ky, once more to
+  // build the natural-vs-final comparison) -- not a second,
   // independently-written copy of the same padding/pill logic, just
-  // the same pure function run again for this side alone. geo itself
-  // (above) still comes from its own direct computeSideGeometry call,
-  // not from this -- this only returns the two final totals, not the
-  // full per-column layout BracketTree's own JSX still needs.
+  // the same pure function run again for this side with the final
+  // metrics. geo itself (above) still comes from its own direct
+  // computeSideGeometry call, not from this -- this only returns the
+  // two final totals, not the full per-column layout BracketTree's own
+  // JSX still needs.
   const { totalWidth, totalHeight, paddingLeft } = computeBracketDimensions(
     side,
     currentPhaseId,
@@ -861,15 +1166,8 @@ function BracketTree({
     winnersEntrantIds,
     seedProgressionById,
     phantomSetsById,
+    metrics,
   );
-  // The wider of the two sides (winners/losers) always renders at
-  // 100% -- this one's own share of that same basis, so both sides
-  // land on the exact same real px-per-viewBox-unit ratio once the
-  // browser resolves the percentage, instead of each independently
-  // stretching to fill 100% of the card and ending up at two visibly
-  // different text/box sizes purely because one side has fewer rounds
-  // than the other. See widthBasis's own doc in BracketTreeInner.
-  const widthPercent = (totalWidth / widthBasis) * 100;
   return (
     <div>
       {/* Same section-label treatment gauntlet-pools.tsx's own pools
@@ -897,30 +1195,19 @@ function BracketTree({
       </div>
       <svg
         role="img"
-        // CSS-driven, not a fixed pixel width/height -- viewBox stays at
-        // the true, unscaled totalWidth/totalHeight (every child keeps
-        // rendering at its own normal coordinates), and the browser
-        // scales the whole result uniformly to whatever `width` actually
-        // resolves to at layout time. widthPercent (this side's own
-        // share of widthBasis, see its own doc above) is what makes the
-        // wider side fill the card exactly and the narrower side match
-        // its real px-per-unit ratio instead of independently stretching
-        // to its own 100%. `aspectRatio` derives height from that same
-        // resolved width automatically -- no JS measurement, no
-        // ResizeObserver, no window-resize listener: this is the exact
-        // "let CSS reflow it" mechanism the rest of this app's own card
-        // grid already uses (song-card.css's `.chart`, flex-sized between
-        // its own min/max width), not a hand-rolled equivalent. Replaces
-        // an earlier version that measured the card's real pixel size via
-        // ResizeObserver and applied `transform: scale()` by hand --
-        // functionally the same end result, but as actual browser-native
-        // responsive sizing instead of JS-computed state.
-        style={{
-          width: `${widthPercent}%`,
-          height: "auto",
-          aspectRatio: `${totalWidth} / ${totalHeight}`,
-          display: "block",
-        }}
+        // Explicit pixel width/height now, matching viewBox 1:1 -- no
+        // CSS scaling layer at all. totalWidth/totalHeight are already
+        // computed FROM density-adaptive metrics (kx/ky solved in
+        // BracketTreeInner against the real available space), so they
+        // already equal the target size directly (for whichever side is
+        // naturally wider/the shared height budget); the narrower side
+        // (if any) just renders at its own smaller natural size instead
+        // of being stretched to match, same visual result the old CSS
+        // percentage trick produced, with one fewer moving part. See
+        // BracketMetrics's own doc for the full rationale.
+        width={totalWidth}
+        height={totalHeight}
+        style={{ display: "block" }}
         viewBox={`0 0 ${totalWidth} ${totalHeight}`}
       >
         <title>{label} bracket</title>
@@ -942,22 +1229,27 @@ function BracketTree({
             </filter>
           </defs>
         )}
-        <g transform={`translate(${paddingLeft},${BASE_PADDING})`}>
+        <g transform={`translate(${paddingLeft},${metrics.basePaddingY})`}>
           {side.columns.map((colMatches, col) => {
-            const x = col * (BOX_WIDTH + COL_GAP);
+            const x = col * (metrics.boxWidth + metrics.colGap);
             const isCurrent = liveCols.has(col);
             return (
               <g key={col}>
-                {/* y is HEADER_HEIGHT - 26, not just "- 12" -- if both
-                    this and the LIVE/NEXT badge's own y (HEADER_HEIGHT -
-                    BADGE_HEIGHT/2, see MatchBox) are simple HEADER_HEIGHT
-                    deltas, the gap between them stays 0 regardless of
-                    HEADER_HEIGHT. This one sits further from
-                    HEADER_HEIGHT's own baseline than the badge does. */}
+                {/* y is headerHeight - a 26px-at-base offset (scaled by
+                    the same ky ratio headerHeight itself used), not just
+                    "- 12" -- if both this and the LIVE/NEXT badge's own y
+                    (headerHeight - BADGE_HEIGHT/2, see MatchBox) were
+                    simple headerHeight deltas, the gap between them would
+                    stay 0 regardless of headerHeight. This one sits
+                    further from headerHeight's own baseline than the
+                    badge does. */}
                 <text
                   x={x}
-                  y={HEADER_HEIGHT - 26}
-                  fontSize={13}
+                  y={
+                    metrics.headerHeight -
+                    26 * (metrics.headerHeight / BASE_HEADER_HEIGHT)
+                  }
+                  fontSize={metrics.headerFontSize}
                   fontWeight={300}
                   fill={isCurrent ? COLORS.text : COLORS.muted}
                 >
@@ -966,7 +1258,7 @@ function BracketTree({
               </g>
             );
           })}
-          <g transform={`translate(0,${HEADER_HEIGHT})`}>
+          <g transform={`translate(0,${metrics.headerHeight})`}>
             {geo.connectors.map((d, i) => (
               <path
                 key={i}
@@ -988,6 +1280,7 @@ function BracketTree({
                 seedProgressionById={seedProgressionById}
                 phantomSetsById={phantomSetsById}
                 liveGlowFilterId={liveGlowFilterId}
+                metrics={metrics}
               />
             ))}
           </g>
@@ -997,80 +1290,21 @@ function BracketTree({
   );
 }
 
-// Still bigger than start.gg's own site (meant to be read up close while
-// clicking around, not from across a room), but tightened toward their
-// actual proportions in this spacing pass -- a 26px row per slot with a
-// slimmer gap, an opaque panel behind every match instead of bare text
-// (so it stays legible over arbitrary video, not just a plain website
-// background), and a wider score pill sized for 2-digit scores.
-const ROW_HEIGHT = 28;
-const ROW_GAP = 6;
-// Padding inside the box above row 0 and below row 1 -- gives the score
-// pills/name text breathing room from the box's own border.
-const ROW_TOP_PAD = 14;
-const ROW_BOTTOM_PAD = 10;
-export const MATCH_BOX_HEIGHT =
-  ROW_TOP_PAD + ROW_HEIGHT * 2 + ROW_GAP + ROW_BOTTOM_PAD;
-// The midpoint between the two entrant rows -- where the identifier tag,
-// divider line, and outgoing/elapsed-timer pills all anchor. Not simply
-// MATCH_BOX_HEIGHT / 2, since the top/bottom padding above isn't
-// symmetric.
-const ROW_DIVIDER_Y = ROW_TOP_PAD + ROW_HEIGHT + ROW_GAP / 2;
-const NAME_INSET_X = 16;
-const SCORE_PILL_WIDTH = 30;
-const SCORE_PILL_MARGIN = 8;
-const LIVE_TIMER_WIDTH = 58;
-// Sized to comfortably fit "Up Next" at this pill's own font (12px/700,
-// same as ElapsedTimerPill's mm:ss text) -- a fixed pill for a fixed,
-// known string doesn't need the real Canvas2D measurement player names
-// get further down (that exists because a NAME'S length is unpredictable
-// real-world data; this text never changes), just a hand-picked value
-// with real headroom, same as LIVE_TIMER_WIDTH's own already-established
-// convention.
-const UP_NEXT_PILL_WIDTH = 72;
-// Whichever of the two right-side status pills (Live's ticking timer,
-// Called's static "Up Next") is actually showing on a given match, both
-// need the SAME amount of space reserved beside it (PromotionPill's own
-// edgeX offset, BracketTree's hasRightPill/COL_GAP margin) -- sized to
-// the wider of the two so neither one is ever the surprise case that
-// doesn't quite fit.
-const STATUS_PILL_WIDTH = Math.max(LIVE_TIMER_WIDTH, UP_NEXT_PILL_WIDTH);
-
-// A name row's real available width, before the score pill starts: from
-// NAME_INSET_X (16) to BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN
-// (200 - 30 - 8 = 162) is 146px -- confirmed directly against a real
-// rendered bracket (getBBox() on the live SVG text/tspan elements), not
-// assumed.
-const NAME_ROW_AVAILABLE_WIDTH = 146;
-// A separate, smaller cap on just the prefix's own width, so one very
-// long clan tag can't eat most of NAME_ROW_AVAILABLE_WIDTH by itself and
-// squeeze the actual player name down to almost nothing.
-const MAX_PREFIX_WIDTH = 70;
-
 // A name that's too long to fit now scrolls (see the marquee rendering
 // in MatchBox's own row map below) instead of being cut off with an
 // ellipsis -- explicit user request, same MARQUEE_KEYFRAMES_CSS cycle
 // shape schedule.tsx originally introduced for its own event/description
 // text (see that constant's own doc). Only the clan tag prefix still
-// truncates (MAX_PREFIX_WIDTH above) -- it's secondary, static-by-design
+// truncates (metrics.maxPrefixWidth) -- it's secondary, static-by-design
 // information, not the primary thing a viewer is watching scroll by.
-// Speed is in this SVG's own LOCAL units (pre-SVG_SCALE), not real
-// screen px -- unlike marquee.tsx's own MARQUEE_SPEED_PX_PER_S (plain
-// HTML consumers, no extra scale factor in play), everything in this
-// SVG gets multiplied by SVG_SCALE on screen together, so expressing
-// speed in the SAME local-unit space this text itself is measured in
-// keeps the apparent on-screen speed relative to the text's own size
-// consistent regardless of the final scale factor. Still DERIVED from
-// the shared canonical MARQUEE_SPEED_PX_PER_S (divided by SVG_SCALE,
-// the exact factor this whole SVG gets scaled up by) rather than its
-// own independently-picked number, so the REAL on-screen speed a
-// viewer actually sees matches every other overlay's marquee exactly,
-// not just approximately -- explicit user request to make overflow
-// text uniform across every overlay, not just this file's own
-// internal consistency. Base duration doesn't need the same
-// conversion -- it's a plain time value, scale-invariant either way.
-const NAME_MARQUEE_SPEED_UNITS_PER_S = MARQUEE_SPEED_PX_PER_S / SVG_SCALE;
-const NAME_MARQUEE_BASE_DURATION_S = MARQUEE_BASE_DURATION_S;
+// Used to need converting from real px/s into this SVG's own local
+// units via a fixed SVG_SCALE factor (the whole SVG used to render at a
+// literal pixel multiple of its own viewBox) -- now that this view's
+// viewBox units ARE real screen pixels 1:1 (density-adaptive sizing
+// bakes the fit directly into the box/row/font metrics, not a
+// separate post-hoc CSS/attribute scale, see BracketMetrics's own
+// doc), MARQUEE_SPEED_PX_PER_S/MARQUEE_BASE_DURATION_S are used
+// directly below with no conversion needed.
 
 // Was a fixed character-count budget (e.g. "20 chars total, 15 for the
 // name") before this -- confirmed live that doesn't actually work well
@@ -1184,6 +1418,7 @@ function MatchBox({
   seedProgressionById,
   phantomSetsById,
   liveGlowFilterId,
+  metrics,
 }: {
   match: { set: StartggSet; x: number; y: number; col: number };
   setsById: SetsById;
@@ -1198,6 +1433,8 @@ function MatchBox({
    * prop) since the id itself is cheap to pass and BracketTree already
    * computed it unconditionally. */
   liveGlowFilterId: string;
+  /** Density-adaptive sizing, see BracketMetrics's own doc. */
+  metrics: BracketMetrics;
 }) {
   const { set, x, y } = match;
   const winIdx = winningSlotIndex(set);
@@ -1251,8 +1488,9 @@ function MatchBox({
         phantomSetsById,
       )
     : null;
-  const row0Y = ROW_TOP_PAD + ROW_HEIGHT / 2;
-  const row1Y = ROW_TOP_PAD + ROW_HEIGHT + ROW_GAP + ROW_HEIGHT / 2;
+  const row0Y = metrics.rowTopPad + metrics.rowHeight / 2;
+  const row1Y =
+    metrics.rowTopPad + metrics.rowHeight + metrics.rowGap + metrics.rowHeight / 2;
 
   // Either the ticking elapsed timer (Live) or the static "Up Next" pill
   // (Called) -- never both, isSetLive/isSetCalled are mutually exclusive
@@ -1275,11 +1513,11 @@ function MatchBox({
   // below) -- independent of the promotion pill's own width, which only
   // affects where its FAR edge sits, not its near one.
   function statusPillX(pillWidth: number): number {
-    if (!outgoingLabel) return BOX_WIDTH + 8;
+    if (!outgoingLabel) return metrics.boxWidth + 8;
     const promoNearEdgeX =
-      BOX_WIDTH + 8 + STATUS_PILL_WIDTH + 8 + PROMOTION_PILL_GAP;
-    const gapWidth = promoNearEdgeX - BOX_WIDTH;
-    return BOX_WIDTH + (gapWidth - pillWidth) / 2;
+      metrics.boxWidth + 8 + metrics.statusPillWidth + 8 + metrics.promotionPillGap;
+    const gapWidth = promoNearEdgeX - metrics.boxWidth;
+    return metrics.boxWidth + (gapWidth - pillWidth) / 2;
   }
 
   return (
@@ -1298,8 +1536,8 @@ function MatchBox({
         <rect
           x={-6}
           y={-6}
-          width={BOX_WIDTH + 12}
-          height={MATCH_BOX_HEIGHT + 12}
+          width={metrics.boxWidth + 12}
+          height={metrics.matchBoxHeight + 12}
           rx={10}
           fill={COLORS.live}
           opacity={0.1}
@@ -1326,6 +1564,7 @@ function MatchBox({
           boxEdgeX={0}
           y={row0Y}
           side="left"
+          metrics={metrics}
         />
       )}
       {row1Label && (
@@ -1335,6 +1574,7 @@ function MatchBox({
           boxEdgeX={0}
           y={row1Y}
           side="left"
+          metrics={metrics}
         />
       )}
       {(outgoing.winner || outgoing.loser) && (
@@ -1343,7 +1583,10 @@ function MatchBox({
           // Pushed past the status pill (8px gap + its own width) when
           // both are present, so the PILL itself doesn't collide with
           // it -- see the ElapsedTimerPill/UpNextPill render below.
-          edgeX={BOX_WIDTH + (hasStatusPill ? 8 + STATUS_PILL_WIDTH + 8 : 0)}
+          edgeX={
+            metrics.boxWidth +
+            (hasStatusPill ? 8 + metrics.statusPillWidth + 8 : 0)
+          }
           // boxEdgeX explicitly at the box's own true edge, NOT left to
           // default to edgeX above -- confirmed live this was a real
           // bug: on any match with a status pill showing, the connector
@@ -1355,16 +1598,17 @@ function MatchBox({
           // rect where they overlap -- that's fine and expected, same as
           // how PromotionPill's own far end already stops at the pill's
           // edge, drawn in front of it.
-          boxEdgeX={BOX_WIDTH}
-          y={ROW_DIVIDER_Y}
+          boxEdgeX={metrics.boxWidth}
+          y={metrics.rowDividerY}
           side="right"
+          metrics={metrics}
         />
       )}
       <rect
         x={0}
         y={0}
-        width={BOX_WIDTH}
-        height={MATCH_BOX_HEIGHT}
+        width={metrics.boxWidth}
+        height={metrics.matchBoxHeight}
         // 10, not 6 -- matches the soft glow rect's own rx just above
         // (it was already 10, so a live match's square-ish 6px box used
         // to sit oddly inside its own rounder halo), and reads closer
@@ -1388,9 +1632,9 @@ function MatchBox({
           border right at its own left/right ends). */}
       <line
         x1={boxStrokeWidth / 2}
-        y1={ROW_DIVIDER_Y}
-        x2={BOX_WIDTH - boxStrokeWidth / 2}
-        y2={ROW_DIVIDER_Y}
+        y1={metrics.rowDividerY}
+        x2={metrics.boxWidth - boxStrokeWidth / 2}
+        y2={metrics.rowDividerY}
         stroke={COLORS.border}
       />
       {/* Elapsed-since-started clock for Live -- matches start.gg's own
@@ -1403,22 +1647,28 @@ function MatchBox({
           are mutually exclusive, so only one of these two ever renders. */}
       {live && set.startedAt != null && (
         <ElapsedTimerPill
-          x={statusPillX(LIVE_TIMER_WIDTH)}
-          y={ROW_DIVIDER_Y}
+          x={statusPillX(metrics.liveTimerWidth)}
+          y={metrics.rowDividerY}
           startedAt={set.startedAt}
           nowMs={nowMs}
           color={COLORS.live}
+          metrics={metrics}
         />
       )}
       {called && (
         <UpNextPill
-          x={statusPillX(UP_NEXT_PILL_WIDTH)}
-          y={ROW_DIVIDER_Y}
+          x={statusPillX(metrics.upNextPillWidth)}
+          y={metrics.rowDividerY}
           color={COLORS.called}
+          metrics={metrics}
         />
       )}
       {set.identifier && (
-        <IdentifierTag label={set.identifier} y={ROW_DIVIDER_Y} />
+        <IdentifierTag
+          label={set.identifier}
+          y={metrics.rowDividerY}
+          metrics={metrics}
+        />
       )}
       {[0, 1].map((i) => {
         const slot = slots[i];
@@ -1440,30 +1690,34 @@ function MatchBox({
         // Shared by all three score-pill variants (DQ/checkmark/number)
         // below, computed once instead of each branch repeating the same
         // expression independently.
-        const scorePillX = BOX_WIDTH - SCORE_PILL_WIDTH - SCORE_PILL_MARGIN;
+        const scorePillX =
+          metrics.boxWidth - metrics.scorePillWidth - metrics.scorePillMargin;
         // Each player's own "box" within the match -- bounded by the
         // match's own outer edge on one side and the divider line on the
-        // other, NOT split evenly by ROW_HEIGHT/ROW_GAP/ROW_TOP_PAD/
-        // ROW_BOTTOM_PAD (those only set the OVERALL match box's
-        // proportions -- see MATCH_BOX_HEIGHT/ROW_DIVIDER_Y's own docs --
+        // other, NOT split evenly by rowHeight/rowGap/rowTopPad/
+        // rowBottomPad (those only set the OVERALL match box's
+        // proportions -- see matchBoxHeight/rowDividerY's own docs --
         // they were never meant to describe where each individual row's
         // own visual boundary sits). Row 0's own box is [0,
-        // ROW_DIVIDER_Y], row 1's is [ROW_DIVIDER_Y, MATCH_BOX_HEIGHT] --
-        // confirmed these aren't equal spans (the divider isn't exactly
-        // at the box's own geometric midpoint, ROW_DIVIDER_Y=45 vs
-        // MATCH_BOX_HEIGHT/2=43 with this file's current constants),
+        // rowDividerY], row 1's is [rowDividerY, matchBoxHeight] --
+        // confirmed these aren't equal spans at this file's base metrics
+        // (the divider isn't exactly at the box's own geometric
+        // midpoint, BASE_ROW_DIVIDER_Y=45 vs BASE_MATCH_BOX_HEIGHT/2=43),
         // which is exactly why centering row content against a flat
-        // ROW_HEIGHT-tall slice (the previous approach) didn't actually
+        // rowHeight-tall slice (an earlier approach) didn't actually
         // match where the real outer-border-to-divider boundary sits.
-        const rowTop = i === 0 ? 0 : ROW_DIVIDER_Y;
-        const rowBottom = i === 0 ? ROW_DIVIDER_Y : MATCH_BOX_HEIGHT;
+        const rowTop = i === 0 ? 0 : metrics.rowDividerY;
+        const rowBottom = i === 0 ? metrics.rowDividerY : metrics.matchBoxHeight;
         const rowCenterY = (rowTop + rowBottom) / 2;
         // Relative to rowCenterY (0 = center, since the row's own <g>
         // below translates to rowCenterY directly) -- unlike
         // scorePillX, this can't be a single row-independent constant
         // anymore, since row 0 and row 1's own boxes aren't the same
-        // height.
-        const scorePillY = -11;
+        // height. Half of metrics.scorePillHeight, negated -- the pill
+        // itself is drawn from `y={scorePillY}` down by its own full
+        // height, so this centers it on rowCenterY (0) the same way a
+        // literal -11 always centered the old fixed 22-tall pill.
+        const scorePillY = -metrics.scorePillHeight / 2;
         const name = describeEmptySlot(
           slot,
           setsById,
@@ -1485,14 +1739,20 @@ function MatchBox({
         // Only a real, filled slot has a clan tag to show -- a
         // placeholder/TBD row's own "name" text (e.g. "winner of A") has
         // no entrant, so this is naturally null for those already.
-        // Still capped to MAX_PREFIX_WIDTH so a long one can't crowd out
-        // the name it's labeling -- the prefix stays truncated/static
-        // even though the NAME below no longer is (see nameOverflows'
-        // own doc); it's secondary, static-by-design information, not
-        // the primary thing a viewer is watching scroll by.
+        // Still capped to metrics.maxPrefixWidth so a long one can't
+        // crowd out the name it's labeling -- the prefix stays
+        // truncated/static even though the NAME below no longer is (see
+        // nameOverflows' own doc); it's secondary, static-by-design
+        // information, not the primary thing a viewer is watching
+        // scroll by.
         const prefix = slot?.entrant?.participants?.[0]?.prefix || null;
         const displayPrefix = prefix
-          ? truncateToWidth(prefix, MAX_PREFIX_WIDTH, PLAYER_NAME_FONT_SIZE, rowFontWeight)
+          ? truncateToWidth(
+              prefix,
+              metrics.maxPrefixWidth,
+              metrics.playerNameFontSize,
+              rowFontWeight,
+            )
           : null;
         // Called's bell + the (possibly-truncated) clan tag, together:
         // whatever sits BEFORE the name and stays completely static,
@@ -1507,15 +1767,30 @@ function MatchBox({
           ? `${bellPrefix}${displayPrefix} `
           : bellPrefix;
         const staticPrefixWidth = staticPrefixText
-          ? measureTextWidth(staticPrefixText, PLAYER_NAME_FONT_SIZE, rowFontWeight)
+          ? measureTextWidth(
+              staticPrefixText,
+              metrics.playerNameFontSize,
+              rowFontWeight,
+            )
           : 0;
+        // A name row's real available width, before the score pill
+        // starts: from metrics.nameInsetX to metrics.boxWidth -
+        // metrics.scorePillWidth - metrics.scorePillMargin -- recomputed
+        // from the now-scaled values every render, not a flat scaled
+        // copy of the old fixed 146px value, so this stays exactly
+        // accurate regardless of kx.
+        const nameRowAvailableWidth =
+          metrics.boxWidth -
+          metrics.nameInsetX -
+          metrics.scorePillWidth -
+          metrics.scorePillMargin;
         const nameAvailableWidth = Math.max(
           0,
-          NAME_ROW_AVAILABLE_WIDTH - staticPrefixWidth,
+          nameRowAvailableWidth - staticPrefixWidth,
         );
         const nameWidth = measureTextWidth(
           name,
-          PLAYER_NAME_FONT_SIZE,
+          metrics.playerNameFontSize,
           rowFontWeight,
         );
         // Scrolls instead of truncating with an ellipsis when it doesn't
@@ -1537,8 +1812,8 @@ function MatchBox({
           ? nameWidth - nameAvailableWidth
           : 0;
         const nameMarqueeDuration =
-          NAME_MARQUEE_BASE_DURATION_S +
-          nameMarqueeDistance / NAME_MARQUEE_SPEED_UNITS_PER_S;
+          MARQUEE_BASE_DURATION_S +
+          nameMarqueeDistance / MARQUEE_SPEED_PX_PER_S;
         const nameClipId = `${nameClipIdBase}-name-${i}`;
         // One shared baseline for both the static prefix text and the
         // marqueeing name text below, so they visually align on the same
@@ -1549,7 +1824,7 @@ function MatchBox({
         const nameBaselineY = verticalCenterBaselineY(
           name,
           0,
-          PLAYER_NAME_FONT_SIZE,
+          metrics.playerNameFontSize,
           rowFontWeight,
         );
         return (
@@ -1562,10 +1837,10 @@ function MatchBox({
             <g transform={`translate(0,${rowCenterY})`}>
               {staticPrefixText && (
                 <text
-                  x={NAME_INSET_X}
+                  x={metrics.nameInsetX}
                   y={nameBaselineY}
                   fill={nameColor}
-                  fontSize={PLAYER_NAME_FONT_SIZE}
+                  fontSize={metrics.playerNameFontSize}
                   fontWeight={rowFontWeight}
                   fontStyle={slot?.entrant ? "normal" : "italic"}
                 >
@@ -1581,9 +1856,9 @@ function MatchBox({
               <clipPath id={nameClipId}>
                 <rect
                   x={0}
-                  y={-PLAYER_NAME_FONT_SIZE}
+                  y={-metrics.playerNameFontSize}
                   width={nameAvailableWidth}
-                  height={PLAYER_NAME_FONT_SIZE * 2}
+                  height={metrics.playerNameFontSize * 2}
                 />
               </clipPath>
               {/* Stationary wrapper -- carries the one-time position
@@ -1592,14 +1867,14 @@ function MatchBox({
                   entirely separate from this element (see nameOverflows'
                   own doc above for why that split matters). */}
               <g
-                transform={`translate(${NAME_INSET_X + staticPrefixWidth},0)`}
+                transform={`translate(${metrics.nameInsetX + staticPrefixWidth},0)`}
                 clipPath={`url(#${nameClipId})`}
               >
                 <text
                   x={0}
                   y={nameBaselineY}
                   fill={nameColor}
-                  fontSize={PLAYER_NAME_FONT_SIZE}
+                  fontSize={metrics.playerNameFontSize}
                   fontWeight={rowFontWeight}
                   fontStyle={slot?.entrant ? "normal" : "italic"}
                   style={
@@ -1619,14 +1894,14 @@ function MatchBox({
                   <rect
                     x={scorePillX}
                     y={scorePillY}
-                    width={SCORE_PILL_WIDTH}
-                    height={22}
+                    width={metrics.scorePillWidth}
+                    height={metrics.scorePillHeight}
                     rx={4}
                     fill={COLORS.dq}
                   />
                   {/* Baseline measured via verticalCenterBaselineY at
-                      the pill's own true center (scorePillY + 11, half
-                      its own 22 height) -- scorePillY already centers
+                      the pill's own true center (scorePillY +
+                      scorePillHeight/2) -- scorePillY already centers
                       this pill ON the row, so centering the text ON the
                       pill also centers it on the row. See that
                       function's own doc for why it measures real glyph
@@ -1634,16 +1909,16 @@ function MatchBox({
                       (tried first, confirmed live still not reliable
                       for this custom font). */}
                   <text
-                    x={scorePillX + SCORE_PILL_WIDTH / 2}
+                    x={scorePillX + metrics.scorePillWidth / 2}
                     y={verticalCenterBaselineY(
                       "DQ",
-                      scorePillY + 11,
-                      11,
+                      scorePillY + metrics.scorePillHeight / 2,
+                      metrics.smallPillFontSize,
                       300,
                     )}
                     textAnchor="middle"
                     fill="#fff"
-                    fontSize={11}
+                    fontSize={metrics.smallPillFontSize}
                     fontWeight={300}
                   >
                     DQ
@@ -1654,8 +1929,8 @@ function MatchBox({
                   <rect
                     x={scorePillX}
                     y={scorePillY}
-                    width={SCORE_PILL_WIDTH}
-                    height={22}
+                    width={metrics.scorePillWidth}
+                    height={metrics.scorePillHeight}
                     rx={4}
                     fill={COLORS.winnerScore}
                   />
@@ -1667,11 +1942,18 @@ function MatchBox({
                       not by visual weight -- confirmed live, "✓" rendered
                       clearly left-of-center inside this pill. A path's
                       own bounding box IS its visual weight, so this
-                      centers correctly regardless of font/browser. */}
+                      centers correctly regardless of font/browser. Offsets
+                      (8/13/22 horizontal, 11/16/6 vertical) were tuned
+                      against the base 30x22 pill -- scaled by metrics.kx/
+                      ky respectively so the checkmark keeps the same
+                      proportion of the pill regardless of how big/small
+                      the pill itself has scaled, not a fixed shape
+                      floating inside a resized one. strokeWidth follows
+                      ky too, for the same reason. */}
                   <path
-                    d={`M${scorePillX + 8},${scorePillY + 11} L${scorePillX + 13},${scorePillY + 16} L${scorePillX + 22},${scorePillY + 6}`}
+                    d={`M${scorePillX + 8 * metrics.kx},${scorePillY + 11 * metrics.ky} L${scorePillX + 13 * metrics.kx},${scorePillY + 16 * metrics.ky} L${scorePillX + 22 * metrics.kx},${scorePillY + 6 * metrics.ky}`}
                     stroke="#fff"
-                    strokeWidth={2.5}
+                    strokeWidth={2.5 * metrics.ky}
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     fill="none"
@@ -1683,24 +1965,24 @@ function MatchBox({
                     <rect
                       x={scorePillX}
                       y={scorePillY}
-                      width={SCORE_PILL_WIDTH}
-                      height={22}
+                      width={metrics.scorePillWidth}
+                      height={metrics.scorePillHeight}
                       rx={4}
                       fill={isWinner ? COLORS.winnerScore : COLORS.loserScore}
                     />
                     {/* Same measured-baseline fix as the DQ pill's own
                         text above. */}
                     <text
-                      x={scorePillX + SCORE_PILL_WIDTH / 2}
+                      x={scorePillX + metrics.scorePillWidth / 2}
                       y={verticalCenterBaselineY(
                         String(score),
-                        scorePillY + 11,
-                        13,
+                        scorePillY + metrics.scorePillHeight / 2,
+                        metrics.scorePillFontSize,
                         300,
                       )}
                       textAnchor="middle"
                       fill="#fff"
-                      fontSize={13}
+                      fontSize={metrics.scorePillFontSize}
                       fontWeight={300}
                     >
                       {score}
@@ -1727,18 +2009,20 @@ function ElapsedTimerPill({
   startedAt,
   nowMs,
   color,
+  metrics,
 }: {
   x: number;
   y: number;
   startedAt: number;
   nowMs: number;
   color: string;
+  metrics: BracketMetrics;
 }) {
   const elapsedSec = Math.max(0, Math.round(nowMs / 1000 - startedAt));
   const mm = Math.floor(elapsedSec / 60);
   const ss = elapsedSec % 60;
   const label = `${mm}:${ss.toString().padStart(2, "0")}`;
-  const height = 22;
+  const height = metrics.statusPillHeight;
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
       {/* rx={height/2} (a true pill/capsule), not a barely-rounded
@@ -1747,7 +2031,7 @@ function ElapsedTimerPill({
           (borderRadius: 999), whose "Live"/"Final"/"Upcoming" pill this
           is the bracket view's own equivalent of. */}
       <rect
-        width={LIVE_TIMER_WIDTH}
+        width={metrics.liveTimerWidth}
         height={height}
         rx={height / 2}
         fill={color}
@@ -1760,8 +2044,8 @@ function ElapsedTimerPill({
           ink is more robust than trusting the font's own baseline-table
           metrics. */}
       <text
-        x={LIVE_TIMER_WIDTH / 2}
-        y={verticalCenterBaselineY(label, height / 2, 12, 300)}
+        x={metrics.liveTimerWidth / 2}
+        y={verticalCenterBaselineY(label, height / 2, metrics.pillFontSize, 300)}
         textAnchor="middle"
         // COLORS.panel (dark), not white -- matches
         // gauntlet-pools.tsx's own statusPillStyle convention (dark
@@ -1770,7 +2054,7 @@ function ElapsedTimerPill({
         // or COLORS.called).
         fill={COLORS.panel}
         fontWeight={300}
-        fontSize={12}
+        fontSize={metrics.pillFontSize}
       >
         {label}
       </text>
@@ -1788,17 +2072,19 @@ function UpNextPill({
   x,
   y,
   color,
+  metrics,
 }: {
   x: number;
   y: number;
   color: string;
+  metrics: BracketMetrics;
 }) {
-  const height = 22;
+  const height = metrics.statusPillHeight;
   return (
     <g transform={`translate(${x},${y - height / 2})`}>
       {/* Same true-pill shape as ElapsedTimerPill -- see its own doc. */}
       <rect
-        width={UP_NEXT_PILL_WIDTH}
+        width={metrics.upNextPillWidth}
         height={height}
         rx={height / 2}
         fill={color}
@@ -1816,12 +2102,17 @@ function UpNextPill({
           COLORS.panel text fill fix as ElapsedTimerPill, for the same
           contrast reason. */}
       <text
-        x={UP_NEXT_PILL_WIDTH / 2}
-        y={verticalCenterBaselineY("UP NEXT", height / 2, 12, 300)}
+        x={metrics.upNextPillWidth / 2}
+        y={verticalCenterBaselineY(
+          "UP NEXT",
+          height / 2,
+          metrics.pillFontSize,
+          300,
+        )}
         textAnchor="middle"
         fill={COLORS.panel}
         fontWeight={300}
-        fontSize={12}
+        fontSize={metrics.pillFontSize}
       >
         UP NEXT
       </text>
@@ -1834,14 +2125,11 @@ function UpNextPill({
 // promotion pill's own near edge will actually land -- without this
 // living in one place, MatchBox would have to duplicate the same sizing
 // formula by hand and risk drifting out of sync with it.
-const PROMOTION_PILL_HEIGHT = 22;
-const PROMOTION_PILL_PADDING_X = 14;
-const PROMOTION_PILL_CHAR_WIDTH = 10;
-const PROMOTION_PILL_GAP = 20;
-function promotionPillWidth(label: string): number {
+function promotionPillWidth(label: string, metrics: BracketMetrics): number {
   return Math.max(
-    56,
-    label.length * PROMOTION_PILL_CHAR_WIDTH + PROMOTION_PILL_PADDING_X * 2,
+    56 * metrics.kx,
+    label.length * metrics.promotionPillCharWidth +
+      metrics.promotionPillPaddingX * 2,
   );
 }
 
@@ -1873,16 +2161,18 @@ function PromotionPill({
   y,
   side,
   boxEdgeX,
+  metrics,
 }: {
   label: string;
   edgeX: number;
   y: number;
   side: "left" | "right";
   boxEdgeX?: number;
+  metrics: BracketMetrics;
 }) {
-  const height = PROMOTION_PILL_HEIGHT;
-  const width = promotionPillWidth(label);
-  const gap = PROMOTION_PILL_GAP;
+  const height = metrics.promotionPillHeight;
+  const width = promotionPillWidth(label, metrics);
+  const gap = metrics.promotionPillGap;
   const pillX = side === "right" ? edgeX + gap : edgeX - gap - width;
   const pillNearEdgeX = side === "right" ? pillX : pillX + width;
   return (
@@ -1914,10 +2204,10 @@ function PromotionPill({
           pill sit on the same y and visibly need to actually agree. */}
       <text
         x={pillX + width / 2}
-        y={verticalCenterBaselineY(label, y, 11, 300)}
+        y={verticalCenterBaselineY(label, y, metrics.smallPillFontSize, 300)}
         textAnchor="middle"
         fill={COLORS.muted}
-        fontSize={11}
+        fontSize={metrics.smallPillFontSize}
         fontWeight={300}
       >
         {label}
@@ -1930,9 +2220,29 @@ function PromotionPill({
  * show its bracket-position letter (e.g. "A") -- shape traced from the
  * real SVG path on their bracket page, just sized up a little to match
  * this component's bigger boxes/text. */
-function IdentifierTag({ label, y }: { label: string; y: number }) {
+function IdentifierTag({
+  label,
+  y,
+  metrics,
+}: {
+  label: string;
+  y: number;
+  metrics: BracketMetrics;
+}) {
+  // Every coordinate below (the path, x=12, the baseline args) stays at
+  // its own original, unscaled local value -- this outer transform does
+  // ALL the scaling, uniformly, for the whole shape at once. translate
+  // uses -16*s/y-10*s (not the plain -16/y-10 a naive read might expect)
+  // specifically so the tag's own local anchor point (16,10 -- roughly
+  // its visual center, where the label sits) maps to the exact same
+  // final position (0, y) at every scale: plug px=16,py=10 into
+  // `(s*(px-16), y+s*(py-10))` (what this composition works out to) and
+  // the s cancels out entirely. Without that, the tag would drift away
+  // from rowDividerY as metrics.identifierTagScale moved away from 1,
+  // instead of just growing/shrinking in place around it.
+  const s = metrics.identifierTagScale;
   return (
-    <g transform={`translate(-16,${y - 10})`}>
+    <g transform={`translate(${-16 * s},${y - 10 * s}) scale(${s})`}>
       <path
         d="M4,0 H19 Q20.5,0 21.5,1 L29,10 Q30,10 29,10 L21.5,19 Q20.5,20 19,20 H4 A4,4 0 0 1 0,16 V4 A4,4 0 0 1 4,0 Z"
         fill={COLORS.identifier}
