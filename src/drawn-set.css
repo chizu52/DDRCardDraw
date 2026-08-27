@@ -22,11 +22,19 @@
 body:global(.obs-layer) .drawing {
   background-image: none !important;
 }
+/* Same layout rules as .chartList above (the "Cards" OBS source) --
+   explicit user request so a card's own width/height respond to the
+   OBS canvas the same way in both sources. Used to be `flex-wrap:
+   nowrap; flex-shrink: 0`, squeezing every pick into one row that got
+   thinner (but never shorter -- .chart's own min-height:200px doesn't
+   shrink with it) the more picks there were, instead of wrapping onto
+   a new row like .chartList already does -- the actual source of
+   "these don't scale the same," not just a coincidental difference. */
 .specialPicksSource {
   display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 10px;
   padding: 10px;
-  flex-shrink: 0;
+  overflow: hidden;
+  flex-wrap: wrap;
+  justify-content: space-evenly;
+  align-items: center;
 }

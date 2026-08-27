@@ -40,14 +40,18 @@
 :global(.chart-list-original) .popoverWrapper:has(.tiebreaker) {
   opacity: 1;
 }
-:global(.special-picks-source) .popoverWrapper {
-  flex: 1 1 0;
-  margin: 2px 10px
-}
-:global(.special-picks-source) .chart {
-  transform: scale(1) !important;
-  margin: 25px auto !important;
-}
+/* No more special-picks-source-specific overrides here (used to force
+   `.popoverWrapper` to `flex: 1 1 0` + a small fixed margin, and
+   `.chart` to a hard `transform: scale(1) !important` + a big fixed
+   margin) -- explicit user request to make this OBS source's cards
+   size the same way "Cards" (.chart-list-original)'s do. Both now rely
+   entirely on .popoverWrapper's/.chart's own plain base rules above
+   (flex: 1 0 0 / flex: 1 1 0, min/max-width, the normal protect/veto/
+   tiebreaker scale transforms), same as every other card grid in this
+   app -- .specialPicksSource's own flex-wrap: wrap (see drawn-set.css)
+   is what keeps cards from squeezing arbitrarily thin now, not a
+   .chart-level override.
+*/
 .chart {
   display: flex !important;
   flex: 1 1 0;
@@ -86,6 +90,22 @@
   background-position: center;
   background-repeat: no-repeat;
   background-size: cover;
+  /* This element both paints its own background-image (the jacket, via
+     an inline backgroundImage style) AND clips a child -- .cardFooter's
+     own backgroundColor band -- through this same overflow:hidden +
+     border-radius, while ALSO being the thing .protected/.replaced/
+     .tiebreaker (scale(1.1)) and .vetoed (scale(0.95)) transform. At a
+     non-integer scale like 1.1x, the background layer and the child-
+     element layer can rasterize through that rounded clip a hair
+     differently, leaving a thin seam where the jacket shows through at
+     the footer's own rounded corner (confirmed live: the footer's own
+     rect is pixel-perfect relative to the card's border-inset edge, so
+     this isn't a wrong CSS value, just the two layers' clip edges not
+     quite agreeing once scaled). Forces this element onto its own GPU
+     compositing layer, so overflow-clip + background + children
+     rasterize together as one bitmap that then gets scaled as a single
+     unit, instead of two separately-antialiased layers. */
+  will-change: transform;
 }
 .chart.clickable {
   cursor: pointer;
