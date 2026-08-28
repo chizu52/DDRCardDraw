@@ -3701,7 +3701,7 @@
         { "lvl": 20, "diffClass": "D", "style": "solo" },
         { "lvl": 3, "diffClass": "S", "style": "solo" },
         { "lvl": 15, "diffClass": "S", "style": "solo" },
-        { "lvl": 1, "diffClass": "C2", "style": "coop" }
+        { "lvl": 5, "diffClass": "C2", "style": "coop" }
       ]
     },
     {
@@ -5982,7 +5982,7 @@
         { "lvl": 12, "diffClass": "D", "style": "solo" },
         { "lvl": 18, "diffClass": "D", "style": "solo" },
         { "lvl": 20, "diffClass": "D", "style": "solo" },
-        { "lvl": 1, "diffClass": "C2", "style": "coop" }
+        { "lvl": 5, "diffClass": "C2", "style": "coop" }
       ]
     },
     {
